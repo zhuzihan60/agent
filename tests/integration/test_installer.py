@@ -42,6 +42,20 @@ def test_installer_scripts_exist() -> None:
     assert INSTALL_LIB.is_file()
 
 
+def test_public_bootstrap_is_self_contained_and_fail_closed() -> None:
+    bootstrap_path = ROOT / "install-a4diag.sh"
+    assert bootstrap_path.is_file()
+    bootstrap = bootstrap_path.read_text(encoding="utf-8")
+    assert "set -euo pipefail" in bootstrap
+    assert "github.com/zhuzihan60/agent/releases/latest/download/a4diag.tar.gz" in bootstrap
+    assert "github.com/zhuzihan60/agent/releases/latest/download/a4diag.tar.gz.sig" in bootstrap
+    assert "openssl dgst -sha256 -verify" in bootstrap
+    assert "BEGIN PUBLIC KEY" in bootstrap
+    assert "A4DIAG_TRUSTED_KEY" in bootstrap
+    assert "A4DIAG_ALLOW_UNSIGNED" not in bootstrap
+    assert "BEGIN PRIVATE KEY" not in bootstrap
+
+
 def test_installer_is_fail_closed_by_default() -> None:
     install = INSTALL_SH.read_text(encoding="utf-8")
     lib = INSTALL_LIB.read_text(encoding="utf-8")
@@ -80,6 +94,8 @@ def test_installer_verifies_release_before_extraction() -> None:
     assert "sha256sum -c SHA256SUMS" in lib
     assert "MANIFEST.sig" in lib
     assert "a4diag_verify_release" in lib
+    assert "openssl dgst -sha256 -verify" in lib
+    assert "hmac" not in lib
 
 
 def test_installer_has_no_fixed_target_literals() -> None:

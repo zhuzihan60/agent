@@ -378,9 +378,39 @@ class ReleaseBuildContractTests(unittest.TestCase):
                 output,
                 _,
             ) = self.create_assembly_fixture(root)
-            signing_key = root / "release.key"
-            # The signing key file is read as raw bytes by both release tools.
-            signing_key.write_text("ab" * 32, encoding="utf-8")
+            signing_key = root / "release-private.pem"
+            verification_key = root / "release-public.pem"
+            generated = subprocess.run(
+                [
+                    "openssl",
+                    "genpkey",
+                    "-algorithm",
+                    "RSA",
+                    "-pkeyopt",
+                    "rsa_keygen_bits:2048",
+                    "-out",
+                    str(signing_key),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(generated.returncode, 0, msg=generated.stderr)
+            exported = subprocess.run(
+                [
+                    "openssl",
+                    "pkey",
+                    "-in",
+                    str(signing_key),
+                    "-pubout",
+                    "-out",
+                    str(verification_key),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(exported.returncode, 0, msg=exported.stderr)
 
             def run_verify() -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
@@ -390,8 +420,8 @@ class ReleaseBuildContractTests(unittest.TestCase):
                         "verify-release",
                         "--release-root",
                         str(output),
-                        "--signing-key",
-                        str(signing_key),
+                        "--verification-key",
+                        str(verification_key),
                     ],
                     check=False,
                     capture_output=True,
@@ -424,6 +454,13 @@ class ReleaseBuildContractTests(unittest.TestCase):
             verified = run_verify()
             self.assertEqual(verified.returncode, 0, msg=verified.stderr)
             self.assertTrue((output / "MANIFEST.sig").is_file())
+
+            original_signature = (output / "MANIFEST.sig").read_bytes()
+            (output / "MANIFEST.sig").write_bytes(b"invalid-signature")
+            bad_signature = run_verify()
+            self.assertEqual(bad_signature.returncode, 2)
+            self.assertIn("signature mismatch", bad_signature.stderr)
+            (output / "MANIFEST.sig").write_bytes(original_signature)
 
             (output / "wheelhouse" / core_wheel.name).write_bytes(b"tampered")
             rejected = run_verify()

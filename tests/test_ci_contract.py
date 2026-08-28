@@ -175,7 +175,7 @@ def test_distro_smoke_preserves_unsigned_test_and_signed_release_boundaries() ->
         for step in release_steps
         if step.get("name") == "Write the verification key from repository secret material"
     )
-    assert "secrets.A4DIAG_RELEASE_KEY" in key_step.get("run", "")
+    assert "secrets.A4DIAG_RELEASE_PRIVATE_KEY" in key_step.get("run", "")
     release_smoke = next(
         step for step in release_steps if "distro_smoke.sh" in step.get("run", "")
     )
@@ -183,6 +183,41 @@ def test_distro_smoke_preserves_unsigned_test_and_signed_release_boundaries() ->
         "/tmp/a4diag-release.key"
     )
     assert "A4DIAG_ALLOW_UNSIGNED" not in release_smoke.get("env", {})
+
+
+def test_release_workflow_publishes_one_click_assets_after_linux_gates() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    )
+    publish = workflow["jobs"]["publish"]
+    assert set(publish["needs"]) >= {"verify", "assemble-and-sign", "distro-smoke"}
+    commands = "\n".join(
+        step.get("run", "") for step in publish["steps"] if "run" in step
+    )
+    assert "a4diag.tar.gz" in commands
+    assert "a4diag.tar.gz.sig" in commands
+    assert "install-a4diag.sh" in commands
+    release_step = next(
+        step for step in publish["steps"] if step.get("name") == "Create GitHub release"
+    )
+    files = release_step["with"]["files"]
+    assert "a4diag.tar.gz" in files
+    assert "a4diag.tar.gz.sig" in files
+    assert "install-a4diag.sh" in files
+
+
+def test_release_workflow_runs_the_public_bootstrap_in_linux() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    )
+    commands = "\n".join(
+        step.get("run", "")
+        for step in workflow["jobs"]["distro-smoke"]["steps"]
+        if "run" in step
+    )
+    assert "install-a4diag.sh" in commands
+    assert "A4DIAG_RELEASE_URL" in commands
+    assert "A4DIAG_RELEASE_SIGNATURE_URL" in commands
 
 
 def test_ci_build_job_generates_verified_wheelhouse() -> None:
