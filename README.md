@@ -1,7 +1,8 @@
 # A4Diag 0.4.0
 
 Generic, fail-closed diagnostics agent with a pinned plugin runtime,
-digest-bound CLI approvals, an atomic offline/online installer, and hardened
+digest-bound CLI approvals, a signed online bootstrap plus atomic offline
+installer, and hardened
 systemd units. Targets resolve **only by registered id** — never by IP and
 never by fallback; HIGH-risk operations always require a human CLI approval;
 unknown executions are never replayed.
@@ -19,6 +20,9 @@ sudo a4diag self-check --offline
 The bootstrap downloads the latest GitHub Release, verifies its RSA/SHA-256
 signature with the public key pinned in the script, and then invokes the same
 fail-closed offline installer. It never enables writes or registers a target.
+The one-line command trusts the first HTTPS download from GitHub and control of
+this repository; the embedded key then authenticates the release archive before
+anything is extracted.
 
 For an air-gapped host, download and verify the signed Release assets first,
 then use `sudo A4DIAG_TRUSTED_KEY=/path/to/a4diag-release-public.pem

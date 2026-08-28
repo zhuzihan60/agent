@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 #
-# A4Diag atomic online/offline installer.
+# A4Diag atomic offline installer.
 #
 #   sudo ./install.sh --offline /path/to/release-dir
-#   sudo ./install.sh --online            # fetches $A4DIAG_RELEASE_URL
 #
 # Fail-closed: requires root and a supported distribution, verifies the
 # release SHA256 and RSA signature before extraction, stages
@@ -20,48 +19,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$SCRIPT_DIR/tools/install_lib.sh"
 
 usage() {
-  echo "usage: install.sh --offline RELEASE_DIR | --online" >&2
+  echo "usage: install.sh --offline RELEASE_DIR" >&2
   exit 2
 }
 
-[ $# -ge 1 ] || usage
-
-MODE="$1"
-shift || true
-
-case "$MODE" in
-  --offline)
-    [ $# -eq 1 ] || usage
-    RELEASE_DIR="$1"
-    [ -d "$RELEASE_DIR" ] || die "release directory missing: $RELEASE_DIR"
-    ;;
-  --online)
-    RELEASE_DIR=""
-    ;;
-  *)
-    usage
-    ;;
-esac
+[ $# -eq 2 ] || usage
+[ "$1" = "--offline" ] || usage
+RELEASE_DIR="$2"
+[ -d "$RELEASE_DIR" ] || die "release directory missing: $RELEASE_DIR"
 
 a4diag_require_root
 a4diag_check_distro
 a4diag_require_commands
 a4diag_check_disk
-
-if [ -z "$RELEASE_DIR" ]; then
-  url="${A4DIAG_RELEASE_URL:-https://releases.a4diag.example/v${A4DIAG_EXPECTED_VERSION}/a4diag-${A4DIAG_EXPECTED_VERSION}.tar.gz}"
-  temp_dir="$(mktemp -d)"
-  trap 'rm -rf "$temp_dir"' EXIT
-  log "fetching release from $url"
-  if [[ "$url" == file://* ]]; then
-    cp -a "${url#file://}" "$temp_dir/release.tar.gz"
-  else
-    curl -fsSL --max-time 600 -o "$temp_dir/release.tar.gz" "$url"
-  fi
-  tar -xzf "$temp_dir/release.tar.gz" -C "$temp_dir"
-  RELEASE_DIR="$temp_dir/release"
-  [ -d "$RELEASE_DIR" ] || die "downloaded archive did not contain a release/ directory"
-fi
 
 a4diag_install_release_tree "$RELEASE_DIR"
 log "done: a4diag ${A4DIAG_EXPECTED_VERSION}"

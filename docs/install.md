@@ -40,6 +40,11 @@ latest GitHub Release. It verifies the archive before extraction using its
 pinned RSA public key, then the offline installer verifies every internal hash
 and the signed `MANIFEST.json` again.
 
+The `curl | sudo bash` convenience form trusts the first HTTPS response from
+GitHub and control of this repository. For a stricter first install, download
+`install-a4diag.sh`, inspect it, and run the saved file; all later archive
+contents are still authenticated by the public key embedded in that script.
+
 ## What the installer does
 
 1. Requires root and a supported distribution (`/etc/os-release`).

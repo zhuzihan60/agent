@@ -48,6 +48,10 @@ jobs:
             --python-version 3.11 --implementation cp --abi cp311
           cd /tmp/a4diag-wheelhouse
           for wheel in *.whl; do sha256sum "$wheel" >> SHA256SUMS; done
+      - name: Bind release tag to project version
+        run: |
+          release_version="$(python -c 'from tools.build_release import RELEASE_VERSION; print(RELEASE_VERSION)')"
+          test "$GITHUB_REF_NAME" = "v${release_version}"
       - name: Write the private signing key from repository secret material
         run: |
           printf '%s' "${{ secrets.A4DIAG_RELEASE_PRIVATE_KEY }}" > /tmp/a4diag-release-private.pem
@@ -78,6 +82,8 @@ jobs:
           cp release-keys/a4diag-release-public.pem \
             /tmp/a4diag-public-assets/a4diag-release-public.pem
           rm -rf /tmp/a4diag-public-assets/archive-root
+      - name: Remove the private signing key
+        run: rm -f /tmp/a4diag-release-private.pem
       - name: Upload signed release
         uses: actions/upload-artifact@v4
         with:
@@ -136,6 +142,20 @@ jobs:
         env:
           A4DIAG_TRUSTED_KEY: /tmp/a4diag-release-public.pem
         run: bash tests/integration/distro_smoke.sh
+      - name: Reject a tampered public release archive
+        run: |
+          cp /public-assets/a4diag.tar.gz /tmp/a4diag-tampered.tar.gz
+          printf 'tamper\n' >> /tmp/a4diag-tampered.tar.gz
+          mkdir -p /tmp/a4diag-tampered-root/opt
+          if A4DIAG_RELEASE_URL=file:///tmp/a4diag-tampered.tar.gz \
+             A4DIAG_RELEASE_SIGNATURE_URL=file:///public-assets/a4diag.tar.gz.sig \
+             A4DIAG_ROOT=/tmp/a4diag-tampered-root/ \
+             A4DIAG_SKIP_SYSTEMD=1 A4DIAG_SKIP_DISK=1 \
+             bash /public-assets/install-a4diag.sh; then
+            echo "bootstrap must reject a tampered archive" >&2
+            exit 1
+          fi
+          test ! -e /tmp/a4diag-tampered-root/opt/a4diag/current
       - name: Public one-click bootstrap smoke
         env:
           A4DIAG_RELEASE_URL: file:///public-assets/a4diag.tar.gz

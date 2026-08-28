@@ -59,4 +59,6 @@ release_dir="$temporary/release"
 [ -f "$release_dir/install.sh" ] || die "signed archive is missing release/install.sh"
 
 echo "a4diag bootstrap: archive signature verified"
-A4DIAG_TRUSTED_KEY="$public_key" bash "$release_dir/install.sh" --offline "$release_dir"
+A4DIAG_ALLOW_UNSIGNED=0 \
+  A4DIAG_TRUSTED_KEY="$public_key" \
+  bash "$release_dir/install.sh" --offline "$release_dir"
