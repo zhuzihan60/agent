@@ -105,7 +105,7 @@ decide to remove them.
 ## Development
 
 ```bash
-python -m pytest -q          # full suite (documented POSIX skips on Windows)
+python -m pytest -q          # full Linux suite
 python -m pytest tests/acceptance -q
 ```
 

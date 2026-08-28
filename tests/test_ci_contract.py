@@ -1,10 +1,10 @@
 """CI contract: the distribution matrix, release workflow, smoke script, and
 documented-skip policy.
 
-Windows may keep only skips that carry an explicit reason; every pytest.skip /
-skipif in the suite must be documented. The distro matrix must cover every
-supported distribution, and the smoke script must assert offline install,
-read-only defaults, and that no service can write the configuration.
+Every pytest.skip / skipif in the suite must be documented. The distro matrix
+must cover every supported Linux distribution, and the smoke script must
+assert offline install, read-only defaults, and that no service can write the
+configuration.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 SUPPORTED_IMAGES = {
+    "alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:3.9.1",
     "rockylinux:8",
     "rockylinux:9",
     "almalinux:8",
@@ -95,7 +96,6 @@ def test_test_jobs_install_both_local_packages_before_pytest() -> None:
 
     cases = (
         ("test.yml", "unit"),
-        ("test.yml", "windows-documented-skips"),
         ("release.yml", "verify"),
     )
     for workflow_name, job_name in cases:
@@ -118,22 +118,16 @@ def test_test_jobs_install_both_local_packages_before_pytest() -> None:
         )
 
 
-def test_windows_job_has_hashed_mcp_platform_dependency_and_fail_fast_shell() -> None:
+def test_production_ci_and_runtime_lock_are_linux_only() -> None:
     requirements = (ROOT / "requirements.lock").read_text(encoding="utf-8")
-    assert re.search(
-        r"^pywin32==312\s*;\s*sys_platform\s*==\s*['\"]win32['\"]\s*\\$",
-        requirements,
-        re.MULTILINE,
-    )
-    assert "--hash=sha256:d11417d84412f859b722fad0841b3614459ed0047f7542d8362e77884f6b6e8a" in requirements
+    assert "pywin32" not in requirements.lower()
 
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "test.yml").read_text())
-    install_step = next(
-        step
-        for step in workflow["jobs"]["windows-documented-skips"]["steps"]
-        if step.get("name") == "Install build/test dependencies"
+    workflow_text = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+        encoding="utf-8"
     )
-    assert install_step.get("shell") == "bash"
+    workflow = yaml.safe_load(workflow_text)
+    assert "windows-latest" not in workflow_text.lower()
+    assert all("windows" not in name.lower() for name in workflow["jobs"])
 
 
 def test_distro_smoke_preserves_unsigned_test_and_signed_release_boundaries() -> None:
@@ -176,6 +170,15 @@ def test_ci_build_job_generates_verified_wheelhouse() -> None:
     assert "pip download -r requirements.lock" in steps
     assert "sha256sum" in steps
     assert "packages/a4diag-builtin-plugins/dist/" in steps
+    for flag in (
+        "--only-binary=:all:",
+        "--platform manylinux_2_28_x86_64",
+        "--platform manylinux2014_x86_64",
+        "--python-version 3.11",
+        "--implementation cp",
+        "--abi cp311",
+    ):
+        assert flag in steps
 
     release_workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text()
@@ -186,6 +189,15 @@ def test_ci_build_job_generates_verified_wheelhouse() -> None:
     )
     assert "pip download -r requirements.lock" in release_steps
     assert "packages/a4diag-builtin-plugins/dist/" in release_steps
+    for flag in (
+        "--only-binary=:all:",
+        "--platform manylinux_2_28_x86_64",
+        "--platform manylinux2014_x86_64",
+        "--python-version 3.11",
+        "--implementation cp",
+        "--abi cp311",
+    ):
+        assert flag in release_steps
 
 
 def test_distro_smoke_script_enforces_read_only_defaults() -> None:

@@ -53,10 +53,11 @@ a4diag_check_distro() {
   id="$(grep -E '^ID=' "$os_release" | head -n1 | cut -d= -f2- | tr -d '"')"
   version="$(grep -E '^VERSION_ID=' "$os_release" | head -n1 | cut -d= -f2- | tr -d '"')"
   case "$id:$version" in
+    alinux:3|alinux:3.*) ;;
     rocky:8|rocky:8.*|rocky:9|rocky:9.*|almalinux:8|almalinux:8.*|almalinux:9|almalinux:9.*|rhel:8|rhel:8.*|rhel:9|rhel:9.*) ;;
     ubuntu:22.04|ubuntu:24.04|debian:12) ;;
     *)
-      die "unsupported distribution $id:$version (supported: rocky/almalinux/rhel 8-9, ubuntu 22.04/24.04, debian 12)"
+      die "unsupported distribution $id:$version (supported: Alibaba Cloud Linux 3, rocky/almalinux/rhel 8-9, ubuntu 22.04/24.04, debian 12)"
       ;;
   esac
   log "supported distribution: $id $version"

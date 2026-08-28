@@ -41,7 +41,11 @@ jobs:
           python -m build --wheel packages/a4diag-builtin-plugins
       - name: Build verified dependency wheelhouse from the lockfile
         run: |
-          python -m pip download -r requirements.lock -d /tmp/a4diag-wheelhouse --no-deps
+          python -m pip download -r requirements.lock -d /tmp/a4diag-wheelhouse \
+            --no-deps --only-binary=:all: \
+            --platform manylinux_2_28_x86_64 \
+            --platform manylinux2014_x86_64 \
+            --python-version 3.11 --implementation cp --abi cp311
           cd /tmp/a4diag-wheelhouse
           for wheel in *.whl; do sha256sum "$wheel" >> SHA256SUMS; done
       - name: Write the signing key from repository secret material
@@ -75,6 +79,7 @@ jobs:
       fail-fast: false
       matrix:
         image:
+          - alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:3.9.1
           - rockylinux:8
           - rockylinux:9
           - almalinux:8

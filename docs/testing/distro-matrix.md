@@ -5,6 +5,7 @@ A4Diag 0.4.0 is tested on every supported distribution in CI
 
 | Distribution | Version | Container image |
 | --- | --- | --- |
+| Alibaba Cloud Linux | 3 | `alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:3.9.1` |
 | Rocky Linux | 8, 9 | `rockylinux:8`, `rockylinux:9` |
 | AlmaLinux | 8, 9 | `almalinux:8`, `almalinux:9` |
 | Ubuntu | 22.04, 24.04 | `ubuntu:22.04`, `ubuntu:24.04` |
@@ -15,10 +16,9 @@ configured licensed runner; no credentials appear in the workflow files.
 
 ## Gates per matrix job
 
-- **unit** (Python 3.11): full `pytest -q -rs` — unit, contract, integration,
-  acceptance suites. Windows runs the same suite; only documented POSIX skips
-  are allowed (AF_UNIX, symlink privilege, mode/owner, and the bash installer
-  harness), each carrying an explicit reason.
+- **unit** (Python 3.11 on Linux): full `pytest -q -rs` — unit, contract,
+  integration, and acceptance suites. Windows is not a supported runtime or
+  release gate.
 - **build**: builds the exact `a4diag-0.4.0-py3-none-any.whl` and
   `a4diag_builtin_plugins-0.4.0-py3-none-any.whl`, runs
   `verify-source` (no fixed-target literals) and `verify-release`.
@@ -31,15 +31,13 @@ configured licensed runner; no credentials appear in the workflow files.
   runs the distro smoke on the signed release, and publishes only after all
   required jobs succeed.
 
-## POSIX-only gates (skipped on Windows with documented reasons)
+## Linux-only gates
 
 - AF_UNIX socket tests (contract harness)
 - symlink creation tests
 - POSIX file mode 0600 / owner checks
 - init-config POSIX mode gate
-- the bash installer harness (msys2 bash cannot start under the Windows file
-  sandbox); the installer's static contract is asserted on all platforms and
-  the full harness runs on the Linux matrix
+- the bash installer harness and systemd isolation checks
 
 ## Explicitly not executed
 

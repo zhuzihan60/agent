@@ -98,6 +98,8 @@ def test_installer_declares_rhel_family_point_release_support() -> None:
     for distro in ("rocky", "almalinux", "rhel"):
         for major in ("8", "9"):
             assert f"{distro}:{major}.*" in lib
+    assert "alinux:3" in lib
+    assert "alinux:3.*" in lib
 
 
 def test_install_lib_creates_systemd_identities() -> None:
@@ -413,7 +415,14 @@ def test_offline_install_invokes_pip_without_index(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("distro", "version"),
-    (("almalinux", "8.10"), ("almalinux", "9.8"), ("rocky", "9.5"), ("rhel", "8.10")),
+    (
+        ("almalinux", "8.10"),
+        ("almalinux", "9.8"),
+        ("rocky", "9.5"),
+        ("rhel", "8.10"),
+        ("alinux", "3"),
+        ("alinux", "3.2104"),
+    ),
 )
 @POSIX
 def test_install_accepts_supported_rhel_family_point_releases(

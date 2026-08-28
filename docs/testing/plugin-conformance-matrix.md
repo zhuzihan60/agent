@@ -4,8 +4,8 @@ All built-in plugins are validated by one shared harness
 (`tests/contract/test_all_manifests.py`) plus the shared host contract
 (`tests/contract/test_plugin_protocol.py`, `test_plugin_crash_matrix.py`) and
 the per-family suites (`test_transport_plugins.py`, `test_capability_plugins.py`,
-`test_model_plugin.py`, `test_notification_plugins.py`). Windows skips are the
-audited AF_UNIX/symlink capability gates that must rerun on Linux in Phase 4.
+`test_model_plugin.py`, `test_notification_plugins.py`). AF_UNIX, symlink,
+permission, and owner capability gates run as mandatory Linux release checks.
 
 ## Manifests
 
@@ -76,6 +76,6 @@ audited AF_UNIX/symlink capability gates that must rerun on Linux in Phase 4.
 
 ## Phase 4 Linux gates
 
-Six real AF_UNIX host/client/path cases and two symlink-privilege cases skip on
-Windows and are mandatory Linux Phase 4 gates; no permission, invalid-path, or
-broad `OSError` skip is accepted as release evidence.
+Six real AF_UNIX host/client/path cases and two symlink-privilege cases are
+mandatory Linux Phase 4 gates; no permission, invalid-path, or broad `OSError`
+skip is accepted as release evidence.
