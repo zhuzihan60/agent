@@ -66,6 +66,31 @@ def test_distro_jobs_provision_portable_python_311_before_offline_install() -> N
         assert setup_uv_index < install_python_index < smoke_index
 
 
+def test_alibaba_linux_bootstraps_archive_tools_before_checkout() -> None:
+    for workflow_name, job_name in (
+        ("test.yml", "distro"),
+        ("release.yml", "distro-smoke"),
+    ):
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / workflow_name).read_text()
+        )
+        steps = workflow["jobs"][job_name]["steps"]
+        bootstrap_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.get("name") == "Bootstrap Alibaba Cloud Linux actions prerequisites"
+        )
+        checkout_index = next(
+            index
+            for index, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("actions/checkout@")
+        )
+        bootstrap = steps[bootstrap_index]
+        assert "alibaba-cloud-linux-3-registry" in bootstrap.get("if", "")
+        assert "yum -y install tar gzip" in bootstrap.get("run", "")
+        assert bootstrap_index < checkout_index
+
+
 def test_release_workflow_triggers_on_version_tags_only() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text()
