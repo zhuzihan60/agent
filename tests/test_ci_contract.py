@@ -57,6 +57,36 @@ def test_workflows_contain_no_literal_credentials() -> None:
         assert "token" not in stripped
 
 
+def test_test_jobs_install_both_local_packages_before_pytest() -> None:
+    """Every workflow that runs the source-tree tests must install both
+    src-layout packages first, without asking pip to resolve dependencies.
+    """
+
+    cases = (
+        ("test.yml", "unit"),
+        ("test.yml", "windows-documented-skips"),
+        ("release.yml", "verify"),
+    )
+    for workflow_name, job_name in cases:
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / workflow_name).read_text()
+        )
+        commands = [
+            step["run"]
+            for step in workflow["jobs"][job_name]["steps"]
+            if "run" in step
+        ]
+        pytest_index = next(
+            index for index, command in enumerate(commands) if "pytest" in command
+        )
+        before_pytest = "\n".join(commands[: pytest_index + 1])
+        assert "pip install --no-deps -e ." in before_pytest
+        assert (
+            "pip install --no-deps -e packages/a4diag-builtin-plugins"
+            in before_pytest
+        )
+
+
 def test_ci_build_job_generates_verified_wheelhouse() -> None:
     """The CI build job must build the dependency wheelhouse from the lockfile
     and reference the builtin wheel at its real output path."""
