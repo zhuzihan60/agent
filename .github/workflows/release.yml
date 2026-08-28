@@ -48,10 +48,10 @@ jobs:
             --python-version 3.11 --implementation cp --abi cp311
           cd /tmp/a4diag-wheelhouse
           for wheel in *.whl; do sha256sum "$wheel" >> SHA256SUMS; done
-      - name: Write the signing key from repository secret material
+      - name: Write the private signing key from repository secret material
         run: |
-          printf '%s' "${{ secrets.A4DIAG_RELEASE_KEY }}" > /tmp/a4diag-release.key
-          chmod 0600 /tmp/a4diag-release.key
+          printf '%s' "${{ secrets.A4DIAG_RELEASE_PRIVATE_KEY }}" > /tmp/a4diag-release-private.pem
+          chmod 0600 /tmp/a4diag-release-private.pem
       - name: Assemble and sign the release
         run: |
           python tools/build_release.py assemble \
@@ -60,15 +60,35 @@ jobs:
             --core-wheel dist/a4diag-0.4.0-py3-none-any.whl \
             --builtin-wheel packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-0.4.0-py3-none-any.whl \
             --output /tmp/a4diag-release \
-            --signing-key /tmp/a4diag-release.key
+            --signing-key /tmp/a4diag-release-private.pem
           python tools/build_release.py verify-release \
             --release-root /tmp/a4diag-release \
-            --signing-key /tmp/a4diag-release.key
+            --verification-key deploy/a4diag-release-public.pem
+      - name: Stage stable one-click release assets
+        run: |
+          mkdir -p /tmp/a4diag-public-assets/archive-root
+          cp -a /tmp/a4diag-release /tmp/a4diag-public-assets/archive-root/release
+          tar -czf /tmp/a4diag-public-assets/a4diag.tar.gz \
+            -C /tmp/a4diag-public-assets/archive-root release
+          openssl dgst -sha256 \
+            -sign /tmp/a4diag-release-private.pem \
+            -out /tmp/a4diag-public-assets/a4diag.tar.gz.sig \
+            /tmp/a4diag-public-assets/a4diag.tar.gz
+          cp install-a4diag.sh /tmp/a4diag-public-assets/install-a4diag.sh
+          cp deploy/a4diag-release-public.pem \
+            /tmp/a4diag-public-assets/a4diag-release-public.pem
+          rm -rf /tmp/a4diag-public-assets/archive-root
       - name: Upload signed release
         uses: actions/upload-artifact@v4
         with:
           name: a4diag-signed-release
           path: /tmp/a4diag-release
+          retention-days: 30
+      - name: Upload one-click release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: a4diag-public-assets
+          path: /tmp/a4diag-public-assets
           retention-days: 30
 
   distro-smoke:
@@ -104,14 +124,29 @@ jobs:
         with:
           name: a4diag-signed-release
           path: /release
-      - name: Write the verification key from repository secret material
+      - uses: actions/download-artifact@v4
+        with:
+          name: a4diag-public-assets
+          path: /public-assets
+      - name: Stage pinned public verification key
         run: |
-          printf '%s' "${{ secrets.A4DIAG_RELEASE_KEY }}" > /tmp/a4diag-release.key
-          chmod 0600 /tmp/a4diag-release.key
+          cp deploy/a4diag-release-public.pem /tmp/a4diag-release-public.pem
+          chmod 0644 /tmp/a4diag-release-public.pem
       - name: Distro offline-install smoke on the signed release
         env:
-          A4DIAG_TRUSTED_KEY: /tmp/a4diag-release.key
+          A4DIAG_TRUSTED_KEY: /tmp/a4diag-release-public.pem
         run: bash tests/integration/distro_smoke.sh
+      - name: Public one-click bootstrap smoke
+        env:
+          A4DIAG_RELEASE_URL: file:///public-assets/a4diag.tar.gz
+          A4DIAG_RELEASE_SIGNATURE_URL: file:///public-assets/a4diag.tar.gz.sig
+          A4DIAG_ROOT: /tmp/a4diag-bootstrap-root/
+          A4DIAG_SKIP_SYSTEMD: "1"
+          A4DIAG_SKIP_DISK: "1"
+        run: |
+          mkdir -p /tmp/a4diag-bootstrap-root/opt
+          bash /public-assets/install-a4diag.sh
+          test -L /tmp/a4diag-bootstrap-root/opt/a4diag/current
 
   publish:
     runs-on: ubuntu-latest
@@ -120,12 +155,19 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: a4diag-signed-release
-          path: /release
-      - name: Stage release archive
+          name: a4diag-public-assets
+          path: /release-assets
+      - name: Verify stable release asset inventory
         run: |
-          tar -czf /release/a4diag-${GITHUB_REF_NAME#v}.tar.gz -C / release
+          test -f /release-assets/a4diag.tar.gz
+          test -f /release-assets/a4diag.tar.gz.sig
+          test -f /release-assets/install-a4diag.sh
+          test -f /release-assets/a4diag-release-public.pem
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: /release/a4diag-*.tar.gz
+          files: |
+            /release-assets/a4diag.tar.gz
+            /release-assets/a4diag.tar.gz.sig
+            /release-assets/install-a4diag.sh
+            /release-assets/a4diag-release-public.pem

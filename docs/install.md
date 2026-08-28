@@ -20,10 +20,10 @@ sudo ./install.sh --offline /path/to/release-dir
 ```
 
 The installer verifies `SHA256SUMS` for every artifact. If the release carries
-`MANIFEST.sig`, you must provide the trusted HMAC key:
+`MANIFEST.sig`, provide the trusted RSA public key:
 
 ```bash
-sudo A4DIAG_TRUSTED_KEY=/path/to/release.key ./install.sh --offline /path/to/release-dir
+sudo A4DIAG_TRUSTED_KEY=/path/to/a4diag-release-public.pem ./install.sh --offline /path/to/release-dir
 ```
 
 Unsigned releases are refused unless explicitly accepted with
@@ -32,18 +32,19 @@ Unsigned releases are refused unless explicitly accepted with
 ## Online install
 
 ```bash
-sudo ./install.sh --online
+curl -fsSL https://github.com/zhuzihan60/agent/releases/latest/download/install-a4diag.sh | sudo bash
 ```
 
-The release is fetched from `A4DIAG_RELEASE_URL` (default
-`https://releases.a4diag.example/v0.4.0/a4diag-0.4.0.tar.gz`), extracted,
-verified, and installed exactly like the offline path.
+The bootstrap downloads `a4diag.tar.gz` and its detached signature from the
+latest GitHub Release. It verifies the archive before extraction using its
+pinned RSA public key, then the offline installer verifies every internal hash
+and the signed `MANIFEST.json` again.
 
 ## What the installer does
 
 1. Requires root and a supported distribution (`/etc/os-release`).
 2. Verifies the release `VERSION` lock and every `SHA256SUMS` digest (and the
-   `MANIFEST.sig` HMAC when present).
+   RSA/SHA-256 `MANIFEST.sig` when present).
 3. Stages `/opt/a4diag/releases/<version>`, creates the venv, and installs
    the locked wheels with `--no-index --find-links <wheelhouse>` — no network
    is ever consulted.

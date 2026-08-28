@@ -14,7 +14,7 @@
 #   A4DIAG_SKIP_DISK     set to 1 to skip the disk-space check (tests only)
 #   A4DIAG_INJECT_FAILURE  "before_switch" fails the install before the atomic
 #                          current-link switch (tests only)
-#   A4DIAG_TRUSTED_KEY   path to the HMAC key used to verify MANIFEST.sig
+#   A4DIAG_TRUSTED_KEY   path to the RSA public key used to verify MANIFEST.sig
 #   A4DIAG_ALLOW_UNSIGNED set to 1 to accept a release without MANIFEST.sig
 #   A4DIAG_PIP_LOG       path where the pip argv is recorded (tests only)
 
@@ -64,7 +64,7 @@ a4diag_check_distro() {
 }
 
 a4diag_require_commands() {
-  for command in python3.11 sha256sum grep cut head; do
+  for command in python3.11 sha256sum openssl grep cut head; do
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
   done
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
@@ -134,17 +134,11 @@ PY
 
   if [ -f "$release_dir/MANIFEST.sig" ]; then
     [ -n "${A4DIAG_TRUSTED_KEY:-}" ] || die "release is signed but no A4DIAG_TRUSTED_KEY was provided"
-    python3.11 - "$release_dir/MANIFEST.json" "$release_dir/MANIFEST.sig" "$A4DIAG_TRUSTED_KEY" <<'PY' || die "release manifest signature mismatch"
-import hashlib
-import hmac
-import pathlib
-import sys
-
-manifest, signature, key = map(pathlib.Path, sys.argv[1:])
-expected = hmac.new(key.read_bytes(), manifest.read_bytes(), hashlib.sha256).hexdigest()
-if not hmac.compare_digest(signature.read_text(encoding="utf-8").strip(), expected):
-    raise SystemExit(1)
-PY
+    [ -f "$A4DIAG_TRUSTED_KEY" ] || die "trusted release public key is missing: $A4DIAG_TRUSTED_KEY"
+    openssl dgst -sha256 -verify "$A4DIAG_TRUSTED_KEY" \
+      -signature "$release_dir/MANIFEST.sig" \
+      "$release_dir/MANIFEST.json" >/dev/null 2>&1 \
+      || die "release manifest signature mismatch"
   elif [ "${A4DIAG_ALLOW_UNSIGNED:-0}" != "1" ]; then
     die "release is unsigned; set A4DIAG_ALLOW_UNSIGNED=1 to accept"
   fi

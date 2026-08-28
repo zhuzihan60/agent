@@ -173,14 +173,15 @@ def test_distro_smoke_preserves_unsigned_test_and_signed_release_boundaries() ->
     key_step = next(
         step
         for step in release_steps
-        if step.get("name") == "Write the verification key from repository secret material"
+        if step.get("name") == "Stage pinned public verification key"
     )
-    assert "secrets.A4DIAG_RELEASE_PRIVATE_KEY" in key_step.get("run", "")
+    assert "deploy/a4diag-release-public.pem" in key_step.get("run", "")
+    assert "secrets." not in key_step.get("run", "")
     release_smoke = next(
         step for step in release_steps if "distro_smoke.sh" in step.get("run", "")
     )
     assert release_smoke.get("env", {}).get("A4DIAG_TRUSTED_KEY") == (
-        "/tmp/a4diag-release.key"
+        "/tmp/a4diag-release-public.pem"
     )
     assert "A4DIAG_ALLOW_UNSIGNED" not in release_smoke.get("env", {})
 

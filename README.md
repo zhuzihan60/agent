@@ -12,10 +12,17 @@ unknown executions are never replayed.
 ## Install
 
 ```bash
-git clone <repository> a4diag && cd a4diag
-sudo ./install.sh --offline /path/to/verified/release-dir   # or: sudo ./install.sh --online
+curl -fsSL https://github.com/zhuzihan60/agent/releases/latest/download/install-a4diag.sh | sudo bash
 sudo a4diag self-check --offline
 ```
+
+The bootstrap downloads the latest GitHub Release, verifies its RSA/SHA-256
+signature with the public key pinned in the script, and then invokes the same
+fail-closed offline installer. It never enables writes or registers a target.
+
+For an air-gapped host, download and verify the signed Release assets first,
+then use `sudo A4DIAG_TRUSTED_KEY=/path/to/a4diag-release-public.pem
+./install.sh --offline /path/to/release-dir`.
 
 See [docs/install.md](docs/install.md) for the full contract (verification,
 atomic switch, rollback, uninstall) and
@@ -89,7 +96,7 @@ delivery status and blocks required-notification approvals until delivered.
 ```bash
 python tools/build_release.py verify-source --project-root .
 python tools/build_release.py verify-release --release-root <release-dir> \
-  --signing-key /path/to/release.key
+  --verification-key /path/to/a4diag-release-public.pem
 ```
 
 ## Uninstall

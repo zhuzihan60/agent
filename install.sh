@@ -6,7 +6,7 @@
 #   sudo ./install.sh --online            # fetches $A4DIAG_RELEASE_URL
 #
 # Fail-closed: requires root and a supported distribution, verifies the
-# release SHA256 (and HMAC signature when present) before extraction, stages
+# release SHA256 and RSA signature before extraction, stages
 # into /opt/a4diag/releases/<version>, creates an isolated venv with locked
 # wheels, runs the offline self-check, and only then atomically switches the
 # /opt/a4diag/current symlink. A service-start failure rolls back to the

@@ -10,7 +10,6 @@ the Linux CI matrix.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -54,6 +53,10 @@ def test_public_bootstrap_is_self_contained_and_fail_closed() -> None:
     assert "A4DIAG_TRUSTED_KEY" in bootstrap
     assert "A4DIAG_ALLOW_UNSIGNED" not in bootstrap
     assert "BEGIN PRIVATE KEY" not in bootstrap
+    public_key = (ROOT / "deploy" / "a4diag-release-public.pem").read_text(
+        encoding="utf-8"
+    ).strip()
+    assert public_key in bootstrap
 
 
 def test_installer_is_fail_closed_by_default() -> None:
@@ -320,7 +323,7 @@ exit 0
         root: Path,
         *,
         version: str = "0.4.0",
-        signing_key: bytes | None = None,
+        signing_key: Path | None = None,
     ) -> Path:
         release = root / f"release-{version}"
         release.mkdir()
@@ -381,10 +384,23 @@ exit 0
             json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         )
         if signing_key is not None:
-            signature = hmac.new(
-                signing_key, (release / "MANIFEST.json").read_bytes(), hashlib.sha256
-            ).hexdigest()
-            (release / "MANIFEST.sig").write_text(signature + "\n", encoding="utf-8")
+            signed = subprocess.run(
+                [
+                    "openssl",
+                    "dgst",
+                    "-sha256",
+                    "-sign",
+                    str(signing_key),
+                    "-out",
+                    str(release / "MANIFEST.sig"),
+                    str(release / "MANIFEST.json"),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if signed.returncode != 0:
+                raise RuntimeError(signed.stderr)
         lines = []
         for path in sorted(
             (p for p in release.rglob("*") if p.is_file() and p.name not in {"SHA256SUMS", "MANIFEST.sig"}),
@@ -519,14 +535,44 @@ def test_failed_upgrade_keeps_current_symlink(tmp_path: Path) -> None:
 @POSIX
 def test_signature_mismatch_rejects_release(tmp_path: Path) -> None:
     sandbox = InstallerSandbox(tmp_path)
-    key = b"k" * 32
-    release = sandbox.make_release(tmp_path, signing_key=key)
-    (release / "MANIFEST.sig").write_text("0" * 64 + "\n", encoding="utf-8")
+    private_key = tmp_path / "release-private.pem"
+    public_key = tmp_path / "release-public.pem"
+    generated = subprocess.run(
+        [
+            "openssl",
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-out",
+            str(private_key),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert generated.returncode == 0, generated.stderr
+    exported = subprocess.run(
+        [
+            "openssl",
+            "pkey",
+            "-in",
+            str(private_key),
+            "-pubout",
+            "-out",
+            str(public_key),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert exported.returncode == 0, exported.stderr
+    release = sandbox.make_release(tmp_path, signing_key=private_key)
+    (release / "MANIFEST.sig").write_bytes(b"invalid-signature")
     environment = sandbox.env()
     environment["A4DIAG_ALLOW_UNSIGNED"] = "0"
-    key_file = tmp_path / "release.key"
-    key_file.write_bytes(key)
-    environment["A4DIAG_TRUSTED_KEY"] = str(key_file)
+    environment["A4DIAG_TRUSTED_KEY"] = str(public_key)
 
     result = subprocess.run(
         ["bash", str(INSTALL_SH), "--offline", str(release)],

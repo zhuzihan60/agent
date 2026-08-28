@@ -4,7 +4,7 @@ Commands:
 - ``stage-systemd``: stage the exact systemd unit inventory atomically.
 - ``assemble``: verify and stage the exact core + builtin-plugin wheels, the
   verified dependency wheelhouse, locks, config example, systemd units, a
-  version lock, and a top-level SHA256 manifest (optionally HMAC-signed).
+  version lock, and a top-level SHA256 manifest (optionally RSA-signed).
 - ``verify-source``: reject fixed-target literals in runtime source and the
   default configuration.
 - ``verify-release``: reread every hash, require exact manifest coverage, and
@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import hmac
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -315,13 +315,37 @@ def write_manifest(release_root: Path) -> None:
     )
 
 
-def sign_manifest(release_root: Path, signing_key: bytes) -> None:
-    """HMAC-SHA256 signature over the canonical MANIFEST.json content."""
-    if type(signing_key) is not bytes or len(signing_key) < 32:
-        raise ValueError("signing key must be at least 32 bytes")
-    manifest_bytes = (release_root / "MANIFEST.json").read_bytes()
-    signature = hmac.new(signing_key, manifest_bytes, hashlib.sha256).hexdigest()
-    (release_root / "MANIFEST.sig").write_text(signature + "\n", encoding="utf-8")
+def _run_openssl(arguments: Sequence[str], *, failure: str) -> None:
+    try:
+        completed = subprocess.run(
+            ["openssl", *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("openssl executable is required for release signing") from exc
+    if completed.returncode != 0:
+        raise ValueError(failure)
+
+
+def sign_manifest(release_root: Path, signing_key: Path) -> None:
+    """Create an RSA/SHA-256 signature over canonical ``MANIFEST.json``."""
+    signing_key = Path(signing_key).resolve()
+    if not signing_key.is_file():
+        raise ValueError(f"signing key is missing: {signing_key}")
+    _run_openssl(
+        (
+            "dgst",
+            "-sha256",
+            "-sign",
+            str(signing_key),
+            "-out",
+            str(release_root / "MANIFEST.sig"),
+            str(release_root / "MANIFEST.json"),
+        ),
+        failure="release manifest signing failed",
+    )
 
 
 def assemble_release(
@@ -330,7 +354,7 @@ def assemble_release(
     project_wheels: Sequence[Path],
     output: Path,
     *,
-    signing_key: bytes | None = None,
+    signing_key: Path | None = None,
 ) -> None:
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
@@ -401,7 +425,7 @@ def _read_hash_manifest(release_root: Path) -> dict[str, str]:
 
 
 def verify_release(
-    release_root: Path, *, signing_key: bytes | None = None
+    release_root: Path, *, verification_key: Path | None = None
 ) -> None:
     release_root = Path(release_root).resolve()
     declared = _read_hash_manifest(release_root)
@@ -439,16 +463,26 @@ def verify_release(
         raise ValueError("release VERSION lock mismatch")
 
     signature_path = release_root / "MANIFEST.sig"
-    if signing_key is not None:
+    if verification_key is not None:
         if not signature_path.is_file():
             raise ValueError("release is missing MANIFEST.sig")
-        expected = hmac.new(
-            signing_key, manifest_path.read_bytes(), hashlib.sha256
-        ).hexdigest()
-        if signature_path.read_text(encoding="utf-8").strip() != expected:
-            raise ValueError("release manifest signature mismatch")
+        verification_key = Path(verification_key).resolve()
+        if not verification_key.is_file():
+            raise ValueError(f"verification key is missing: {verification_key}")
+        _run_openssl(
+            (
+                "dgst",
+                "-sha256",
+                "-verify",
+                str(verification_key),
+                "-signature",
+                str(signature_path),
+                str(manifest_path),
+            ),
+            failure="release manifest signature mismatch",
+        )
     elif signature_path.is_file():
-        raise ValueError("release carries a signature but no key was provided")
+        raise ValueError("release carries a signature but no verification key was provided")
 
     wheelhouse = release_root / "wheelhouse"
     if not wheelhouse.is_dir():
@@ -503,28 +537,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     verify_source_parser.add_argument("--project-root", type=Path, required=True)
     verify_release_parser = subparsers.add_parser("verify-release")
     verify_release_parser.add_argument("--release-root", type=Path, required=True)
-    verify_release_parser.add_argument("--signing-key", type=Path)
+    verify_release_parser.add_argument("--verification-key", type=Path)
     return parser.parse_args(argv)
-
-
-_KEY_HEX = re.compile(r"^[0-9a-fA-F]{64}$")
-
-
-def _read_key(path: Path | None) -> bytes | None:
-    """Read an HMAC key file.
-
-    The key file is a 64-hex-character text file (32 random bytes in hex),
-    the same raw-byte format consumed by the shell installer's Python verifier.
-    """
-    if path is None:
-        return None
-    try:
-        text = path.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"cannot read signing key: {path}") from exc
-    if not _KEY_HEX.fullmatch(text):
-        raise ValueError("signing key file must contain exactly 64 hex characters")
-    return bytes.fromhex(text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -539,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.dependency_wheelhouse.resolve(),
                 (args.core_wheel.resolve(), args.builtin_wheel.resolve()),
                 args.output.resolve(),
-                signing_key=_read_key(args.signing_key),
+                signing_key=args.signing_key.resolve() if args.signing_key else None,
             )
             return 0
         if args.command == "verify-source":
@@ -547,7 +561,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "verify-release":
             verify_release(
-                args.release_root.resolve(), signing_key=_read_key(args.signing_key)
+                args.release_root.resolve(),
+                verification_key=(
+                    args.verification_key.resolve() if args.verification_key else None
+                ),
             )
             return 0
     except (OSError, ValueError) as exc:
