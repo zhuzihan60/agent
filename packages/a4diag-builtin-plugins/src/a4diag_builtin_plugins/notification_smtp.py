@@ -30,7 +30,7 @@ from a4diag_builtin_plugins.notification_common import (
     redact_event,
 )
 
-_VERSION = "0.4.0"
+_VERSION = "0.4.1"
 _SAFE_REF = re.compile(r"^[a-z][a-z0-9_-]{0,31}:[a-z0-9][a-z0-9_.-]{0,63}$")
 _EMAIL = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 _HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")

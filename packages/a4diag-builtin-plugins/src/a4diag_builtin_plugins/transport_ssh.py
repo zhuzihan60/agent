@@ -34,7 +34,7 @@ from a4diag_builtin_plugins.transport_common import (
 SSH_EXECUTABLE = "/usr/bin/ssh"
 SSH_CONNECT_TIMEOUT = "10"
 SSH_IDENTITY_PROBE_OUTPUT_LIMIT = 65_536
-_VERSION = "0.4.0"
+_VERSION = "0.4.1"
 
 _HOSTNAME_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$")
 _IPV6_PATTERN = re.compile(r"^[0-9A-Fa-f:]+$")

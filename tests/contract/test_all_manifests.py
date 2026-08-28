@@ -229,7 +229,7 @@ def _wheel_consistency_errors() -> list[str]:
             ):
                 errors.append(f"wheel contains a prohibited artifact: {member}")
         entry_points = archive.read(
-            "a4diag_builtin_plugins-0.4.0.dist-info/entry_points.txt"
+            "a4diag_builtin_plugins-0.4.1.dist-info/entry_points.txt"
         ).decode("utf-8")
         if "a4diag-plugin = a4diag_builtin_plugins.host:main" not in entry_points:
             errors.append("wheel entrypoint is not a4diag-plugin = a4diag_builtin_plugins.host:main")

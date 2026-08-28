@@ -258,7 +258,7 @@ def test_self_check_reports_read_only_defaults(tmp_path: Path, monkeypatch: pyte
     assert code == 0
     payload = json.loads(output)
     assert payload["ok"] is True
-    assert payload["version"] == "0.4.0"
+    assert payload["version"] == "0.4.1"
     assert payload["global_mode"] == "read_only"
     assert payload["targets"] == []
     assert payload["offline"] is True
@@ -314,7 +314,7 @@ if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   mkdir -p "$3/bin"
   cat > "$3/bin/a4diag" <<'A4DIAG_SHIM'
 #!/usr/bin/env bash
-echo '{"ok": true, "version": "0.4.0", "global_mode": "read_only", "targets": [], "offline": true}'
+echo '{"ok": true, "version": "0.4.1", "global_mode": "read_only", "targets": [], "offline": true}'
 exit 0
 A4DIAG_SHIM
   chmod +x "$3/bin/a4diag"
@@ -360,7 +360,7 @@ exit 0
         self,
         root: Path,
         *,
-        version: str = "0.4.0",
+        version: str = "0.4.1",
         signing_key: Path | None = None,
     ) -> Path:
         release = root / f"release-{version}"
@@ -454,7 +454,7 @@ exit 0
     def env(
         self,
         *,
-        version: str = "0.4.0",
+        version: str = "0.4.1",
         skip_systemd: bool = True,
         service_state: str = "active",
     ) -> dict[str, str]:
@@ -482,7 +482,7 @@ exit 0
         self,
         release_dir: Path,
         *,
-        version: str = "0.4.0",
+        version: str = "0.4.1",
         inject_failure: str | None = None,
         skip_systemd: bool = True,
         service_state: str = "active",
@@ -548,13 +548,26 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     result = sandbox.install(release)
 
     assert result.returncode == 0, result.stderr
-    installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.4.0"
+    installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.4.1"
     assert stat.S_IMODE(installed.stat().st_mode) == 0o755
     registry = sandbox.root / "etc" / "a4diag" / "plugin-registry.json"
     assert json.loads(registry.read_text(encoding="utf-8")) == {"plugins": []}
     assert stat.S_IMODE(registry.stat().st_mode) == 0o640
     plugin_root = sandbox.root / "opt" / "a4diag" / "plugins"
     assert plugin_root.is_dir()
+    runtime_dirs = (
+        sandbox.root / "run" / "a4diag",
+        sandbox.root / "var" / "lib" / "a4diag",
+        sandbox.root / "var" / "lib" / "a4diag" / "checkpoints",
+        sandbox.root / "var" / "lib" / "a4diag" / "transactions",
+        sandbox.root / "var" / "lib" / "a4diag" / "approvals",
+        sandbox.root / "var" / "lib" / "a4diag" / "reports",
+        sandbox.root / "var" / "lib" / "a4diag" / "audit",
+        sandbox.root / "var" / "lib" / "a4diag" / "plugins",
+    )
+    for runtime_dir in runtime_dirs:
+        assert runtime_dir.is_dir()
+        assert stat.S_IMODE(runtime_dir.stat().st_mode) == 0o750
     for name in ("core-ticket.key", "core-policy.key"):
         secret = sandbox.root / "etc" / "a4diag" / "secrets" / name
         assert re.fullmatch(r"[0-9a-f]{64}\n", secret.read_text(encoding="ascii"))
@@ -572,14 +585,14 @@ def test_offline_install_invokes_pip_without_index(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "--no-index" in sandbox.pip_argv
     assert "--find-links" in sandbox.pip_argv
-    assert "a4diag-0.4.0-py3-none-any.whl" in sandbox.pip_argv
+    assert "a4diag-0.4.1-py3-none-any.whl" in sandbox.pip_argv
     calls = sandbox.pip_argv.splitlines()
     assert len(calls) == 2
     assert "-r" in calls[0]
-    assert "a4diag-0.4.0-py3-none-any.whl" not in calls[0]
+    assert "a4diag-0.4.1-py3-none-any.whl" not in calls[0]
     assert "--no-deps" in calls[1]
     assert "-r" not in calls[1].split()
-    assert "a4diag_builtin_plugins-0.4.0-py3-none-any.whl" in calls[1]
+    assert "a4diag_builtin_plugins-0.4.1-py3-none-any.whl" in calls[1]
 
 
 @pytest.mark.parametrize(

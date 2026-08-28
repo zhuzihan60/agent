@@ -1,4 +1,4 @@
-# A4Diag 0.4.0
+# A4Diag 0.4.1
 
 [![CI](https://github.com/zhuzihan60/agent/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/zhuzihan60/agent/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/zhuzihan60/agent)](https://github.com/zhuzihan60/agent/releases/latest)
@@ -50,7 +50,7 @@ targets: []
 plugins: []
 ```
 
-当前正式版本：[v0.4.0](https://github.com/zhuzihan60/agent/releases/tag/v0.4.0)
+当前正式版本：[v0.4.1](https://github.com/zhuzihan60/agent/releases/tag/v0.4.1)
 
 ## 安全模型
 

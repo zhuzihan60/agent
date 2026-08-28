@@ -55,11 +55,12 @@ jobs:
           for wheel in *.whl; do sha256sum "$wheel" >> SHA256SUMS; done
       - name: Assemble and verify release (unsigned smoke)
         run: |
+          release_version="$(python -c 'from tools.build_release import RELEASE_VERSION; print(RELEASE_VERSION)')"
           python tools/build_release.py assemble \
             --project-root . \
             --dependency-wheelhouse /tmp/a4diag-wheelhouse \
-            --core-wheel dist/a4diag-0.4.0-py3-none-any.whl \
-            --builtin-wheel packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-0.4.0-py3-none-any.whl \
+            --core-wheel "dist/a4diag-${release_version}-py3-none-any.whl" \
+            --builtin-wheel "packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-${release_version}-py3-none-any.whl" \
             --output /tmp/a4diag-release
           python tools/build_release.py verify-release --release-root /tmp/a4diag-release
       - name: Upload assembled release for distro smoke

@@ -58,11 +58,12 @@ jobs:
           chmod 0600 /tmp/a4diag-release-private.pem
       - name: Assemble and sign the release
         run: |
+          release_version="$(python -c 'from tools.build_release import RELEASE_VERSION; print(RELEASE_VERSION)')"
           python tools/build_release.py assemble \
             --project-root . \
             --dependency-wheelhouse /tmp/a4diag-wheelhouse \
-            --core-wheel dist/a4diag-0.4.0-py3-none-any.whl \
-            --builtin-wheel packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-0.4.0-py3-none-any.whl \
+            --core-wheel "dist/a4diag-${release_version}-py3-none-any.whl" \
+            --builtin-wheel "packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-${release_version}-py3-none-any.whl" \
             --output /tmp/a4diag-release \
             --signing-key /tmp/a4diag-release-private.pem
           python tools/build_release.py verify-release \

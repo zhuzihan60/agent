@@ -28,7 +28,7 @@ from a4diag_builtin_plugins.transport_common import (
     TransportReadError,
 )
 
-_VERSION = "0.4.0"
+_VERSION = "0.4.1"
 _MAX_IDENTITY_TEXT_BYTES = 65_536
 
 

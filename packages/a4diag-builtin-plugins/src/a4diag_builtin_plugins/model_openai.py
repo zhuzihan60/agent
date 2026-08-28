@@ -40,7 +40,7 @@ from a4diag_builtin_plugins.transport_common import (
 API_VERSION = "1.0"
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_USER_PAYLOAD_BYTES = 262_144
-_VERSION = "0.4.0"
+_VERSION = "0.4.1"
 _SAFE_REF = re.compile(r"^[a-z][a-z0-9_-]{0,31}:[a-z0-9][a-z0-9_.-]{0,63}$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")

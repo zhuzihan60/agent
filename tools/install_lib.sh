@@ -22,8 +22,8 @@
 
 set -euo pipefail
 
-# Test overrides may pin a different expected version; production is 0.4.0.
-A4DIAG_EXPECTED_VERSION="${A4DIAG_EXPECTED_VERSION:-0.4.0}"
+# Test overrides may pin a different expected version; production is 0.4.1.
+A4DIAG_EXPECTED_VERSION="${A4DIAG_EXPECTED_VERSION:-0.4.1}"
 
 A4DIAG_ROOT="${A4DIAG_ROOT:-/}"
 RELEASE_BASE="${A4DIAG_ROOT}opt/a4diag/releases"
@@ -32,6 +32,8 @@ ETC_DIR="${A4DIAG_ROOT}etc/a4diag"
 SYSTEMD_DIR="${A4DIAG_ROOT}etc/systemd/system"
 PLUGIN_ROOT="${A4DIAG_ROOT}opt/a4diag/plugins"
 CLI_LINK="${A4DIAG_ROOT}usr/local/bin/a4diag"
+RUN_ROOT="${A4DIAG_ROOT}run/a4diag"
+STATE_ROOT="${A4DIAG_ROOT}var/lib/a4diag"
 
 die() {
   echo "a4diag installer: $*" >&2
@@ -211,11 +213,25 @@ a4diag_install_identities() {
 a4diag_initialize_runtime() {
   local registry="$ETC_DIR/plugin-registry.json"
   local secrets_dir="$ETC_DIR/secrets"
+  local runtime_dir
   local secret
 
   [ ! -L "$ETC_DIR" ] || die "configuration directory must not be a symlink"
   [ ! -L "$PLUGIN_ROOT" ] || die "plugin directory must not be a symlink"
   [ ! -L "$secrets_dir" ] || die "secret directory must not be a symlink"
+
+  for runtime_dir in \
+    "$RUN_ROOT" \
+    "$STATE_ROOT" \
+    "$STATE_ROOT/checkpoints" \
+    "$STATE_ROOT/transactions" \
+    "$STATE_ROOT/approvals" \
+    "$STATE_ROOT/reports" \
+    "$STATE_ROOT/audit" \
+    "$STATE_ROOT/plugins"; do
+    [ ! -L "$runtime_dir" ] || die "runtime directory must not be a symlink: $runtime_dir"
+    install -d -m 0750 "$runtime_dir"
+  done
 
   install -d -m 0750 "$PLUGIN_ROOT"
   install -d -m 0700 "$secrets_dir"
@@ -250,6 +266,15 @@ PY
   chmod 0700 "$secrets_dir"
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
     chown root:a4diag "$registry" "$PLUGIN_ROOT"
+    chown a4diag:a4diag \
+      "$RUN_ROOT" \
+      "$STATE_ROOT" \
+      "$STATE_ROOT/checkpoints" \
+      "$STATE_ROOT/transactions" \
+      "$STATE_ROOT/approvals" \
+      "$STATE_ROOT/reports" \
+      "$STATE_ROOT/audit" \
+      "$STATE_ROOT/plugins"
     chown a4diag:a4diag "$secrets_dir" \
       "$secrets_dir/core-ticket.key" \
       "$secrets_dir/core-policy.key"

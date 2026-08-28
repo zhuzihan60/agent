@@ -274,7 +274,7 @@ def manifest_data(**overrides: object) -> dict[str, object]:
     data: dict[str, object] = {
         "name": "transport-local",
         "plugin_type": "transport",
-        "version": "0.4.0",
+        "version": "0.4.1",
         "api_min": "1.0",
         "api_max": "1.0",
         "executable": "a4diag_builtin_plugins.transport_local:main",

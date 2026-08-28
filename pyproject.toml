@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a4diag"
-version = "0.4.0"
+version = "0.4.1"
 description = "A4 read-only diagnostic MCP service"
 requires-python = ">=3.11,<3.12"
 dependencies = [

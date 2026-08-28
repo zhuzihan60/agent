@@ -1,7 +1,7 @@
 """RED contract tests for multi-wheel release assembly and source verification.
 
 The release must require exactly the core and builtin-plugin wheels for
-version 0.4.0, verify every artifact hash, and reject fixed-target literals in
+version 0.4.1, verify every artifact hash, and reject fixed-target literals in
 the runtime source and default configuration.
 """
 
@@ -75,8 +75,8 @@ def test_release_requires_exact_core_and_plugin_wheels(tmp_path: Path) -> None:
 
     digest = hashlib.sha256(dep.read_bytes()).hexdigest()
     (wheelhouse / "SHA256SUMS").write_text(f"{digest}  {dep.name}\n", encoding="utf-8")
-    core = tmp_path / "a4diag-0.4.0-py3-none-any.whl"
-    write_minimal_wheel(core, "a4diag", "0.4.0")
+    core = tmp_path / "a4diag-0.4.1-py3-none-any.whl"
+    write_minimal_wheel(core, "a4diag", "0.4.1")
 
     # Only the core wheel provided: the builtin-plugin wheel is missing.
     with pytest.raises(ValueError, match="missing project wheel"):

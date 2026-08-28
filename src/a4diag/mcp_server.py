@@ -28,7 +28,7 @@ def build_server(
 
     server = MCPServer(
         "a4diag",
-        version="0.4.0",
+        version="0.4.1",
         instructions=(
             "Read-only diagnostics through registered capability plugins and "
             "registered targets. Never claim that a repair, restart, or "

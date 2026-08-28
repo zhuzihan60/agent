@@ -35,7 +35,7 @@ from a4diag_builtin_plugins.capability_common import (
 )
 from a4diag_builtin_plugins.transport_common import validate_absolute_path
 
-_VERSION = "0.4.0"
+_VERSION = "0.4.1"
 MAX_MANAGED_FILE_BYTES = 256 * 1024
 _ACTIONS = frozenset({"replace_managed_file", "set_mode"})
 
