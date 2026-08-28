@@ -270,6 +270,28 @@ def test_release_workflow_runs_the_public_bootstrap_in_linux() -> None:
     assert "must reject a tampered archive" in tamper_step["run"]
 
 
+def test_release_distro_smoke_installs_openssl_before_signed_install() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    )
+    steps = workflow["jobs"]["distro-smoke"]["steps"]
+    prerequisite_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Install OpenSSL prerequisite"
+    )
+    smoke_index = next(
+        index
+        for index, step in enumerate(steps)
+        if "distro_smoke.sh" in step.get("run", "")
+    )
+    command = steps[prerequisite_index]["run"]
+    assert "command -v openssl" in command
+    assert "dnf" in command
+    assert "apt-get" in command
+    assert prerequisite_index < smoke_index
+
+
 def test_ci_build_job_generates_verified_wheelhouse() -> None:
     """The CI build job must build the dependency wheelhouse from the lockfile
     and reference the builtin wheel at its real output path."""
