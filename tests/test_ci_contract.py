@@ -34,6 +34,29 @@ def test_ci_matrix_covers_supported_platforms() -> None:
     assert images == SUPPORTED_IMAGES
 
 
+def test_distro_jobs_provision_python_311_before_offline_install() -> None:
+    for workflow_name, job_name in (
+        ("test.yml", "distro"),
+        ("release.yml", "distro-smoke"),
+    ):
+        workflow = yaml.safe_load(
+            (ROOT / ".github" / "workflows" / workflow_name).read_text()
+        )
+        steps = workflow["jobs"][job_name]["steps"]
+        setup_index = next(
+            index
+            for index, step in enumerate(steps)
+            if str(step.get("uses", "")).startswith("actions/setup-python@")
+        )
+        smoke_index = next(
+            index
+            for index, step in enumerate(steps)
+            if "distro_smoke.sh" in step.get("run", "")
+        )
+        assert steps[setup_index]["with"]["python-version"] == "3.11"
+        assert setup_index < smoke_index
+
+
 def test_release_workflow_triggers_on_version_tags_only() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text()
