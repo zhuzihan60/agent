@@ -407,7 +407,7 @@ def test_offline_install_invokes_pip_without_index(tmp_path: Path) -> None:
     assert "-r" in calls[0]
     assert "a4diag-0.4.0-py3-none-any.whl" not in calls[0]
     assert "--no-deps" in calls[1]
-    assert "-r" not in calls[1]
+    assert "-r" not in calls[1].split()
     assert "a4diag_builtin_plugins-0.4.0-py3-none-any.whl" in calls[1]
 
 
