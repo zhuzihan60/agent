@@ -32,7 +32,7 @@
 ## Existing Baseline
 
 - Current package: `src/a4diag`; version `0.3.0`; fixed-target read-only behavior remains the regression baseline.
-- Current orchestration: `src/a4diag/orchestrator.py`; current model adapter: `src/a4diag/dsh_runner.py`.
+- Current orchestration: `src/a4diag/runtime.py` and `src/a4diag/workflow.py`; model access is provided by the OpenAI-compatible model plugin.
 - Current config hardcodes a target in `src/a4diag/config.py`; it is not edited until the new generic settings parser is tested independently.
 - Current persistence is `src/a4diag/store.py`; new v3 transaction tables are added through an independent store before poller migration.
 - Current release assembler in `tools/build_release.py` and verified Python 3.11 wheelhouse are retained and extended.

@@ -7,7 +7,6 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from subprocess import CompletedProcess
 
 import yaml
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -23,7 +22,6 @@ from a4diag.domain import (
     TargetConfig,
     TargetMode,
 )
-from a4diag.dsh_runner import DshRunner, parse_model_report
 from a4diag.models import Alert
 from a4diag.orchestrator import Orchestrator
 from a4diag.plugin_api.ticket import TicketIssuer
@@ -297,67 +295,7 @@ ALERT = Alert(
 )
 
 
-SENSITIVE_IDS = (
-    "tool-bash", "tool-pwsh", "tool-jobs", "tool-fs", "tool-fs-search",
-    "skill", "skill-filesystem", "skill-badge", "tool-skill", "subagent",
-    "subagent-spawn-in-process", "subagent-fork-in-process",
-    "tool-subagent-control", "tool-subagent-list-agents", "tool-subagent",
-    "tool-subagent-fork", "tool-subagent-report", "workflow-worker-thread",
-    "tool-workflow", "tool-todo", "tool-goal", "tool-ralph",
-    "tool-str-replace-editor", "web", "web-search-deepseek", "tool-web",
-    "code-runtime",
-)
-
-
-def effective_profile(
-    *,
-    active_id: str | None = None,
-    extra_rows: list[dict[str, object]] | None = None,
-) -> str:
-    rows = [
-        {"id": item, "name": f"test/{item}", "disabled": item != active_id}
-        for item in SENSITIVE_IDS
-    ]
-    rows.append(
-        {
-            "id": "mcp-a4diag",
-            "name": "@deepseek-ai/dsh-mcp-client",
-            "config": {
-                "transport": "stdio",
-                "serverName": "a4diag",
-                "command": "/opt/a4diag/venv/bin/python",
-                "args": ["-m", "a4diag.mcp_server"],
-                "env": {"A4DIAG_CONFIG": "/etc/a4diag/config.yaml"},
-                "cwd": "/var/lib/a4diag",
-                "toolCallTimeoutMs": 20000,
-                "failOnStartupError": True,
-            },
-        }
-    )
-    rows.extend(extra_rows or [])
-    return yaml.safe_dump(rows, sort_keys=False)
-
-
-def write_settings(root: Path) -> Path:
-    path = root / "settings.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "agent-default-model": {
-                    "provider": "deepseek-official",
-                    "model": "deepseek-v4-flash",
-                    "reasoningEffort": "high",
-                },
-                "llm-deepseek": {"apiKeyEnv": "DEEPSEEK_API_KEY"},
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
-class DshOrchestratorTests(unittest.TestCase):
+class OrchestratorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
@@ -367,129 +305,6 @@ class DshOrchestratorTests(unittest.TestCase):
         if runtime is not None:
             runtime.close()
         self.temp_dir.cleanup()
-
-    def test_dsh_runner_uses_restricted_profile_and_safe_working_directory(self) -> None:
-        calls: list[dict[str, object]] = []
-
-        def process_runner(argv, **kwargs):
-            captured = {"argv": argv, **kwargs}
-            calls.append(captured)
-            if "--dump-config" in argv:
-                return CompletedProcess(argv, 0, stdout=effective_profile(), stderr="")
-            return CompletedProcess(
-                argv,
-                0,
-                stdout='{"status":"diagnosed","conclusion":"normal",'
-                '"evidence_complete":true,"summary":"healthy"}',
-                stderr="",
-            )
-
-        runner = DshRunner(
-            process_runner=process_runner,
-            settings_path=write_settings(self.root),
-        )
-        output = runner.run("readonly prompt")
-
-        captured = calls[-1]
-        self.assertEqual(
-            captured["argv"][:3],
-            ["/usr/local/bin/dsh", "--profile", "a4diag-headless"],
-        )
-        self.assertEqual(captured["cwd"], "/var/lib/a4diag")
-        self.assertEqual(captured["timeout"], 600)
-        self.assertEqual(captured["env"]["HOME"], "/var/lib/a4diag")
-        self.assertEqual(captured["env"]["DSH_HOME"], "/var/lib/a4diag/.dsh")
-        self.assertNotIn("shell", captured)
-        self.assertIn('"conclusion":"normal"', output)
-
-    def test_dsh_runner_rejects_profile_with_active_shell_tool(self) -> None:
-        def process_runner(argv, **kwargs):
-            return CompletedProcess(
-                argv,
-                0,
-                stdout=effective_profile(active_id="tool-bash"),
-                stderr="",
-            )
-
-        runner = DshRunner(
-            process_runner=process_runner,
-            settings_path=write_settings(self.root),
-        )
-
-        with self.assertRaisesRegex(Exception, "restricted DSH profile"):
-            runner.run("readonly prompt")
-
-    def test_dsh_runner_rejects_extra_active_mcp_or_unknown_tool(self) -> None:
-        forbidden_rows = (
-            {
-                "id": "mcp-unrestricted",
-                "name": "@deepseek-ai/dsh-mcp-client",
-                "config": {"command": "/bin/sh"},
-            },
-            {
-                "id": "tool-future-exec",
-                "name": "@vendor/future-tool-exec",
-            },
-        )
-        for forbidden in forbidden_rows:
-            with self.subTest(forbidden=forbidden["id"]):
-                def process_runner(argv, **kwargs):
-                    return CompletedProcess(
-                        argv,
-                        0,
-                        stdout=effective_profile(extra_rows=[forbidden]),
-                        stderr="",
-                    )
-
-                runner = DshRunner(
-                    process_runner=process_runner,
-                    settings_path=write_settings(self.root),
-                )
-                with self.assertRaisesRegex(Exception, "restricted DSH profile"):
-                    runner.run("readonly prompt")
-
-    def test_dsh_runner_allows_exact_builtin_timeout_policy(self) -> None:
-        timeout_policy = {
-            "id": "timeout-policy",
-            "name": "@deepseek-ai/dsh-tool-call-timeout-policy",
-        }
-
-        def process_runner(argv, **kwargs):
-            if "--dump-config" in argv:
-                return CompletedProcess(
-                    argv,
-                    0,
-                    stdout=effective_profile(extra_rows=[timeout_policy]),
-                    stderr="",
-                )
-            return CompletedProcess(
-                argv,
-                0,
-                stdout='{"status":"diagnosed","conclusion":"normal",'
-                '"evidence_complete":true,"summary":"healthy"}',
-                stderr="",
-            )
-
-        runner = DshRunner(
-            process_runner=process_runner,
-            settings_path=write_settings(self.root),
-        )
-
-        self.assertIn('"conclusion":"normal"', runner.run("readonly prompt"))
-
-    def test_parse_model_report_accepts_json_fence_but_rejects_missing_evidence(self) -> None:
-        parsed = parse_model_report(
-            "```json\n"
-            '{"status":"diagnosed","conclusion":"abnormal",'
-            '"evidence_complete":true,"summary":"high cpu"}'
-            "\n```"
-        )
-        self.assertEqual(parsed["conclusion"], "abnormal")
-        with self.assertRaisesRegex(ValueError, "evidence_complete"):
-            parse_model_report(
-                '{"status":"diagnosed","conclusion":"normal",'
-                '"summary":"healthy"}'
-            )
 
     def test_orchestrator_writes_v3_report_from_runtime_run(self) -> None:
         self.runtime = build_runtime(self.root)

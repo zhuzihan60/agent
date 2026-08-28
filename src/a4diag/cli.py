@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Protocol
 
 from .config import Config
-from .dsh_runner import DshRunner
 from .report import cleanup_expired
 
 
@@ -27,7 +26,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="a4diag")
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("cleanup", help="remove expired diagnostic reports")
-    subcommands.add_parser("verify-profile", help="validate restricted DSH profile")
     self_check_parser = subcommands.add_parser(
         "self-check", help="report version, mode and registered targets without network"
     )
@@ -534,10 +532,6 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.command == "verify-profile":
-        DshRunner().verify_profile()
-        print("restricted DSH profile: OK")
-        return 0
     if args.command == "self-check":
         return _cmd_self_check(args)
     if args.command == "serve":

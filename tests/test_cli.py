@@ -14,6 +14,12 @@ from a4diag.store import Store
 
 
 class CliTests(unittest.TestCase):
+    def test_removed_dsh_profile_command_is_not_exposed(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                cli._parser().parse_args(["verify-profile"])
+        self.assertEqual(raised.exception.code, 2)
+
     def test_cleanup_does_not_recover_or_change_running_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
