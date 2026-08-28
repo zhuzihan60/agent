@@ -75,19 +75,29 @@ def test_secret_file_with_group_or_other_bits_is_rejected(tmp_path: Path) -> Non
     path.write_text("secret", encoding="utf-8")
     path.chmod(0o640)
 
-    with pytest.raises(SecretError, match="mode 0600"):
+    with pytest.raises(SecretError, match="mode_0600_required"):
         SecretResolver(tmp_path).resolve("file:model.key")
 
 
-def test_secret_file_owned_by_other_user_is_rejected(tmp_path: Path) -> None:
+def test_secret_file_owned_by_other_user_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     if os.name != "posix" or not hasattr(os, "getuid"):
         pytest.skip("POSIX owner enforcement is a mandatory Linux Phase 4 gate")
     path = tmp_path / "model.key"
     path.write_text("secret", encoding="utf-8")
     path.chmod(0o600)
-    import stat
+    real_lstat = Path.lstat
 
-    os.chown(path, os.getuid() + 1 if os.getuid() < 2**31 - 2 else 0, -1)
+    def lstat_as_other_user(candidate: Path) -> os.stat_result:
+        info = real_lstat(candidate)
+        if candidate != path:
+            return info
+        values = list(info)
+        values[4] = os.getuid() + 1 if os.getuid() < 2**31 - 2 else 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", lstat_as_other_user)
 
     with pytest.raises(SecretError, match="owner"):
         SecretResolver(tmp_path).resolve("file:model.key")

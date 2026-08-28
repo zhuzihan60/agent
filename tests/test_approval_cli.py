@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import io
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -202,7 +203,25 @@ def signed_approval_file(
     path.write_bytes(
         json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
+    if os.name == "posix":
+        path.chmod(0o600)
     return path
+
+
+def pretend_file_owner_is_root(
+    monkeypatch: pytest.MonkeyPatch, request_file: Path
+) -> None:
+    real_stat = Path.stat
+
+    def stat_as_root(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        info = real_stat(path, *args, **kwargs)
+        if path != request_file:
+            return info
+        values = list(info)
+        values[4] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "stat", stat_as_root)
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +375,8 @@ def test_non_tty_with_valid_signed_file_approves(cli: CliRunner, monkeypatch: py
     tx = cli.seed_pending(high_plan())
     cli.isatty = False
     request_file = signed_approval_file(tmp_path)
+    if os.name == "posix":
+        pretend_file_owner_is_root(monkeypatch, request_file)
 
     result = cli.run(
         [
@@ -373,6 +394,8 @@ def test_non_tty_with_bad_signature_rejected(cli: CliRunner, monkeypatch: pytest
     tx = cli.seed_pending(high_plan())
     cli.isatty = False
     request_file = signed_approval_file(tmp_path, tamper="signature")
+    if os.name == "posix":
+        pretend_file_owner_is_root(monkeypatch, request_file)
 
     result = cli.run(
         [

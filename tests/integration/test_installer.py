@@ -238,6 +238,9 @@ class InstallerSandbox:
         python.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
+if [ "$1" = "-" ]; then
+  exec "$A4DIAG_TEST_REAL_PYTHON" "$@"
+fi
 if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   mkdir -p "$3/bin"
   cat > "$3/bin/a4diag" <<'A4DIAG_SHIM'
@@ -348,6 +351,7 @@ exit 0
                 "A4DIAG_EXPECTED_VERSION": version,
                 "A4DIAG_ALLOW_UNSIGNED": "1",
                 "A4DIAG_PIP_LOG": str(self.log),
+                "A4DIAG_TEST_REAL_PYTHON": sys.executable,
                 "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
             }
         )
@@ -417,7 +421,7 @@ def test_signature_mismatch_rejects_release(tmp_path: Path) -> None:
     environment = sandbox.env()
     environment["A4DIAG_ALLOW_UNSIGNED"] = "0"
     key_file = tmp_path / "release.key"
-    key_file.write_text(key.hex(), encoding="utf-8")
+    key_file.write_bytes(key)
     environment["A4DIAG_TRUSTED_KEY"] = str(key_file)
 
     result = subprocess.run(
