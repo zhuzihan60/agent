@@ -17,8 +17,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
+ALIBABA_LINUX_CI_IMAGE = (
+    "langfarm/alinux3@"
+    "sha256:c5c67ed6e33dc967e9a05ec3cec680abaf24bc2ea0fb23ee0d1470750882c6b1"
+)
+
 SUPPORTED_IMAGES = {
-    "alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:3.9.1",
+    ALIBABA_LINUX_CI_IMAGE,
     "rockylinux:8",
     "rockylinux:9",
     "almalinux:8",
@@ -66,7 +71,7 @@ def test_distro_jobs_provision_portable_python_311_before_offline_install() -> N
         assert setup_uv_index < install_python_index < smoke_index
 
 
-def test_alibaba_linux_bootstraps_archive_tools_before_checkout() -> None:
+def test_alibaba_linux_ci_image_is_digest_pinned_without_network_bootstrap() -> None:
     for workflow_name, job_name in (
         ("test.yml", "distro"),
         ("release.yml", "distro-smoke"),
@@ -74,21 +79,14 @@ def test_alibaba_linux_bootstraps_archive_tools_before_checkout() -> None:
         workflow = yaml.safe_load(
             (ROOT / ".github" / "workflows" / workflow_name).read_text()
         )
-        steps = workflow["jobs"][job_name]["steps"]
-        bootstrap_index = next(
-            index
-            for index, step in enumerate(steps)
-            if step.get("name") == "Bootstrap Alibaba Cloud Linux actions prerequisites"
+        job = workflow["jobs"][job_name]
+        images = job["strategy"]["matrix"]["image"]
+        assert ALIBABA_LINUX_CI_IMAGE in images
+        assert "@sha256:" in ALIBABA_LINUX_CI_IMAGE
+        assert all(
+            step.get("name") != "Bootstrap Alibaba Cloud Linux actions prerequisites"
+            for step in job["steps"]
         )
-        checkout_index = next(
-            index
-            for index, step in enumerate(steps)
-            if str(step.get("uses", "")).startswith("actions/checkout@")
-        )
-        bootstrap = steps[bootstrap_index]
-        assert "alibaba-cloud-linux-3-registry" in bootstrap.get("if", "")
-        assert "yum -y install tar gzip" in bootstrap.get("run", "")
-        assert bootstrap_index < checkout_index
 
 
 def test_release_workflow_triggers_on_version_tags_only() -> None:

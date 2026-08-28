@@ -5,7 +5,7 @@ A4Diag 0.4.0 is tested on every supported distribution in CI
 
 | Distribution | Version | Container image |
 | --- | --- | --- |
-| Alibaba Cloud Linux | 3 | `alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:3.9.1` |
+| Alibaba Cloud Linux | 3 | `langfarm/alinux3@sha256:c5c67ed6e33dc967e9a05ec3cec680abaf24bc2ea0fb23ee0d1470750882c6b1` |
 | Rocky Linux | 8, 9 | `rockylinux:8`, `rockylinux:9` |
 | AlmaLinux | 8, 9 | `almalinux:8`, `almalinux:9` |
 | Ubuntu | 22.04, 24.04 | `ubuntu:22.04`, `ubuntu:24.04` |
@@ -13,6 +13,12 @@ A4Diag 0.4.0 is tested on every supported distribution in CI
 
 RHEL is covered by the equivalent AlmaLinux/Rocky evidence plus a separately
 configured licensed runner; no credentials appear in the workflow files.
+
+The Alibaba Cloud Linux CI container is a digest-pinned, Alibaba Linux 3-based
+test image with the archive tools required by GitHub Actions already present.
+This avoids a network-dependent package-manager bootstrap before checkout.
+Production support remains keyed to the official `ID=alinux`, major version 3
+operating-system identity rather than to this CI image name.
 
 ## Gates per matrix job
 

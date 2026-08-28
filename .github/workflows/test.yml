@@ -76,7 +76,7 @@ jobs:
       fail-fast: false
       matrix:
         image:
-          - alibaba-cloud-linux-3-registry.cn-hangzhou.cr.aliyuncs.com/alinux3/alinux3:3.9.1
+          - langfarm/alinux3@sha256:c5c67ed6e33dc967e9a05ec3cec680abaf24bc2ea0fb23ee0d1470750882c6b1
           - rockylinux:8
           - rockylinux:9
           - almalinux:8
@@ -88,9 +88,6 @@ jobs:
       image: ${{ matrix.image }}
       options: --privileged
     steps:
-      - name: Bootstrap Alibaba Cloud Linux actions prerequisites
-        if: startsWith(matrix.image, 'alibaba-cloud-linux-3-registry.')
-        run: yum -y install tar gzip
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
