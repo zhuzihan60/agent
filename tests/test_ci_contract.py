@@ -213,6 +213,14 @@ def test_release_workflow_publishes_one_click_assets_after_linux_gates() -> None
     )
     publish = workflow["jobs"]["publish"]
     assert set(publish["needs"]) >= {"verify", "assemble-and-sign", "distro-smoke"}
+    download_step = next(
+        step
+        for step in publish["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact@")
+    )
+    download_path = str(download_step["with"]["path"])
+    assert "runner.temp" in download_path
+    assert not download_path.startswith("/")
     commands = "\n".join(
         step.get("run", "") for step in publish["steps"] if "run" in step
     )
