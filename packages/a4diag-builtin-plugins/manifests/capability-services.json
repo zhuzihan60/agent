@@ -1,0 +1,109 @@
+{
+  "name": "capability-services",
+  "plugin_type": "capability",
+  "version": "0.4.0",
+  "api_min": "1.0",
+  "api_max": "1.0",
+  "executable": "a4diag_builtin_plugins.capability_services:main",
+  "socket": "/run/a4diag/capability-services.sock",
+  "config_schema": "schemas/capability-services.json",
+  "operations": [
+    {
+      "name": "services.restart",
+      "risk_floor": "low",
+      "reversible": true,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": true,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {"unit": {"type": "string"}},
+        "required": ["unit"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "services.start",
+      "risk_floor": "low",
+      "reversible": true,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": true,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {"unit": {"type": "string"}},
+        "required": ["unit"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "services.stop",
+      "risk_floor": "low",
+      "reversible": true,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": true,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {"unit": {"type": "string"}},
+        "required": ["unit"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "services.enable",
+      "risk_floor": "low",
+      "reversible": true,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": true,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {"unit": {"type": "string"}},
+        "required": ["unit"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "services.disable",
+      "risk_floor": "low",
+      "reversible": true,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": true,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {"unit": {"type": "string"}},
+        "required": ["unit"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": [
+    "read:unit-state",
+    "write:unit-state",
+    "exec:systemctl",
+    "exec:a4diag-transport-helper"
+  ],
+  "network_access": ["none"],
+  "secret_refs": [],
+  "target_compatibility": [
+    "linux:systemd",
+    "rocky:8",
+    "rocky:9",
+    "almalinux:8",
+    "almalinux:9",
+    "rhel:8",
+    "rhel:9",
+    "ubuntu:22.04",
+    "ubuntu:24.04",
+    "debian:12"
+  ],
+  "read_risk_floor": "low",
+  "write_risk_floor": "high"
+}

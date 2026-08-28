@@ -1,0 +1,18 @@
+# A4Diag plugin instance socket (one per instance).
+#
+# %i is the plugin instance name; the socket path is per-instance beneath
+# /run/a4diag, owned by the core group so the core can connect.
+
+[Unit]
+Description=A4Diag plugin instance %i socket
+
+[Socket]
+ListenStream=/run/a4diag/%i.sock
+SocketMode=0660
+SocketUser=a4diag
+SocketGroup=a4diag
+RemoveOnStop=yes
+Backlog=64
+
+[Install]
+WantedBy=sockets.target

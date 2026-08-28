@@ -1,0 +1,24 @@
+[Unit]
+Description=Clean expired A4 diagnostic reports
+
+[Service]
+Type=oneshot
+User=a4diag
+Group=a4diag
+WorkingDirectory=/var/lib/a4diag
+Environment=A4DIAG_CONFIG=/etc/a4diag/config.yaml
+ExecStart=/opt/a4diag/current/venv/bin/a4diag cleanup
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/a4diag
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=256M
+TasksMax=32

@@ -1,0 +1,76 @@
+{
+  "name": "capability-packages",
+  "plugin_type": "capability",
+  "version": "0.4.0",
+  "api_min": "1.0",
+  "api_max": "1.0",
+  "executable": "a4diag_builtin_plugins.capability_packages:main",
+  "socket": "/run/a4diag/capability-packages.sock",
+  "config_schema": "schemas/capability-packages.json",
+  "operations": [
+    {
+      "name": "packages.install_exact",
+      "risk_floor": "high",
+      "reversible": true,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": true,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "version": {"type": "string"},
+          "repository": {"type": "string"}
+        },
+        "required": ["name", "version"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "packages.remove_exact",
+      "risk_floor": "high",
+      "reversible": true,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": true,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "version": {"type": "string"},
+          "repository": {"type": "string"}
+        },
+        "required": ["name", "version"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": [
+    "read:installed-package",
+    "write:installed-package",
+    "exec:dnf",
+    "exec:apt-get",
+    "exec:rpm",
+    "exec:dpkg-query",
+    "exec:apt-cache",
+    "exec:a4diag-transport-helper"
+  ],
+  "network_access": ["none"],
+  "secret_refs": [],
+  "target_compatibility": [
+    "linux:systemd",
+    "rocky:8",
+    "rocky:9",
+    "almalinux:8",
+    "almalinux:9",
+    "rhel:8",
+    "rhel:9",
+    "ubuntu:22.04",
+    "ubuntu:24.04",
+    "debian:12"
+  ],
+  "read_risk_floor": "low",
+  "write_risk_floor": "high"
+}

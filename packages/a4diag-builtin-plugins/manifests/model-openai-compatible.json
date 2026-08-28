@@ -1,0 +1,32 @@
+{
+  "name": "model-openai-compatible",
+  "plugin_type": "model",
+  "version": "0.4.0",
+  "api_min": "1.0",
+  "api_max": "1.0",
+  "executable": "a4diag_builtin_plugins.model_openai:main",
+  "socket": "/run/a4diag/model-openai.sock",
+  "config_schema": "schemas/model-openai.json",
+  "operations": [],
+  "permissions": [
+    "read:model-context"
+  ],
+  "network_access": ["model-provider"],
+  "secret_refs": [
+    "model:api-key"
+  ],
+  "target_compatibility": [
+    "linux:systemd",
+    "rocky:8",
+    "rocky:9",
+    "almalinux:8",
+    "almalinux:9",
+    "rhel:8",
+    "rhel:9",
+    "ubuntu:22.04",
+    "ubuntu:24.04",
+    "debian:12"
+  ],
+  "read_risk_floor": "low",
+  "write_risk_floor": "high"
+}

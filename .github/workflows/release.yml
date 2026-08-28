@@ -1,0 +1,109 @@
+name: a4diag-release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify source and run the full suite
+        run: |
+          python -m pip install -r requirements-build.lock
+          python -m pip install -r requirements.lock
+          python tools/build_release.py verify-source --project-root .
+          python -m pytest -q -rs
+
+  assemble-and-sign:
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build both wheels from the lockfiles
+        run: |
+          python -m pip install -r requirements-build.lock
+          python -m build --wheel
+          python -m build --wheel packages/a4diag-builtin-plugins
+      - name: Build verified dependency wheelhouse from the lockfile
+        run: |
+          python -m pip download -r requirements.lock -d /tmp/a4diag-wheelhouse --no-deps
+          cd /tmp/a4diag-wheelhouse
+          for wheel in *.whl; do sha256sum "$wheel" >> SHA256SUMS; done
+      - name: Write the signing key from repository secret material
+        run: |
+          printf '%s' "${{ secrets.A4DIAG_RELEASE_KEY }}" > /tmp/a4diag-release.key
+          chmod 0600 /tmp/a4diag-release.key
+      - name: Assemble and sign the release
+        run: |
+          python tools/build_release.py assemble \
+            --project-root . \
+            --dependency-wheelhouse /tmp/a4diag-wheelhouse \
+            --core-wheel dist/a4diag-0.4.0-py3-none-any.whl \
+            --builtin-wheel packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-0.4.0-py3-none-any.whl \
+            --output /tmp/a4diag-release \
+            --signing-key /tmp/a4diag-release.key
+          python tools/build_release.py verify-release \
+            --release-root /tmp/a4diag-release \
+            --signing-key /tmp/a4diag-release.key
+      - name: Upload signed release
+        uses: actions/upload-artifact@v4
+        with:
+          name: a4diag-signed-release
+          path: /tmp/a4diag-release
+          retention-days: 30
+
+  distro-smoke:
+    runs-on: ubuntu-latest
+    needs: assemble-and-sign
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - rockylinux:8
+          - rockylinux:9
+          - almalinux:8
+          - almalinux:9
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:12
+    container:
+      image: ${{ matrix.image }}
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: a4diag-signed-release
+          path: /release
+      - name: Distro offline-install smoke on the signed release
+        run: bash tests/integration/distro_smoke.sh
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [verify, assemble-and-sign, distro-smoke]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: a4diag-signed-release
+          path: /release
+      - name: Stage release archive
+        run: |
+          tar -czf /release/a4diag-${GITHUB_REF_NAME#v}.tar.gz -C / release
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /release/a4diag-*.tar.gz

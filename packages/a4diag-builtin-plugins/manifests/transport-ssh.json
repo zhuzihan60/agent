@@ -1,0 +1,36 @@
+{
+  "name": "transport-ssh",
+  "plugin_type": "transport",
+  "version": "0.4.0",
+  "api_min": "1.0",
+  "api_max": "1.0",
+  "executable": "a4diag_builtin_plugins.transport_ssh:main",
+  "socket": "/run/a4diag/transport-ssh.sock",
+  "config_schema": "schemas/transport-ssh.json",
+  "operations": [],
+  "permissions": [
+    "read:machine-id",
+    "read:os-release",
+    "exec:ssh",
+    "exec:a4diag-transport-helper"
+  ],
+  "network_access": ["target-ssh"],
+  "secret_refs": [
+    "target:ssh-key",
+    "target:known-hosts"
+  ],
+  "target_compatibility": [
+    "linux:systemd",
+    "rocky:8",
+    "rocky:9",
+    "almalinux:8",
+    "almalinux:9",
+    "rhel:8",
+    "rhel:9",
+    "ubuntu:22.04",
+    "ubuntu:24.04",
+    "debian:12"
+  ],
+  "read_risk_floor": "low",
+  "write_risk_floor": "high"
+}

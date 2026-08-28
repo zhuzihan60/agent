@@ -1,0 +1,54 @@
+# A4Diag plugin instance template (one isolated instance per enabled plugin).
+#
+# %i is the plugin instance name (a registered plugin pin name). The instance
+# identity is a dynamic per-instance user, the socket is per-instance, and the
+# instance configuration is read-only from /etc/a4diag/plugins/%i.yaml.
+# Capability-specific drop-ins (e.g. a network drop-in for notification
+# transports) add only their declared socket/helper/address-family access.
+#
+# Generic template: no fixed target id, IP address, or SSH username.
+
+[Unit]
+Description=A4Diag plugin instance %i (isolated)
+Documentation=docs/migration/v0.3-to-v0.4.md
+Requires=a4diag-plugin@%i.socket
+After=network-online.target a4diag-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=a4diag-plugin-%i
+Group=a4diag-plugin-%i
+DynamicUser=yes
+SupplementaryGroups=a4diag
+ExecStart=/opt/a4diag/current/venv/bin/a4diag-plugin --instance %i
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+
+# Isolation: fail closed by default.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+# No network unless a drop-in for the declared plugin access adds it.
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# The plugin may only write its own socket; configuration is read-only.
+ReadWritePaths=/run/a4diag
+ReadOnlyPaths=/etc/a4diag /etc/a4diag/plugins/%i.yaml /opt/a4diag/current
+
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=4096

@@ -1,0 +1,106 @@
+name: a4diag-test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install build/test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.lock
+          python -m pip install -r requirements.lock
+      - name: Full test suite (unit, contract, integration, acceptance)
+        run: python -m pytest -q -rs
+
+  build:
+    runs-on: ubuntu-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build both wheels
+        run: |
+          python -m pip install -r requirements-build.lock
+          python -m build --wheel
+          python -m build --wheel packages/a4diag-builtin-plugins
+      - name: Verify source has no fixed-target literals
+        run: python tools/build_release.py verify-source --project-root .
+      - name: Build verified dependency wheelhouse from the lockfile
+        run: |
+          python -m pip download -r requirements.lock -d /tmp/a4diag-wheelhouse --no-deps
+          cd /tmp/a4diag-wheelhouse
+          for wheel in *.whl; do sha256sum "$wheel" >> SHA256SUMS; done
+      - name: Assemble and verify release (unsigned smoke)
+        run: |
+          python tools/build_release.py assemble \
+            --project-root . \
+            --dependency-wheelhouse /tmp/a4diag-wheelhouse \
+            --core-wheel dist/a4diag-0.4.0-py3-none-any.whl \
+            --builtin-wheel packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-0.4.0-py3-none-any.whl \
+            --output /tmp/a4diag-release
+          python tools/build_release.py verify-release --release-root /tmp/a4diag-release
+      - name: Upload assembled release for distro smoke
+        uses: actions/upload-artifact@v4
+        with:
+          name: a4diag-release
+          path: /tmp/a4diag-release
+          retention-days: 7
+
+  distro:
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - rockylinux:8
+          - rockylinux:9
+          - almalinux:8
+          - almalinux:9
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - debian:12
+    container:
+      image: ${{ matrix.image }}
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: a4diag-release
+          path: /release
+      - name: Distro offline-install smoke
+        run: bash tests/integration/distro_smoke.sh
+
+  windows-documented-skips:
+    runs-on: windows-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build/test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.lock
+          python -m pip install -r requirements.lock
+      - name: Full suite on Windows (documented POSIX skips only)
+        run: python -m pytest -q -rs

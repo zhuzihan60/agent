@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily cleanup of A4 diagnostic reports
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=a4diag-cleanup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+global_mode: read_only
+auto_execute_low: false
+max_write_targets: 2
+targets: []
+plugins: []
+model: null
+notifications: []
+alertmanager: null
+retention:
+  normal_days: 1
+  abnormal_days: 14

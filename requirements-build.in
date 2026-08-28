@@ -1,0 +1,7 @@
+# Build and offline verification toolchain for the v3 release.
+build==1.5.0
+colorama==0.4.6; sys_platform == "win32"
+pytest==9.1.1
+setuptools==84.0.0
+uv==0.12.6
+wheel==0.48.0

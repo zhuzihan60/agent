@@ -1,0 +1,70 @@
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: skill
+  disabled: true
+- id: skill-filesystem
+  disabled: true
+- id: skill-badge
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: subagent
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-report
+  disabled: true
+- id: workflow-worker-thread
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-todo
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-str-replace-editor
+  disabled: true
+- id: web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: code-runtime
+  disabled: true
+
+- insert:
+    - id: mcp-a4diag
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        transport: stdio
+        serverName: a4diag
+        command: /opt/a4diag/venv/bin/python
+        args:
+          - -m
+          - a4diag.mcp_server
+        env:
+          A4DIAG_CONFIG: /etc/a4diag/config.yaml
+        cwd: /var/lib/a4diag
+        toolCallTimeoutMs: 20000
+        failOnStartupError: true

@@ -1,0 +1,46 @@
+# A4Diag core agent (generic plugin runtime).
+#
+# Generic template: every path is injected by the release/install layout
+# (/opt/a4diag/current is the atomic release symlink). No fixed target id,
+# IP address, or SSH username appears anywhere in this unit.
+
+[Unit]
+Description=A4Diag core agent (generic plugin runtime)
+Documentation=docs/migration/v0.3-to-v0.4.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=a4diag
+Group=a4diag
+ExecStart=/opt/a4diag/current/venv/bin/a4diag serve
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+
+# Isolation: never escalate, never write configuration.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# No privilege is ever gained.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# The core may only write its own state, reports, audit, and the plugin
+# socket directory; /etc/a4diag is strictly read-only (never ReadWritePaths).
+ReadWritePaths=/var/lib/a4diag /run/a4diag
+ReadOnlyPaths=/etc/a4diag /opt/a4diag/current
+
+LimitNOFILE=65536

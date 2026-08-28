@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://a4diag.example.invalid/schemas/config-v3.json",
+  "title": "A4Diag v3 agent settings",
+  "description": "Safe generic agent configuration produced by `a4diag init` and consumed by the Phase 1 settings loader.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "global_mode",
+    "targets",
+    "plugins",
+    "auto_execute_low",
+    "max_write_targets"
+  ],
+  "properties": {
+    "global_mode": {
+      "type": "string",
+      "enum": ["read_only", "read_write"]
+    },
+    "targets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "mode",
+          "identity_ref",
+          "write_enabled",
+          "auto_execute_low",
+          "capabilities",
+          "notification_required"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["local", "ssh"]
+          },
+          "identity_ref": {
+            "type": "string",
+            "pattern": "^target/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+          },
+          "write_enabled": {"type": "boolean"},
+          "auto_execute_low": {"type": "boolean"},
+          "notification_required": {"type": "boolean"},
+          "transport": {"type": ["string", "null"]},
+          "host": {"type": ["string", "null"]},
+          "port": {"type": ["integer", "null"], "minimum": 1, "maximum": 65535},
+          "user": {"type": ["string", "null"]},
+          "capabilities": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "actions", "resources"],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+                },
+                "actions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+                  }
+                },
+                "resources": {
+                  "type": "array",
+                  "items": {"type": "string"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "plugins": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string"}
+    },
+    "auto_execute_low": {"type": "boolean"},
+    "max_write_targets": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32
+    },
+    "model": {"type": ["object", "null"]},
+    "notifications": {"type": "array"},
+    "alertmanager": {"type": ["object", "null"]},
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["normal_days", "abnormal_days"],
+      "properties": {
+        "normal_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+        "abnormal_days": {"type": "integer", "minimum": 1, "maximum": 3650}
+      }
+    }
+  }
+}

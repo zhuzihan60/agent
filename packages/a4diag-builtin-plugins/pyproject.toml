@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a4diag-builtin-plugins"
+version = "0.4.0"
+description = "Isolated built-in plugins for A4Diag"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "a4diag==0.4.0",
+  "pydantic==2.13.4",
+]
+
+[project.scripts]
+a4diag-plugin = "a4diag_builtin_plugins.host:main"
+
+[tool.setuptools]
+packages = [
+  "a4diag_builtin_plugins",
+  "a4diag_builtin_plugins.manifests",
+]
+package-dir = {"a4diag_builtin_plugins" = "src/a4diag_builtin_plugins", "a4diag_builtin_plugins.manifests" = "manifests"}
+
+[tool.setuptools.package-data]
+"a4diag_builtin_plugins.manifests" = ["*.json"]

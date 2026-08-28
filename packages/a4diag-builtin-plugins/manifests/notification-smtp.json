@@ -1,0 +1,33 @@
+{
+  "name": "notification-smtp",
+  "plugin_type": "notification",
+  "version": "0.4.0",
+  "api_min": "1.0",
+  "api_max": "1.0",
+  "executable": "a4diag_builtin_plugins.notification_smtp:main",
+  "socket": "/run/a4diag/notification-smtp.sock",
+  "config_schema": "schemas/notification-smtp.json",
+  "operations": [],
+  "permissions": [
+    "send:notification"
+  ],
+  "network_access": ["smtp-server"],
+  "secret_refs": [
+    "notification:smtp-user",
+    "notification:smtp-password"
+  ],
+  "target_compatibility": [
+    "linux:systemd",
+    "rocky:8",
+    "rocky:9",
+    "almalinux:8",
+    "almalinux:9",
+    "rhel:8",
+    "rhel:9",
+    "ubuntu:22.04",
+    "ubuntu:24.04",
+    "debian:12"
+  ],
+  "read_risk_floor": "low",
+  "write_risk_floor": "high"
+}
