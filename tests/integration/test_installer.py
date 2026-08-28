@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import zipfile
@@ -135,6 +136,22 @@ def test_install_lib_creates_systemd_identities() -> None:
     assert "systemd-tmpfiles" in lib
     assert "sysusers.d" in lib
     assert "tmpfiles.d" in lib
+
+
+def test_core_service_is_enableable_at_boot() -> None:
+    unit = (ROOT / "deploy" / "a4diag-core.service").read_text(encoding="utf-8")
+    assert "[Install]" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_core_service_documentation_uses_an_absolute_url() -> None:
+    unit = (ROOT / "deploy" / "a4diag-core.service").read_text(encoding="utf-8")
+    documentation = next(
+        line.removeprefix("Documentation=")
+        for line in unit.splitlines()
+        if line.startswith("Documentation=")
+    )
+    assert documentation.startswith(("https://", "http://", "man:"))
 
 
 def test_installer_reads_identity_files_from_release_systemd_tree() -> None:
@@ -317,7 +334,21 @@ exit 0
         )
         python.chmod(0o755)
         (self.bin / "systemctl").write_text(
-            "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "is-active" ]; then
+  state="${A4DIAG_TEST_SERVICE_STATE:-active}"
+  if [ "${2:-}" != "--quiet" ]; then
+    printf '%s\n' "$state"
+  fi
+  case "$state" in
+    active|activating) exit 0 ;;
+    *) exit 3 ;;
+  esac
+fi
+exit 0
+""",
+            encoding="utf-8",
         )
         (self.bin / "systemctl").chmod(0o755)
         for command in ("systemd-sysusers", "systemd-tmpfiles", "chown"):
@@ -421,7 +452,11 @@ exit 0
         return release
 
     def env(
-        self, *, version: str = "0.4.0", skip_systemd: bool = True
+        self,
+        *,
+        version: str = "0.4.0",
+        skip_systemd: bool = True,
+        service_state: str = "active",
     ) -> dict[str, str]:
         environment = os.environ.copy()
         environment.update(
@@ -435,6 +470,9 @@ exit 0
                 "A4DIAG_ALLOW_UNSIGNED": "1",
                 "A4DIAG_PIP_LOG": str(self.log),
                 "A4DIAG_TEST_REAL_PYTHON": sys.executable,
+                "A4DIAG_TEST_SERVICE_STATE": service_state,
+                "A4DIAG_SERVICE_START_ATTEMPTS": "1",
+                "A4DIAG_SERVICE_START_INTERVAL": "0",
                 "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
             }
         )
@@ -447,8 +485,13 @@ exit 0
         version: str = "0.4.0",
         inject_failure: str | None = None,
         skip_systemd: bool = True,
+        service_state: str = "active",
     ) -> subprocess.CompletedProcess[str]:
-        environment = self.env(version=version, skip_systemd=skip_systemd)
+        environment = self.env(
+            version=version,
+            skip_systemd=skip_systemd,
+            service_state=service_state,
+        )
         if inject_failure is not None:
             environment["A4DIAG_INJECT_FAILURE"] = inject_failure
         return subprocess.run(
@@ -479,6 +522,46 @@ def test_offline_install_runs_real_systemd_staging_path(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     installed_units = sandbox.root / "etc" / "systemd" / "system"
     assert {path.name for path in installed_units.iterdir()} == EXPECTED_SYSTEMD_UNITS
+
+
+@POSIX
+def test_install_rejects_service_stuck_activating(tmp_path: Path) -> None:
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path)
+
+    result = sandbox.install(
+        release,
+        skip_systemd=False,
+        service_state="activating",
+    )
+
+    assert result.returncode != 0
+    assert "failed to reach active state" in result.stderr
+
+
+@POSIX
+def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) -> None:
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path)
+    release.chmod(0o700)
+
+    result = sandbox.install(release)
+
+    assert result.returncode == 0, result.stderr
+    installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.4.0"
+    assert stat.S_IMODE(installed.stat().st_mode) == 0o755
+    registry = sandbox.root / "etc" / "a4diag" / "plugin-registry.json"
+    assert json.loads(registry.read_text(encoding="utf-8")) == {"plugins": []}
+    assert stat.S_IMODE(registry.stat().st_mode) == 0o640
+    plugin_root = sandbox.root / "opt" / "a4diag" / "plugins"
+    assert plugin_root.is_dir()
+    for name in ("core-ticket.key", "core-policy.key"):
+        secret = sandbox.root / "etc" / "a4diag" / "secrets" / name
+        assert re.fullmatch(r"[0-9a-f]{64}\n", secret.read_text(encoding="ascii"))
+        assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    cli = sandbox.root / "usr" / "local" / "bin" / "a4diag"
+    assert cli.is_symlink()
+    assert os.readlink(cli) == "/opt/a4diag/current/venv/bin/a4diag"
 
 
 @POSIX

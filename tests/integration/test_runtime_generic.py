@@ -532,6 +532,34 @@ def test_build_runtime_verifies_audit_chain(
         )
 
 
+def test_build_runtime_uses_system_clock_when_clock_is_omitted(tmp_path: Path) -> None:
+    settings_path = tmp_path / "config.yaml"
+    settings_path.write_text(
+        "global_mode: read_only\ntargets: []\nplugins: []\n",
+        encoding="utf-8",
+    )
+    manifests = tmp_path / "manifests"
+    manifests.mkdir()
+
+    runtime = build_runtime(
+        settings_path,
+        audit_path=tmp_path / "audit.jsonl",
+        checkpoints_path=tmp_path / "checkpoints.sqlite3",
+        transactions_path=tmp_path / "transactions.sqlite3",
+        approvals_path=tmp_path / "approvals.sqlite3",
+        registry_pins=(),
+        manifest_root=manifests,
+        plugin_ports_factory=lambda settings, registry: build_ports()[0],
+        ticket_key=TICKET_KEY,
+        policy_key=POLICY_KEY,
+    )
+    try:
+        result = runtime.handle({"event_id": "evt-clock", "request": "diagnose"})
+        assert result.status == "read_only"
+    finally:
+        runtime.close()
+
+
 def _write_target_config(tmp_path: Path) -> Path:
     settings_path = tmp_path / "config.yaml"
     settings_path.write_text(

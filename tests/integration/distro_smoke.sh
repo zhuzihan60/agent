@@ -29,6 +29,14 @@ echo "$OUTPUT" | grep -q '"ok": true'
 echo "$OUTPUT" | grep -q '"global_mode": "read_only"'
 echo "$OUTPUT" | grep -q '"targets": \[\]'
 
+echo "distro-smoke: production runtime starts with an empty read-only install"
+A4DIAG_CONFIG=/etc/a4diag/config.yaml /opt/a4diag/current/venv/bin/a4diag serve --once
+
+echo "distro-smoke: system CLI entrypoint resolves to the current release"
+[ -x /usr/local/bin/a4diag ]
+[ "$(readlink /usr/local/bin/a4diag)" = "/opt/a4diag/current/venv/bin/a4diag" ]
+/usr/local/bin/a4diag self-check --offline >/dev/null
+
 echo "distro-smoke: default configuration is root-owned and read-only defaults"
 [ -f /etc/a4diag/config.yaml ]
 grep -q '^global_mode: read_only$' /etc/a4diag/config.yaml
