@@ -37,11 +37,10 @@ grep -q '^targets: \[\]$' /etc/a4diag/config.yaml
 echo "distro-smoke: systemd units forbid configuration writes"
 grep -q 'ProtectSystem=strict' "$RELEASE_DIR/systemd/a4diag-core.service"
 grep -q 'ProtectSystem=strict' "$RELEASE_DIR/systemd/a4diag-plugin@.service"
-if grep -q 'ReadWritePaths' "$RELEASE_DIR/systemd/a4diag-core.service"; then
-  if grep 'ReadWritePaths' "$RELEASE_DIR/systemd/a4diag-core.service" | grep -q '/etc/a4diag'; then
-    echo "distro-smoke: FAIL core unit may write /etc/a4diag" >&2
-    exit 1
-  fi
+if grep -E '^[[:space:]]*ReadWritePaths=' "$RELEASE_DIR/systemd/a4diag-core.service" \
+  | grep -q '/etc/a4diag'; then
+  echo "distro-smoke: FAIL core unit may write /etc/a4diag" >&2
+  exit 1
 fi
 
 echo "distro-smoke: model-failure fallback stays read-only (static contract)"

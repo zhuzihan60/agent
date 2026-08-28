@@ -199,6 +199,8 @@ def test_distro_smoke_script_enforces_read_only_defaults() -> None:
     assert "read_only" in script
     assert "config.yaml" in script
     assert "t_11" not in script
+    assert "^[[:space:]]*ReadWritePaths=" in script
+    assert "grep -q 'ReadWritePaths'" not in script
 
 
 def test_posix_only_skips_are_documented() -> None:
