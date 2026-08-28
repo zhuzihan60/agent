@@ -198,9 +198,9 @@ a4diag_install_identities() {
   fi
   local version="$1"
   mkdir -p "${A4DIAG_ROOT}etc/sysusers.d" "${A4DIAG_ROOT}etc/tmpfiles.d"
-  install -m 0644 "${RELEASE_BASE}/${version}/sysusers.d/a4diag.conf" "${A4DIAG_ROOT}etc/sysusers.d/a4diag.conf"
+  install -m 0644 "${RELEASE_BASE}/${version}/systemd/sysusers.d/a4diag.conf" "${A4DIAG_ROOT}etc/sysusers.d/a4diag.conf"
   systemd-sysusers a4diag.conf || die "systemd-sysusers failed"
-  install -m 0644 "${RELEASE_BASE}/${version}/tmpfiles.d/a4diag.conf" "${A4DIAG_ROOT}etc/tmpfiles.d/a4diag.conf"
+  install -m 0644 "${RELEASE_BASE}/${version}/systemd/tmpfiles.d/a4diag.conf" "${A4DIAG_ROOT}etc/tmpfiles.d/a4diag.conf"
   systemd-tmpfiles --create a4diag.conf || die "systemd-tmpfiles failed"
   chown root:a4diag "$ETC_DIR/config.yaml"
   chmod 0640 "$ETC_DIR/config.yaml"
@@ -213,8 +213,18 @@ a4diag_install_units() {
     return 0
   fi
   local version="$1"
+  local unit
   mkdir -p "$SYSTEMD_DIR"
-  install -m 0644 "${RELEASE_BASE}/${version}/systemd/"* "$SYSTEMD_DIR/"
+  for unit in \
+    a4diag-cleanup.service \
+    a4diag-cleanup.timer \
+    a4diag-core.service \
+    a4diag-plugin@.service \
+    a4diag-plugin@.socket; do
+    install -m 0644 \
+      "${RELEASE_BASE}/${version}/systemd/${unit}" \
+      "$SYSTEMD_DIR/${unit}"
+  done
   log "installed systemd units"
 }
 

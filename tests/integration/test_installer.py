@@ -111,6 +111,21 @@ def test_install_lib_creates_systemd_identities() -> None:
     assert "tmpfiles.d" in lib
 
 
+def test_installer_reads_identity_files_from_release_systemd_tree() -> None:
+    """Support files must be read from the layout produced by the assembler."""
+    lib = INSTALL_LIB.read_text(encoding="utf-8")
+    assert '${RELEASE_BASE}/${version}/systemd/sysusers.d/a4diag.conf' in lib
+    assert '${RELEASE_BASE}/${version}/systemd/tmpfiles.d/a4diag.conf' in lib
+
+
+def test_installer_copies_only_the_declared_systemd_units() -> None:
+    """Unit installation must not pass support directories to ``install``."""
+    lib = INSTALL_LIB.read_text(encoding="utf-8")
+    assert '"${RELEASE_BASE}/${version}/systemd/"*' not in lib
+    for unit_name in EXPECTED_SYSTEMD_UNITS:
+        assert unit_name in lib
+
+
 def test_release_assembly_includes_the_installer(tmp_path: Path) -> None:
     """The assembled release must ship install.sh + tools/install_lib.sh."""
     import importlib.util
@@ -279,6 +294,10 @@ exit 0
             "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8"
         )
         (self.bin / "systemctl").chmod(0o755)
+        for command in ("systemd-sysusers", "systemd-tmpfiles", "chown"):
+            shim = self.bin / command
+            shim.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            shim.chmod(0o755)
 
     def make_release(
         self,
@@ -314,6 +333,18 @@ exit 0
         systemd.mkdir()
         for unit in EXPECTED_SYSTEMD_UNITS:
             (systemd / unit).write_text("[Unit]\n", encoding="utf-8")
+        (systemd / "sysusers.d").mkdir()
+        (systemd / "sysusers.d" / "a4diag.conf").write_text(
+            'u a4diag - "A4Diag agent" /var/lib/a4diag /usr/sbin/nologin\n'
+            "g a4diag - -\n",
+            encoding="utf-8",
+        )
+        (systemd / "tmpfiles.d").mkdir()
+        (systemd / "tmpfiles.d" / "a4diag.conf").write_text(
+            "d /run/a4diag 0750 a4diag a4diag -\n"
+            "d /var/lib/a4diag 0750 a4diag a4diag -\n",
+            encoding="utf-8",
+        )
         (release / "install.sh").write_bytes(INSTALL_SH.read_bytes())
         tools = release / "tools"
         tools.mkdir()
@@ -350,14 +381,16 @@ exit 0
         (release / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return release
 
-    def env(self, *, version: str = "0.4.0") -> dict[str, str]:
+    def env(
+        self, *, version: str = "0.4.0", skip_systemd: bool = True
+    ) -> dict[str, str]:
         environment = os.environ.copy()
         environment.update(
             {
                 "A4DIAG_ROOT": str(self.root) + os.sep,
                 "A4DIAG_OS_RELEASE": str(self.os_release),
                 "A4DIAG_SKIP_ROOT": "1",
-                "A4DIAG_SKIP_SYSTEMD": "1",
+                "A4DIAG_SKIP_SYSTEMD": "1" if skip_systemd else "0",
                 "A4DIAG_SKIP_DISK": "1",
                 "A4DIAG_EXPECTED_VERSION": version,
                 "A4DIAG_ALLOW_UNSIGNED": "1",
@@ -374,8 +407,9 @@ exit 0
         *,
         version: str = "0.4.0",
         inject_failure: str | None = None,
+        skip_systemd: bool = True,
     ) -> subprocess.CompletedProcess[str]:
-        environment = self.env(version=version)
+        environment = self.env(version=version, skip_systemd=skip_systemd)
         if inject_failure is not None:
             environment["A4DIAG_INJECT_FAILURE"] = inject_failure
         return subprocess.run(
@@ -393,6 +427,19 @@ exit 0
     @property
     def pip_argv(self) -> str:
         return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+
+
+@POSIX
+def test_offline_install_runs_real_systemd_staging_path(tmp_path: Path) -> None:
+    """The non-skipped systemd branch must consume the assembled release tree."""
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path)
+
+    result = sandbox.install(release, skip_systemd=False)
+
+    assert result.returncode == 0, result.stderr
+    installed_units = sandbox.root / "etc" / "systemd" / "system"
+    assert {path.name for path in installed_units.iterdir()} == EXPECTED_SYSTEMD_UNITS
 
 
 @POSIX
