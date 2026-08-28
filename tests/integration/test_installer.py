@@ -56,6 +56,8 @@ def test_install_lib_uses_offline_wheelhouse_flags() -> None:
     assert "--no-index" in lib
     assert "--find-links" in lib
     assert "wheelhouse" in lib
+    assert lib.count('"$pip" -m pip install') == 2
+    assert "--no-deps" in lib
 
 
 def test_installer_switches_current_atomically() -> None:
@@ -89,6 +91,13 @@ def test_installer_has_no_fixed_target_literals() -> None:
     assert "t_11" not in combined
     assert FORBIDDEN_TARGET_IP.search(combined) is None
     assert re.search(r"[A-Za-z0-9_.-]+@[0-9]", combined) is None
+
+
+def test_installer_declares_rhel_family_point_release_support() -> None:
+    lib = INSTALL_LIB.read_text(encoding="utf-8")
+    for distro in ("rocky", "almalinux", "rhel"):
+        for major in ("8", "9"):
+            assert f"{distro}:{major}.*" in lib
 
 
 def test_install_lib_creates_systemd_identities() -> None:
@@ -393,6 +402,29 @@ def test_offline_install_invokes_pip_without_index(tmp_path: Path) -> None:
     assert "--no-index" in sandbox.pip_argv
     assert "--find-links" in sandbox.pip_argv
     assert "a4diag-0.4.0-py3-none-any.whl" in sandbox.pip_argv
+    calls = sandbox.pip_argv.splitlines()
+    assert len(calls) == 2
+    assert "-r" in calls[0]
+    assert "a4diag-0.4.0-py3-none-any.whl" not in calls[0]
+    assert "--no-deps" in calls[1]
+    assert "-r" not in calls[1]
+    assert "a4diag_builtin_plugins-0.4.0-py3-none-any.whl" in calls[1]
+
+
+@pytest.mark.parametrize(
+    ("distro", "version"),
+    (("almalinux", "8.10"), ("almalinux", "9.8"), ("rocky", "9.5"), ("rhel", "8.10")),
+)
+@POSIX
+def test_install_accepts_supported_rhel_family_point_releases(
+    tmp_path: Path, distro: str, version: str
+) -> None:
+    sandbox = InstallerSandbox(tmp_path)
+    sandbox.os_release.write_text(
+        f'ID={distro}\nVERSION_ID="{version}"\n', encoding="utf-8"
+    )
+    result = sandbox.install(sandbox.make_release(tmp_path))
+    assert result.returncode == 0, result.stderr
 
 
 @POSIX

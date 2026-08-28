@@ -34,7 +34,7 @@ def test_ci_matrix_covers_supported_platforms() -> None:
     assert images == SUPPORTED_IMAGES
 
 
-def test_distro_jobs_provision_python_311_before_offline_install() -> None:
+def test_distro_jobs_provision_portable_python_311_before_offline_install() -> None:
     for workflow_name, job_name in (
         ("test.yml", "distro"),
         ("release.yml", "distro-smoke"),
@@ -43,18 +43,26 @@ def test_distro_jobs_provision_python_311_before_offline_install() -> None:
             (ROOT / ".github" / "workflows" / workflow_name).read_text()
         )
         steps = workflow["jobs"][job_name]["steps"]
-        setup_index = next(
+        setup_uv_index = next(
             index
             for index, step in enumerate(steps)
-            if str(step.get("uses", "")).startswith("actions/setup-python@")
+            if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+        )
+        install_python_index = next(
+            index
+            for index, step in enumerate(steps)
+            if "uv python install 3.11" in step.get("run", "")
         )
         smoke_index = next(
             index
             for index, step in enumerate(steps)
             if "distro_smoke.sh" in step.get("run", "")
         )
-        assert steps[setup_index]["with"]["python-version"] == "3.11"
-        assert setup_index < smoke_index
+        assert steps[setup_uv_index]["uses"] == (
+            "astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
+        )
+        assert steps[setup_uv_index]["with"]["version"] == "0.12.6"
+        assert setup_uv_index < install_python_index < smoke_index
 
 
 def test_release_workflow_triggers_on_version_tags_only() -> None:
