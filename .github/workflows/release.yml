@@ -196,18 +196,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: a4diag-public-assets
-          path: /release-assets
+          path: ${{ runner.temp }}/release-assets
       - name: Verify stable release asset inventory
         run: |
-          test -f /release-assets/a4diag.tar.gz
-          test -f /release-assets/a4diag.tar.gz.sig
-          test -f /release-assets/install-a4diag.sh
-          test -f /release-assets/a4diag-release-public.pem
+          test -f "$RUNNER_TEMP/release-assets/a4diag.tar.gz"
+          test -f "$RUNNER_TEMP/release-assets/a4diag.tar.gz.sig"
+          test -f "$RUNNER_TEMP/release-assets/install-a4diag.sh"
+          test -f "$RUNNER_TEMP/release-assets/a4diag-release-public.pem"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            /release-assets/a4diag.tar.gz
-            /release-assets/a4diag.tar.gz.sig
-            /release-assets/install-a4diag.sh
-            /release-assets/a4diag-release-public.pem
+            ${{ runner.temp }}/release-assets/a4diag.tar.gz
+            ${{ runner.temp }}/release-assets/a4diag.tar.gz.sig
+            ${{ runner.temp }}/release-assets/install-a4diag.sh
+            ${{ runner.temp }}/release-assets/a4diag-release-public.pem
