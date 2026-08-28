@@ -64,7 +64,7 @@ a4diag_check_distro() {
 }
 
 a4diag_require_commands() {
-  for command in python3.11 sha256sum openssl grep cut head; do
+  for command in python3.11 sha256sum grep cut head; do
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
   done
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
@@ -135,6 +135,7 @@ PY
   if [ -f "$release_dir/MANIFEST.sig" ]; then
     [ -n "${A4DIAG_TRUSTED_KEY:-}" ] || die "release is signed but no A4DIAG_TRUSTED_KEY was provided"
     [ -f "$A4DIAG_TRUSTED_KEY" ] || die "trusted release public key is missing: $A4DIAG_TRUSTED_KEY"
+    command -v openssl >/dev/null 2>&1 || die "required command missing: openssl"
     openssl dgst -sha256 -verify "$A4DIAG_TRUSTED_KEY" \
       -signature "$release_dir/MANIFEST.sig" \
       "$release_dir/MANIFEST.json" >/dev/null 2>&1 \
