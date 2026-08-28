@@ -51,7 +51,7 @@ def test_public_bootstrap_is_self_contained_and_fail_closed() -> None:
     assert "openssl dgst -sha256 -verify" in bootstrap
     assert "BEGIN PUBLIC KEY" in bootstrap
     assert "A4DIAG_TRUSTED_KEY" in bootstrap
-    assert "A4DIAG_ALLOW_UNSIGNED" not in bootstrap
+    assert "A4DIAG_ALLOW_UNSIGNED=0" in bootstrap
     assert "BEGIN PRIVATE KEY" not in bootstrap
     public_key = (ROOT / "release-keys" / "a4diag-release-public.pem").read_text(
         encoding="utf-8"
@@ -66,6 +66,13 @@ def test_installer_is_fail_closed_by_default() -> None:
     assert "set -euo pipefail" in lib
     assert "a4diag_require_root" in lib
     assert "must run as root" in lib
+
+
+def test_inner_installer_exposes_only_the_verified_offline_entrypoint() -> None:
+    install = INSTALL_SH.read_text(encoding="utf-8")
+    assert "--offline RELEASE_DIR" in install
+    assert "--online" not in install
+    assert "A4DIAG_RELEASE_URL" not in install
 
 
 def test_install_lib_uses_offline_wheelhouse_flags() -> None:

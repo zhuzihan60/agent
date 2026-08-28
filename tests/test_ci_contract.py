@@ -100,6 +100,27 @@ def test_release_workflow_triggers_on_version_tags_only() -> None:
     assert any(tag == "v*" or tag.startswith("v") for tag in tags)
 
 
+def test_release_tag_is_bound_to_the_built_project_version_before_signing() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    )
+    steps = workflow["jobs"]["assemble-and-sign"]["steps"]
+    bind_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Bind release tag to project version"
+    )
+    signing_key_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Write the private signing key from repository secret material"
+    )
+    command = steps[bind_index]["run"]
+    assert "GITHUB_REF_NAME" in command
+    assert "RELEASE_VERSION" in command
+    assert bind_index < signing_key_index
+
+
 def test_workflows_contain_no_literal_credentials() -> None:
     for name in ("test.yml", "release.yml"):
         text = (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
@@ -207,6 +228,25 @@ def test_release_workflow_publishes_one_click_assets_after_linux_gates() -> None
     assert "install-a4diag.sh" in files
 
 
+def test_release_workflow_removes_private_key_before_artifact_upload() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    )
+    steps = workflow["jobs"]["assemble-and-sign"]["steps"]
+    cleanup_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Remove the private signing key"
+    )
+    upload_index = next(
+        index
+        for index, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    )
+    assert "rm -f /tmp/a4diag-release-private.pem" in steps[cleanup_index]["run"]
+    assert cleanup_index < upload_index
+
+
 def test_release_workflow_runs_the_public_bootstrap_in_linux() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text()
@@ -221,6 +261,13 @@ def test_release_workflow_runs_the_public_bootstrap_in_linux() -> None:
     assert bootstrap_step["env"]["A4DIAG_RELEASE_SIGNATURE_URL"].startswith(
         "file://"
     )
+    tamper_step = next(
+        step
+        for step in workflow["jobs"]["distro-smoke"]["steps"]
+        if step.get("name") == "Reject a tampered public release archive"
+    )
+    assert "a4diag-tampered.tar.gz" in tamper_step["run"]
+    assert "must reject a tampered archive" in tamper_step["run"]
 
 
 def test_ci_build_job_generates_verified_wheelhouse() -> None:
