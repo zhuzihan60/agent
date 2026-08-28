@@ -197,7 +197,7 @@ def test_self_check_reports_read_only_defaults(tmp_path: Path, monkeypatch: pyte
 
 def _posix_reason() -> str:
     return (
-        "requires POSIX bash/openssl/sha256sum; msys2 bash cannot start under the "
+        "requires POSIX bash/sha256sum; msys2 bash cannot start under the "
         "Windows file sandbox, so the shell harness runs on the Linux CI matrix"
     )
 

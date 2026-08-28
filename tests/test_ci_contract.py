@@ -110,6 +110,56 @@ def test_test_jobs_install_both_local_packages_before_pytest() -> None:
         )
 
 
+def test_windows_job_has_hashed_mcp_platform_dependency_and_fail_fast_shell() -> None:
+    requirements = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+    assert re.search(
+        r"^pywin32==312\s*;\s*sys_platform\s*==\s*['\"]win32['\"]\s*\\$",
+        requirements,
+        re.MULTILINE,
+    )
+    assert "--hash=sha256:d11417d84412f859b722fad0841b3614459ed0047f7542d8362e77884f6b6e8a" in requirements
+
+    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "test.yml").read_text())
+    install_step = next(
+        step
+        for step in workflow["jobs"]["windows-documented-skips"]["steps"]
+        if step.get("name") == "Install build/test dependencies"
+    )
+    assert install_step.get("shell") == "bash"
+
+
+def test_distro_smoke_preserves_unsigned_test_and_signed_release_boundaries() -> None:
+    test_workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "test.yml").read_text()
+    )
+    test_smoke = next(
+        step
+        for step in test_workflow["jobs"]["distro"]["steps"]
+        if "distro_smoke.sh" in step.get("run", "")
+    )
+    assert test_smoke.get("env", {}).get("A4DIAG_ALLOW_UNSIGNED") == "1"
+
+    release_workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    )
+    release_job = release_workflow["jobs"]["distro-smoke"]
+    assert release_job.get("environment") == "release"
+    release_steps = release_job["steps"]
+    key_step = next(
+        step
+        for step in release_steps
+        if step.get("name") == "Write the verification key from repository secret material"
+    )
+    assert "secrets.A4DIAG_RELEASE_KEY" in key_step.get("run", "")
+    release_smoke = next(
+        step for step in release_steps if "distro_smoke.sh" in step.get("run", "")
+    )
+    assert release_smoke.get("env", {}).get("A4DIAG_TRUSTED_KEY") == (
+        "/tmp/a4diag-release.key"
+    )
+    assert "A4DIAG_ALLOW_UNSIGNED" not in release_smoke.get("env", {})
+
+
 def test_ci_build_job_generates_verified_wheelhouse() -> None:
     """The CI build job must build the dependency wheelhouse from the lockfile
     and reference the builtin wheel at its real output path."""

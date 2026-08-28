@@ -70,6 +70,7 @@ jobs:
   distro-smoke:
     runs-on: ubuntu-latest
     needs: assemble-and-sign
+    environment: release
     strategy:
       fail-fast: false
       matrix:
@@ -93,7 +94,13 @@ jobs:
         with:
           name: a4diag-signed-release
           path: /release
+      - name: Write the verification key from repository secret material
+        run: |
+          printf '%s' "${{ secrets.A4DIAG_RELEASE_KEY }}" > /tmp/a4diag-release.key
+          chmod 0600 /tmp/a4diag-release.key
       - name: Distro offline-install smoke on the signed release
+        env:
+          A4DIAG_TRUSTED_KEY: /tmp/a4diag-release.key
         run: bash tests/integration/distro_smoke.sh
 
   publish:

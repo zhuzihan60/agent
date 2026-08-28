@@ -514,7 +514,7 @@ def _read_key(path: Path | None) -> bytes | None:
     """Read an HMAC key file.
 
     The key file is a 64-hex-character text file (32 random bytes in hex),
-    the same format the shell installer feeds to ``openssl -macopt hexkey:``.
+    the same raw-byte format consumed by the shell installer's Python verifier.
     """
     if path is None:
         return None

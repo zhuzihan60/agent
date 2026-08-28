@@ -379,8 +379,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
                 _,
             ) = self.create_assembly_fixture(root)
             signing_key = root / "release.key"
-            # The key file is 64 hex characters (32 random bytes), the same
-            # format the shell installer feeds to openssl -macopt hexkey:.
+            # The signing key file is read as raw bytes by both release tools.
             signing_key.write_text("ab" * 32, encoding="utf-8")
 
             def run_verify() -> subprocess.CompletedProcess[str]:

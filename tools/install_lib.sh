@@ -71,7 +71,6 @@ a4diag_require_commands() {
       command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
     done
   fi
-  command -v openssl >/dev/null 2>&1 || die "required command missing: openssl"
 }
 
 a4diag_check_disk() {
