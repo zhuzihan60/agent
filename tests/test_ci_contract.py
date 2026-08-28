@@ -175,7 +175,7 @@ def test_distro_smoke_preserves_unsigned_test_and_signed_release_boundaries() ->
         for step in release_steps
         if step.get("name") == "Stage pinned public verification key"
     )
-    assert "deploy/a4diag-release-public.pem" in key_step.get("run", "")
+    assert "release-keys/a4diag-release-public.pem" in key_step.get("run", "")
     assert "secrets." not in key_step.get("run", "")
     release_smoke = next(
         step for step in release_steps if "distro_smoke.sh" in step.get("run", "")
@@ -211,14 +211,16 @@ def test_release_workflow_runs_the_public_bootstrap_in_linux() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text()
     )
-    commands = "\n".join(
-        step.get("run", "")
+    bootstrap_step = next(
+        step
         for step in workflow["jobs"]["distro-smoke"]["steps"]
-        if "run" in step
+        if step.get("name") == "Public one-click bootstrap smoke"
     )
-    assert "install-a4diag.sh" in commands
-    assert "A4DIAG_RELEASE_URL" in commands
-    assert "A4DIAG_RELEASE_SIGNATURE_URL" in commands
+    assert "install-a4diag.sh" in bootstrap_step["run"]
+    assert bootstrap_step["env"]["A4DIAG_RELEASE_URL"].startswith("file://")
+    assert bootstrap_step["env"]["A4DIAG_RELEASE_SIGNATURE_URL"].startswith(
+        "file://"
+    )
 
 
 def test_ci_build_job_generates_verified_wheelhouse() -> None:

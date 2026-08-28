@@ -63,7 +63,7 @@ jobs:
             --signing-key /tmp/a4diag-release-private.pem
           python tools/build_release.py verify-release \
             --release-root /tmp/a4diag-release \
-            --verification-key deploy/a4diag-release-public.pem
+            --verification-key release-keys/a4diag-release-public.pem
       - name: Stage stable one-click release assets
         run: |
           mkdir -p /tmp/a4diag-public-assets/archive-root
@@ -75,7 +75,7 @@ jobs:
             -out /tmp/a4diag-public-assets/a4diag.tar.gz.sig \
             /tmp/a4diag-public-assets/a4diag.tar.gz
           cp install-a4diag.sh /tmp/a4diag-public-assets/install-a4diag.sh
-          cp deploy/a4diag-release-public.pem \
+          cp release-keys/a4diag-release-public.pem \
             /tmp/a4diag-public-assets/a4diag-release-public.pem
           rm -rf /tmp/a4diag-public-assets/archive-root
       - name: Upload signed release
@@ -130,7 +130,7 @@ jobs:
           path: /public-assets
       - name: Stage pinned public verification key
         run: |
-          cp deploy/a4diag-release-public.pem /tmp/a4diag-release-public.pem
+          cp release-keys/a4diag-release-public.pem /tmp/a4diag-release-public.pem
           chmod 0644 /tmp/a4diag-release-public.pem
       - name: Distro offline-install smoke on the signed release
         env:

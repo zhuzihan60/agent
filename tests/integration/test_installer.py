@@ -53,7 +53,7 @@ def test_public_bootstrap_is_self_contained_and_fail_closed() -> None:
     assert "A4DIAG_TRUSTED_KEY" in bootstrap
     assert "A4DIAG_ALLOW_UNSIGNED" not in bootstrap
     assert "BEGIN PRIVATE KEY" not in bootstrap
-    public_key = (ROOT / "deploy" / "a4diag-release-public.pem").read_text(
+    public_key = (ROOT / "release-keys" / "a4diag-release-public.pem").read_text(
         encoding="utf-8"
     ).strip()
     assert public_key in bootstrap
