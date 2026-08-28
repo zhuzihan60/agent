@@ -489,6 +489,7 @@ def build_runtime(
     """
     if not callable(plugin_ports_factory):
         raise TypeError("plugin_ports_factory must be callable")
+    runtime_clock = clock if clock is not None else lambda: int(time.time())
     settings = load_settings(Path(settings_path))
     audit = AuditWriter(
         Path(audit_path),
@@ -505,7 +506,11 @@ def build_runtime(
     policy = PolicyEngine(settings, registry, authorization_key=policy_key)
     approvals = ApprovalStore(Path(approvals_path))
     transactions = TransactionStore(Path(transactions_path))
-    tickets = TicketIssuer(ticket_key, authorization_key=policy_key, clock=clock)
+    tickets = TicketIssuer(
+        ticket_key,
+        authorization_key=policy_key,
+        clock=runtime_clock,
+    )
     connection = sqlite3.connect(str(Path(checkpoints_path)), check_same_thread=False)
     checkpointer = SqliteSaver(connection)
     plugins = plugin_ports_factory(settings, registry)
@@ -530,7 +535,7 @@ def build_runtime(
         checkpointer=checkpointer,
         plugins=plugins,
         audit=audit,
-        clock=clock,
+        clock=runtime_clock,
         recoverable=recoverable,
     )
 

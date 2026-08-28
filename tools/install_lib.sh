@@ -17,6 +17,8 @@
 #   A4DIAG_TRUSTED_KEY   path to the RSA public key used to verify MANIFEST.sig
 #   A4DIAG_ALLOW_UNSIGNED set to 1 to accept a release without MANIFEST.sig
 #   A4DIAG_PIP_LOG       path where the pip argv is recorded (tests only)
+#   A4DIAG_SERVICE_START_ATTEMPTS  bounded readiness checks (tests only)
+#   A4DIAG_SERVICE_START_INTERVAL  seconds between checks (tests only)
 
 set -euo pipefail
 
@@ -28,6 +30,8 @@ RELEASE_BASE="${A4DIAG_ROOT}opt/a4diag/releases"
 CURRENT_LINK="${A4DIAG_ROOT}opt/a4diag/current"
 ETC_DIR="${A4DIAG_ROOT}etc/a4diag"
 SYSTEMD_DIR="${A4DIAG_ROOT}etc/systemd/system"
+PLUGIN_ROOT="${A4DIAG_ROOT}opt/a4diag/plugins"
+CLI_LINK="${A4DIAG_ROOT}usr/local/bin/a4diag"
 
 die() {
   echo "a4diag installer: $*" >&2
@@ -156,6 +160,8 @@ a4diag_install_release() {
   fi
   mkdir -p "$target"
   cp -a "$release_dir/." "$target/"
+  chown -hR root:root "$target"
+  chmod 0755 "$target"
 
   log "creating virtual environment for $version"
   python3.11 -m venv "$target/venv"
@@ -202,6 +208,54 @@ a4diag_install_identities() {
   log "created a4diag user/group and runtime directories"
 }
 
+a4diag_initialize_runtime() {
+  local registry="$ETC_DIR/plugin-registry.json"
+  local secrets_dir="$ETC_DIR/secrets"
+  local secret
+
+  [ ! -L "$ETC_DIR" ] || die "configuration directory must not be a symlink"
+  [ ! -L "$PLUGIN_ROOT" ] || die "plugin directory must not be a symlink"
+  [ ! -L "$secrets_dir" ] || die "secret directory must not be a symlink"
+
+  install -d -m 0750 "$PLUGIN_ROOT"
+  install -d -m 0700 "$secrets_dir"
+
+  if [ ! -f "$registry" ]; then
+    local registry_tmp="$ETC_DIR/.plugin-registry.json.tmp.$$"
+    (umask 077 && printf '%s\n' '{"plugins":[]}' > "$registry_tmp")
+    chmod 0640 "$registry_tmp"
+    mv -T "$registry_tmp" "$registry"
+    log "created empty plugin registry at $registry"
+  fi
+
+  for secret in core-ticket.key core-policy.key; do
+    if [ ! -f "$secrets_dir/$secret" ]; then
+      python3.11 - "$secrets_dir/$secret" <<'PY'
+import os
+import secrets
+import sys
+
+path = sys.argv[1]
+descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+    handle.write(secrets.token_hex(32) + "\n")
+PY
+      log "created internal authorization key: $secret"
+    fi
+    chmod 0600 "$secrets_dir/$secret"
+  done
+
+  chmod 0640 "$registry"
+  chmod 0750 "$PLUGIN_ROOT"
+  chmod 0700 "$secrets_dir"
+  if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
+    chown root:a4diag "$registry" "$PLUGIN_ROOT"
+    chown a4diag:a4diag "$secrets_dir" \
+      "$secrets_dir/core-ticket.key" \
+      "$secrets_dir/core-policy.key"
+  fi
+}
+
 a4diag_install_units() {
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" = "1" ]; then
     log "skipping systemd unit installation (A4DIAG_SKIP_SYSTEMD=1)"
@@ -232,6 +286,23 @@ a4diag_switch_current() {
   log "switched current -> $version"
 }
 
+a4diag_install_cli_link() {
+  local expected="/opt/a4diag/current/venv/bin/a4diag"
+  local cli_dir
+  cli_dir="$(dirname "$CLI_LINK")"
+  mkdir -p "$cli_dir"
+  if [ -e "$CLI_LINK" ] || [ -L "$CLI_LINK" ]; then
+    [ -L "$CLI_LINK" ] || die "refusing to replace non-symlink CLI path: $CLI_LINK"
+    [ "$(readlink "$CLI_LINK")" = "$expected" ] || {
+      die "refusing to replace unexpected CLI symlink: $CLI_LINK"
+    }
+  fi
+  local temporary_link="${CLI_LINK}.tmp.$$"
+  ln -s "$expected" "$temporary_link"
+  mv -T "$temporary_link" "$CLI_LINK"
+  log "installed CLI entrypoint at $CLI_LINK"
+}
+
 a4diag_restart_services() {
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" = "1" ]; then
     log "skipping service start (A4DIAG_SKIP_SYSTEMD=1)"
@@ -239,8 +310,23 @@ a4diag_restart_services() {
   fi
   systemctl daemon-reload || return 1
   systemctl enable --now a4diag-core.service || return 1
-  systemctl is-active --quiet a4diag-core.service || return 1
-  log "started a4diag-core.service"
+  local attempts="${A4DIAG_SERVICE_START_ATTEMPTS:-60}"
+  local interval="${A4DIAG_SERVICE_START_INTERVAL:-1}"
+  case "$attempts:$interval" in
+    *[!0-9:]*|0:*) die "invalid service readiness bounds" ;;
+  esac
+  local state="" attempt=1
+  while [ "$attempt" -le "$attempts" ]; do
+    state="$(systemctl is-active a4diag-core.service 2>/dev/null || true)"
+    if [ "$state" = "active" ]; then
+      log "started a4diag-core.service"
+      return 0
+    fi
+    sleep "$interval"
+    attempt=$((attempt + 1))
+  done
+  echo "a4diag installer: a4diag-core.service failed to reach active state (last state: ${state:-unknown})" >&2
+  return 1
 }
 
 a4diag_install_release_tree() {
@@ -254,7 +340,9 @@ a4diag_install_release_tree() {
 
   a4diag_install_release "$release_dir"
   a4diag_install_identities "$version"
+  a4diag_initialize_runtime
   a4diag_install_units "$version"
+  a4diag_install_cli_link
   a4diag_switch_current "$version"
 
   if ! a4diag_restart_services "$version"; then

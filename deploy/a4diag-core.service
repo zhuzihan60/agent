@@ -6,7 +6,7 @@
 
 [Unit]
 Description=A4Diag core agent (generic plugin runtime)
-Documentation=docs/migration/v0.3-to-v0.4.md
+Documentation=https://github.com/zhuzihan60/agent/blob/main/docs/migration/v0.3-to-v0.4.md
 After=network-online.target
 Wants=network-online.target
 
@@ -44,3 +44,6 @@ ReadWritePaths=/var/lib/a4diag /run/a4diag
 ReadOnlyPaths=/etc/a4diag /opt/a4diag/current
 
 LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
