@@ -45,6 +45,10 @@
             "type": "string",
             "pattern": "^target/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
           },
+          "identity_fingerprint": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
           "write_enabled": {"type": "boolean"},
           "auto_execute_low": {"type": "boolean"},
           "notification_required": {"type": "boolean"},
@@ -52,6 +56,9 @@
           "host": {"type": ["string", "null"]},
           "port": {"type": ["integer", "null"], "minimum": 1, "maximum": 65535},
           "user": {"type": ["string", "null"]},
+          "identity_file_ref": {"type": ["string", "null"]},
+          "known_hosts_ref": {"type": ["string", "null"]},
+          "operation_signing_key_ref": {"type": ["string", "null"]},
           "capabilities": {
             "type": "array",
             "uniqueItems": true,

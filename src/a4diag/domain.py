@@ -195,10 +195,14 @@ class TargetConfig(BaseModel):
     id: str
     mode: TargetMode
     identity_ref: str
+    identity_fingerprint: str | None = None
     transport: str | None = None
     host: str | None = None
     port: int | None = None
     user: str | None = None
+    identity_file_ref: str | None = None
+    known_hosts_ref: str | None = None
+    operation_signing_key_ref: str | None = None
     write_enabled: bool = False
     auto_execute_low: bool = False
     capabilities: tuple[CapabilityGrant, ...] = ()
@@ -209,6 +213,26 @@ class TargetConfig(BaseModel):
     def validate_id(cls, value: str) -> str:
         if not _TARGET_ID_PATTERN.fullmatch(value):
             raise ValueError("id must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+        return value
+
+    @field_validator("identity_fingerprint")
+    @classmethod
+    def validate_identity_fingerprint(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise ValueError("identity_fingerprint must be a sha256 fingerprint")
+        return value
+
+    @field_validator(
+        "identity_file_ref", "known_hosts_ref", "operation_signing_key_ref"
+    )
+    @classmethod
+    def validate_target_secret_ref(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(
+            r"file:[A-Za-z0-9][A-Za-z0-9_./-]{0,255}", value
+        ):
+            raise ValueError("target secret reference must be a safe file reference")
+        if value is not None and any(part in {"", ".", ".."} for part in value[5:].split("/")):
+            raise ValueError("target secret reference contains an unsafe path")
         return value
 
     @model_validator(mode="after")

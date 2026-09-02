@@ -46,7 +46,7 @@ class FakeTransport:
                 raise IdentityError(self.probe_error)
             raise self.probe_error
         self.probed.append(target.id)
-        return f"fp-{target.id}"
+        return "sha256:" + "a" * 64
 
 
 class FakeModel:
@@ -170,7 +170,7 @@ def test_init_local_target_registration(tmp_path: Path) -> None:
     )
 
     assert transport.probed == ["lab"]
-    assert result.fingerprints == {"lab": "fp-lab"}
+    assert result.fingerprints == {"lab": "sha256:" + "a" * 64}
     assert len(result.settings.targets) == 1
     target = result.settings.targets[0]
     assert target.id == "lab"
@@ -190,7 +190,7 @@ def test_init_ssh_target_registration(tmp_path: Path) -> None:
 
     target = result.settings.targets[0]
     assert target.mode is TargetMode.SSH
-    assert result.fingerprints == {"lab": "fp-lab"}
+    assert result.fingerprints == {"lab": "sha256:" + "a" * 64}
     loaded = load_settings(tmp_path / "config.yaml")
     assert loaded.targets[0].mode is TargetMode.SSH
 

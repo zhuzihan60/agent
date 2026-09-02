@@ -518,12 +518,17 @@ def build_runtime(
         raise RuntimeFailure("plugin_ports_invalid", "factory must return PluginPorts")
     for target in settings.targets:
         try:
-            plugins.collector.verify_identity(target)
+            fingerprint = plugins.collector.verify_identity(target)
         except Exception as error:
             raise RuntimeFailure(
                 "target_identity_unavailable",
                 f"{target.id}:{type(error).__name__}",
             ) from error
+        if (
+            target.identity_fingerprint is not None
+            and fingerprint != target.identity_fingerprint
+        ):
+            raise RuntimeFailure("target_identity_mismatch", target.id)
     recoverable = transactions.incomplete_transaction_ids()
     return Runtime(
         settings=settings,

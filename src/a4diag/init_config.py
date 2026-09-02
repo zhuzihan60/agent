@@ -159,6 +159,9 @@ class TargetInit(BaseModel):
     port: int | None = None
     user: str | None = None
     transport: str | None = None
+    identity_file_ref: str | None = None
+    known_hosts_ref: str | None = None
+    operation_signing_key_ref: str | None = None
     write_enabled: bool = False
     auto_execute_low: bool = False
     capabilities: tuple[CapabilityInit, ...] = ()
@@ -202,6 +205,20 @@ class TargetInit(BaseModel):
             raise ValueError("user must be a safe SSH username")
         return value
 
+    @field_validator(
+        "identity_file_ref", "known_hosts_ref", "operation_signing_key_ref"
+    )
+    @classmethod
+    def validate_file_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.startswith("file:"):
+            raise ValueError("target secret references must use file:")
+        relative = value[5:]
+        if not relative or any(part in {"", ".", ".."} for part in relative.split("/")):
+            raise ValueError("unsafe target secret reference")
+        return value
+
     @model_validator(mode="after")
     def validate_mode_fields(self) -> TargetInit:
         if self.mode is TargetMode.SSH:
@@ -230,6 +247,7 @@ class NotificationInit(BaseModel):
 class InitRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    global_mode: Literal["read_only", "read_write"] = "read_only"
     model: ModelInit | None = None
     targets: tuple[TargetInit, ...] = ()
     notifications: tuple[NotificationInit, ...] = ()
@@ -237,7 +255,9 @@ class InitRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_write_confirmation(self) -> InitRequest:
-        if any(target.write_enabled for target in self.targets):
+        if self.global_mode == "read_write" or any(
+            target.write_enabled for target in self.targets
+        ):
             if self.write_confirmation != "ENABLE":
                 raise ValueError("write_enabled requires write_confirmation=ENABLE")
         return self
@@ -344,7 +364,7 @@ class InitService:
                 raise
             except Exception as error:
                 raise InitError("identity_probe_failed") from error
-        settings = self._build_settings(request)
+        settings = self._build_settings(request, fingerprints)
         try:
             config_bytes = settings_to_yaml(settings)
         except (ValueError, TypeError) as error:
@@ -393,12 +413,18 @@ class InitService:
             config_bytes=result.config_bytes,
         )
 
-    def _build_settings(self, request: InitRequest) -> AgentSettings:
-        targets = tuple(self._build_target(target) for target in request.targets)
+    def _build_settings(
+        self, request: InitRequest, fingerprints: Mapping[str, str]
+    ) -> AgentSettings:
+        targets = tuple(
+            self._build_target(target, fingerprints[target.id])
+            for target in request.targets
+        )
         try:
             return AgentSettings(
                 global_mode="read_write"
-                if any(target.write_enabled for target in targets)
+                if request.global_mode == "read_write"
+                or any(target.write_enabled for target in targets)
                 else "read_only",
                 targets=targets,
                 plugins=(),
@@ -417,7 +443,7 @@ class InitService:
         except ValueError as error:
             raise InitError("invalid_request", str(error)) from error
 
-    def _build_target(self, target: TargetInit) -> TargetConfig:
+    def _build_target(self, target: TargetInit, fingerprint: str) -> TargetConfig:
         capabilities = tuple(
             CapabilityGrant(
                 name=capability.name,
@@ -431,10 +457,14 @@ class InitService:
                 id=target.id,
                 mode=target.mode,
                 identity_ref=f"target/{target.id}",
+                identity_fingerprint=fingerprint,
                 transport=target.transport or f"transport-{target.mode.value}",
                 host=target.host,
                 port=target.port,
                 user=target.user,
+                identity_file_ref=target.identity_file_ref,
+                known_hosts_ref=target.known_hosts_ref,
+                operation_signing_key_ref=target.operation_signing_key_ref,
                 write_enabled=target.write_enabled,
                 auto_execute_low=target.auto_execute_low,
                 capabilities=capabilities,

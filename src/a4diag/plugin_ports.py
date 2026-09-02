@@ -321,9 +321,10 @@ def _target_signer(target: TargetConfig) -> TargetSigner:
     from a4diag.secrets import SecretError, SecretResolver
 
     try:
-        pem = SecretResolver().resolve(
+        key_ref = target.operation_signing_key_ref or (
             f"file:targets/{target.id}/operation-ed25519.pem"
-        ).value.encode("utf-8")
+        )
+        pem = SecretResolver().resolve(key_ref).value.encode("utf-8")
         key = serialization.load_pem_private_key(pem, password=None)
     except (SecretError, ValueError, TypeError) as error:
         raise RuntimeFailure("target_signing_key_unavailable", target.id) from error
