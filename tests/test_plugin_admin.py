@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+import a4diag.cli as cli
 from a4diag.cli import main as cli_main
 from a4diag.plugin_admin import (
     AdminRequired,
@@ -42,14 +43,42 @@ class FakeServiceManager:
         self.started.append(name)
 
 
-def make_admin(tmp_path: Path, *, is_admin: bool = True) -> PluginAdmin:
+def make_admin(
+    tmp_path: Path,
+    *,
+    is_admin: bool = True,
+    signing_key: bytes | None = SIGNING_KEY,
+) -> PluginAdmin:
     return PluginAdmin(
         authorizer=Authorizer(is_admin=is_admin),
         service_manager=FakeServiceManager(),
         plugin_root=tmp_path / "plugins",
         registry_path=tmp_path / "registry.json",
-        signing_key=SIGNING_KEY,
+        signing_key=signing_key,
     )
+
+
+def test_plugin_list_does_not_resolve_signing_key(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_signing_key",
+        lambda: (_ for _ in ()).throw(AssertionError("must not resolve")),
+    )
+
+    assert cli.main(["plugin", "list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"plugins": []}
+
+
+def test_production_plugin_install_without_trust_model_fails_closed(
+    tmp_path: Path,
+) -> None:
+    admin = make_admin(tmp_path, signing_key=None)
+
+    with pytest.raises(PluginAdminError, match="third_party_plugins_unsupported"):
+        admin.install(tmp_path / "third-party")
 
 
 def manifest_data(**overrides: object) -> dict[str, object]:
