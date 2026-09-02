@@ -44,6 +44,7 @@ jobs:
       - name: Select and run suite
         env:
           SUITE: ${{ inputs.suite || 'core' }}
+          A4DIAG_E2E: ${{ (inputs.suite == 'e2e' || inputs.suite == 'full') && '1' || '0' }}
         shell: bash
         run: |
           set -euo pipefail
