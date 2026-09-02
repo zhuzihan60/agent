@@ -13,6 +13,7 @@ python3.11 tools/build_release.py verify-target-release --release-root "$release
 
 echo "target-distro-smoke: offline install with no managed resources"
 A4DIAG_TARGET_SKIP_SYSTEMD=1 \
+  A4DIAG_TARGET_MACHINE_ID=0123456789abcdef0123456789abcdef \
   bash "$release/tools/install_target_lib.sh" install "$release" "$config"
 
 test -x /usr/libexec/a4diag/a4diag-transport-helper
@@ -24,5 +25,6 @@ grep -Fq 'restrict,command="/usr/libexec/a4diag/a4diag-transport-helper"' /var/l
 
 echo "target-distro-smoke: idempotent reinstall"
 A4DIAG_TARGET_SKIP_SYSTEMD=1 \
+  A4DIAG_TARGET_MACHINE_ID=0123456789abcdef0123456789abcdef \
   bash "$release/tools/install_target_lib.sh" install "$release" "$config"
 echo "target-distro-smoke: PASS"
