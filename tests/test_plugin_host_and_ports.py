@@ -173,7 +173,7 @@ def test_rpc_ports_compose_and_runtime_builds_with_zero_targets(tmp_path: Path) 
     assert runtime.registered_target_ids == frozenset()
 
 
-def test_rpc_executor_fails_closed_on_unreachable_socket(tmp_path: Path) -> None:
+def test_rpc_executor_fails_closed_on_invalid_ticket_before_transport(tmp_path: Path) -> None:
     from a4diag.domain import Operation, Risk
     from a4diag.plugin_ports import build_rpc_plugin_ports
 
@@ -189,7 +189,7 @@ def test_rpc_executor_fails_closed_on_unreachable_socket(tmp_path: Path) -> None
         verify={"content_sha256": "a" * 64},
         undo={"restore_backup": True},
     )
-    with pytest.raises(RuntimeFailure, match="plugin_rpc_failed|plugin_unavailable"):
+    with pytest.raises(RuntimeFailure, match="ticket_context_invalid"):
         ports.executor.prepare(None, "0", operation, "ticket-1")  # type: ignore[arg-type]
 
 

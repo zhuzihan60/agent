@@ -32,6 +32,11 @@ def test_transport_ssh_host_uses_strict_instance_configuration() -> None:
         "verify_identity",
         "read",
         "execute_typed",
+        "prepare_typed",
+        "apply_typed",
+        "verify_typed",
+        "undo_typed",
+        "reconcile_typed",
     }
 
 
