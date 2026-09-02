@@ -135,6 +135,7 @@ def effect_fields_digest(params: TicketedEffectParams) -> str:
         raise TicketError("invalid_effect_payload")
     dumped = params.model_dump(mode="json")
     extras = {key: value for key, value in dumped.items() if key not in _BASE_EFFECT_FIELDS}
+    extras.pop("envelope", None)
     return effect_payload_digest(extras)
 
 
@@ -169,6 +170,11 @@ _METHOD_KINDS = MappingProxyType(
         "collect": MethodKind.READ,
         "verify_identity": MethodKind.READ,
         "read": MethodKind.READ,
+        "prepare_typed": MethodKind.PREPARE,
+        "apply_typed": MethodKind.APPLY,
+        "verify_typed": MethodKind.VERIFY,
+        "undo_typed": MethodKind.UNDO,
+        "reconcile_typed": MethodKind.RECONCILE,
         "diagnose": MethodKind.MODEL,
         "plan": MethodKind.MODEL,
         "critic": MethodKind.MODEL,

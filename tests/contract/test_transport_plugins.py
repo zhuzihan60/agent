@@ -811,6 +811,11 @@ def test_transport_methods_are_bound_to_fixed_kinds() -> None:
     assert bindings["verify_identity"].kind is MethodKind.READ
     assert bindings["read"].kind is MethodKind.READ
     assert bindings["execute_typed"].kind is MethodKind.APPLY
+    assert bindings["prepare_typed"].kind is MethodKind.PREPARE
+    assert bindings["apply_typed"].kind is MethodKind.APPLY
+    assert bindings["verify_typed"].kind is MethodKind.VERIFY
+    assert bindings["undo_typed"].kind is MethodKind.UNDO
+    assert bindings["reconcile_typed"].kind is MethodKind.RECONCILE
 
 
 # ---------------------------------------------------------------------------

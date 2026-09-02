@@ -10,18 +10,27 @@ closed.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import re
+import secrets
+import time
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
 from pydantic import JsonValue
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from a4diag.domain import Operation, Plan, Risk, StepResult, TargetConfig
+from a4diag.domain import Operation, Plan, Risk, StepResult, TargetConfig, canonical_json_bytes
 from a4diag.plugin_api.manifest import PluginType
 from a4diag.plugin_client import PluginClient
+from a4diag.plugin_api.target_protocol import TargetLifecycle, TargetRequest, TargetSigner
+from a4diag.plugin_api.ticket import OperationPhase, OperationTicket, effect_payload_digest
 from a4diag.plugin_registry import PluginRegistry
+from a4diag.policy_engine import canonical_operation_digest
 from a4diag.runtime import RuntimeFailure
 from a4diag.settings import AgentSettings
 from a4diag.workflow import (
@@ -45,9 +54,13 @@ def _run(coroutine_factory):
 
 @dataclass(frozen=True)
 class _RpcExecutorPort:
-    """Executes capability operations through the registered plugin sockets."""
+    """Signs complete lifecycle calls and sends them only to a target transport."""
 
     clients: dict[str, PluginClient]
+    signer_resolver: Callable[[TargetConfig], TargetSigner]
+    clock: Callable[[], int] = lambda: int(time.time())
+    nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24)
+    _contexts: dict[tuple[str, str], OperationTicket] = field(default_factory=dict)
     _transaction: ContextVar[str | None] = ContextVar(
         "a4diag_rpc_transaction", default=None
     )
@@ -63,19 +76,82 @@ class _RpcExecutorPort:
             raise RuntimeFailure("transaction_context_missing")
         return transaction_id
 
-    def _client(self, capability: str) -> PluginClient:
-        client = self.clients.get(capability)
+    def _client(self, target: TargetConfig) -> PluginClient:
+        client = self.clients.get(target.id)
         if client is None:
             raise RuntimeFailure(
-                "plugin_unavailable", f"no registered plugin for capability {capability!r}"
+                "target_transport_unavailable", target.id
             )
         return client
 
-    def _params(self, operation: Operation, **extra: object) -> dict[str, object]:
+    @staticmethod
+    def _claims(ticket: str) -> OperationTicket:
+        try:
+            if not isinstance(ticket, str) or ticket.count(".") != 1:
+                raise ValueError("malformed ticket")
+            payload_segment = ticket.split(".", 1)[0]
+            padded = payload_segment + "=" * ((4 - len(payload_segment) % 4) % 4)
+            payload = base64.b64decode(padded, altchars=b"-_", validate=True)
+            claims = OperationTicket.model_validate_json(payload)
+            if canonical_json_bytes(claims.model_dump(mode="json")) != payload:
+                raise ValueError("noncanonical ticket")
+            return claims
+        except Exception as error:
+            raise RuntimeFailure("ticket_context_invalid") from error
+
+    def _validate_claims(
+        self, claims: OperationTicket, target: TargetConfig, step_id: str,
+        operation: Operation, phase: OperationPhase,
+    ) -> None:
+        if (
+            claims.transaction_id != self._transaction_id()
+            or claims.step_id != step_id
+            or claims.target_id != target.id
+            or claims.operation_digest != canonical_operation_digest(operation)
+            or claims.phase is not phase
+        ):
+            raise RuntimeFailure("ticket_context_mismatch")
+
+    @staticmethod
+    def _ticket_base(claims: OperationTicket, operation: Operation) -> dict[str, object]:
         return {
+            "transaction_id": claims.transaction_id,
+            "step_id": claims.step_id,
+            "target_id": claims.target_id,
+            "target_fingerprint": claims.target_fingerprint,
             "operation": operation.model_dump(mode="json"),
-            **extra,
+            "plan_digest": claims.plan_digest,
+            "risk": claims.risk.value,
+            "approval_id": claims.approval_id,
         }
+
+    def _envelope(
+        self, *, target: TargetConfig, operation: Operation,
+        lifecycle: TargetLifecycle, marker: dict[str, object] | None,
+        undo: dict[str, object] | None, claims: OperationTicket,
+        effect_digest: str,
+    ) -> dict[str, object]:
+        issued = int(self.clock())
+        request = TargetRequest(
+            controller_id="a4diag-core", target_id=target.id,
+            target_fingerprint=claims.target_fingerprint,
+            transaction_id=self._transaction_id(), step_id=claims.step_id,
+            lifecycle=lifecycle, operation=operation, marker=marker, undo=undo,
+            plan_digest=claims.plan_digest, effect_payload_digest=effect_digest,
+            risk=claims.risk, approval_id=claims.approval_id,
+            issued_at=issued, expires_at=issued + 30, nonce=self.nonce_factory(),
+        )
+        return self.signer_resolver(target).sign(request).model_dump(mode="json")
+
+    @staticmethod
+    def _target_result(result: object, method: str) -> dict[str, object]:
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise RuntimeFailure("target_transport_failed", method)
+        data = result.get("data")
+        value = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(value, dict):
+            raise RuntimeFailure("plugin_result_invalid", method)
+        return value
 
     def prepare(
         self,
@@ -84,14 +160,19 @@ class _RpcExecutorPort:
         operation: Operation,
         ticket: str,
     ) -> PreparedEffect:
-        result = _run(
-            lambda: self._client(operation.capability).call(
-                "prepare",
-                self._params(operation, transaction_id=self._transaction_id(), step_id=step_id),
-                ticket=ticket,
-            )
+        claims = self._claims(ticket)
+        self._validate_claims(claims, target, step_id, operation, OperationPhase.PREPARE)
+        self._contexts[(claims.transaction_id, step_id)] = claims
+        params = self._ticket_base(claims, operation)
+        params["envelope"] = self._envelope(
+            target=target, operation=operation, lifecycle=TargetLifecycle.PREPARE,
+            marker=None, undo=None, claims=claims, effect_digest=claims.effect_payload_digest,
         )
-        if not isinstance(result, dict) or not isinstance(result.get("marker"), dict):
+        result = self._target_result(
+            _run(lambda: self._client(target).call("prepare_typed", params, ticket=ticket)),
+            "prepare_typed",
+        )
+        if not isinstance(result.get("marker"), dict):
             raise RuntimeFailure("plugin_result_invalid", "prepare")
         marker = result["marker"]
         return PreparedEffect(pre_state=marker, marker=marker)
@@ -120,14 +201,17 @@ class _RpcExecutorPort:
         marker: dict[str, object],
         ticket: str,
     ) -> StepResult:
-        result = _run(
-            lambda: self._client(operation.capability).call(
-                "apply",
-                self._params(
-                    operation, transaction_id=self._transaction_id(), step_id=step_id, marker=marker
-                ),
-                ticket=ticket,
-            )
+        claims = self._claims(ticket)
+        self._validate_claims(claims, target, step_id, operation, OperationPhase.APPLY)
+        self._contexts[(claims.transaction_id, step_id)] = claims
+        params = {**self._ticket_base(claims, operation), "marker": marker}
+        params["envelope"] = self._envelope(
+            target=target, operation=operation, lifecycle=TargetLifecycle.APPLY,
+            marker=marker, undo=None, claims=claims, effect_digest=claims.effect_payload_digest,
+        )
+        result = self._target_result(
+            _run(lambda: self._client(target).call("apply_typed", params, ticket=ticket)),
+            "apply_typed",
         )
         return self._step_result(result, "applied")
 
@@ -138,13 +222,18 @@ class _RpcExecutorPort:
         operation: Operation,
         marker: dict[str, object],
     ) -> StepResult:
-        result = _run(
-            lambda: self._client(operation.capability).call(
-                "verify",
-                self._params(
-                    operation, transaction_id=self._transaction_id(), step_id=step_id, marker=marker
-                ),
-            )
+        claims = self._context(step_id)
+        envelope = self._envelope(
+            target=target, operation=operation, lifecycle=TargetLifecycle.VERIFY,
+            marker=marker, undo=None, claims=claims,
+            effect_digest=effect_payload_digest({"marker": marker}),
+        )
+        result = self._target_result(
+            _run(lambda: self._client(target).call("verify_typed", {
+                "transaction_id": self._transaction_id(), "step_id": step_id,
+                "operation": operation.model_dump(mode="json"), "marker": marker,
+                "envelope": envelope,
+            })), "verify_typed",
         )
         return self._step_result(result, "verified")
 
@@ -157,18 +246,17 @@ class _RpcExecutorPort:
         undo: dict[str, object] | None,
         ticket: str,
     ) -> StepResult:
-        result = _run(
-            lambda: self._client(operation.capability).call(
-                "undo",
-                self._params(
-                    operation,
-                    transaction_id=self._transaction_id(),
-                    step_id=step_id,
-                    marker=marker,
-                    undo=undo,
-                ),
-                ticket=ticket,
-            )
+        claims = self._claims(ticket)
+        self._validate_claims(claims, target, step_id, operation, OperationPhase.UNDO)
+        self._contexts[(claims.transaction_id, step_id)] = claims
+        params = {**self._ticket_base(claims, operation), "marker": marker, "undo": undo}
+        params["envelope"] = self._envelope(
+            target=target, operation=operation, lifecycle=TargetLifecycle.UNDO,
+            marker=marker, undo=undo, claims=claims, effect_digest=claims.effect_payload_digest,
+        )
+        result = self._target_result(
+            _run(lambda: self._client(target).call("undo_typed", params, ticket=ticket)),
+            "undo_typed",
         )
         return self._step_result(result, "undone")
 
@@ -181,18 +269,19 @@ class _RpcExecutorPort:
         dispatch_id: str,
         marker: dict[str, object] | None,
     ) -> ReconcileEffect:
-        result = _run(
-            lambda: self._client(operation.capability).call(
-                "reconcile",
-                self._params(
-                    operation,
-                    transaction_id=self._transaction_id(),
-                    step_id=step_id,
-                    phase=getattr(phase, "value", str(phase)),
-                    dispatch_id=dispatch_id,
-                    marker=marker,
-                ),
-            )
+        del phase, dispatch_id
+        claims = self._context(step_id)
+        envelope = self._envelope(
+            target=target, operation=operation, lifecycle=TargetLifecycle.RECONCILE,
+            marker=marker, undo=None, claims=claims,
+            effect_digest=effect_payload_digest({"marker": marker}),
+        )
+        result = self._target_result(
+            _run(lambda: self._client(target).call("reconcile_typed", {
+                "transaction_id": self._transaction_id(), "step_id": step_id,
+                "operation": operation.model_dump(mode="json"), "marker": marker,
+                "envelope": envelope,
+            })), "reconcile_typed",
         )
         if not isinstance(result, dict):
             raise RuntimeFailure("plugin_result_invalid", "reconcile")
@@ -201,6 +290,12 @@ class _RpcExecutorPort:
             return ReconcileEffect(outcome=outcome, prepared=None)
         except ValueError as error:
             raise RuntimeFailure("plugin_result_invalid", "reconcile") from error
+
+    def _context(self, step_id: str) -> OperationTicket:
+        claims = self._contexts.get((self._transaction_id(), step_id))
+        if claims is None:
+            raise RuntimeFailure("target_request_context_missing", step_id)
+        return claims
 
     def verify_restored(
         self,
@@ -219,6 +314,21 @@ def _socket_client(instance: str) -> PluginClient:
     if not _SAFE_INSTANCE.fullmatch(instance):
         raise RuntimeFailure("plugin_instance_invalid", instance)
     return PluginClient(f"/run/a4diag/{instance}.sock")
+
+
+def _target_signer(target: TargetConfig) -> TargetSigner:
+    from a4diag.secrets import SecretError, SecretResolver
+
+    try:
+        pem = SecretResolver().resolve(
+            f"file:targets/{target.id}/operation-ed25519.pem"
+        ).value.encode("utf-8")
+        key = serialization.load_pem_private_key(pem, password=None)
+    except (SecretError, ValueError, TypeError) as error:
+        raise RuntimeFailure("target_signing_key_unavailable", target.id) from error
+    if not isinstance(key, Ed25519PrivateKey):
+        raise RuntimeFailure("target_signing_key_invalid", target.id)
+    return TargetSigner(key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,19 +570,16 @@ def build_rpc_plugin_ports(
     if not isinstance(registry, PluginRegistry):
         raise TypeError("registry must be PluginRegistry")
 
-    clients: dict[str, PluginClient] = {}
-    for pin in registry.pins:
-        if not pin.enabled:
-            continue
-        try:
-            manifest = registry.require(pin.name, PluginType.CAPABILITY)
-        except Exception:
-            continue
-        clients[manifest.name.removeprefix("capability-")] = client_factory(
-            manifest.name
-        )
+    transport_clients: dict[str, PluginClient] = {}
+    for target in settings.targets:
+        manifest_name = f"transport-{target.mode.value}"
+        registry.require(manifest_name, PluginType.TRANSPORT)
+        instance = target.transport or manifest_name
+        if not _SAFE_INSTANCE.fullmatch(instance):
+            raise RuntimeFailure("plugin_instance_invalid", instance)
+        transport_clients[target.id] = client_factory(instance)
 
-    executor = _RpcExecutorPort(clients)
+    executor = _RpcExecutorPort(transport_clients, signer_resolver=_target_signer)
     collector = _RpcCollectorPort(registry, client_factory)
     if settings.model is None:
         model = _UnavailableModelPort()

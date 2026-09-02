@@ -28,7 +28,11 @@ class RecordingClient:
         self, method: str, params: dict[str, object], *, ticket: str | None = None
     ) -> dict[str, object]:
         self.calls.append((method, params, ticket))
-        return {"ok": True, "status": "undone", "data": {}}
+        return {
+            "ok": True,
+            "status": "applied",
+            "data": {"result": {"ok": True, "changed": True, "data": {}}},
+        }
 
 
 class ScriptedClient:

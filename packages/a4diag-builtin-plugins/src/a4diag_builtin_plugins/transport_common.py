@@ -1,16 +1,17 @@
 """Shared strict contract types for the built-in transport plugins.
 
-Both transports expose the same narrow typed surface — ``verify_identity``,
-``read``, and ``execute_typed`` — and share the identity model, result model,
-process-runner protocol, and method bindings defined here. There is no generic
-shell execution method: every execution path runs a fixed helper executable
-with a bounded canonical JSON request on stdin.
+Both transports expose the same narrow typed surface for identity, reads, and
+the five target lifecycle phases.  They share the identity model, result
+model, process-runner protocol, and method bindings defined here. There is no
+generic shell execution method: every execution path runs a fixed helper
+executable with a bounded canonical JSON request on stdin.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import signal
@@ -29,7 +30,8 @@ from pydantic import (
     model_validator,
 )
 
-from a4diag.domain import Risk, canonical_json_bytes
+from a4diag.domain import Operation, Risk, canonical_json_bytes
+from a4diag.plugin_api.target_protocol import SignedTargetRequest, TargetLifecycle, TargetRequest
 from a4diag.plugin_api.protocol import (
     EmptyParams,
     MethodBinding,
@@ -144,7 +146,7 @@ def identity_fingerprint(identity: TargetIdentity) -> str:
     """Canonical fingerprint that changes when any identity component changes."""
     if not isinstance(identity, TargetIdentity):
         raise TypeError("identity must be TargetIdentity")
-    return hashlib.sha256(
+    return "sha256:" + hashlib.sha256(
         canonical_json_bytes(identity.model_dump(mode="json"))
     ).hexdigest()
 
@@ -245,6 +247,42 @@ class ExecuteTypedParams(TicketedEffectParams):
                 f"payload is not a bounded canonical JSON object: {error}"
             ) from error
         return value
+
+
+class TransportPrepareParams(TicketedEffectParams):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    envelope: SignedTargetRequest
+
+
+class TransportApplyParams(TicketedEffectParams):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    marker: dict[str, JsonValue]
+    envelope: SignedTargetRequest
+
+
+class TransportUndoParams(TicketedEffectParams):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    marker: dict[str, JsonValue]
+    undo: dict[str, JsonValue] | None = None
+    envelope: SignedTargetRequest
+
+
+class TransportVerifyParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    transaction_id: str
+    step_id: str
+    operation: Operation
+    marker: dict[str, JsonValue]
+    envelope: SignedTargetRequest
+
+
+class TransportReconcileParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    transaction_id: str
+    step_id: str
+    operation: Operation
+    marker: dict[str, JsonValue] | None
+    envelope: SignedTargetRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,6 +550,96 @@ class BaseTransport:
             data={"returncode": outcome.returncode},
         )
 
+    @staticmethod
+    def _validated_signed_request(
+        params: TransportPrepareParams | TransportApplyParams | TransportUndoParams |
+        TransportVerifyParams | TransportReconcileParams,
+        lifecycle: TargetLifecycle,
+    ) -> TargetRequest:
+        try:
+            request = TargetRequest.model_validate_json(params.envelope.payload)
+        except ValueError as error:
+            raise TransportError("target_envelope_invalid") from error
+        if (
+            request.lifecycle is not lifecycle
+            or request.transaction_id != params.transaction_id
+            or request.step_id != params.step_id
+            or request.operation != params.operation
+            or request.target_fingerprint != getattr(params, "target_fingerprint", request.target_fingerprint)
+            or request.marker != getattr(params, "marker", None)
+            or request.undo != getattr(params, "undo", None)
+        ):
+            raise TransportError("target_envelope_binding_mismatch")
+        if isinstance(params, TicketedEffectParams) and (
+            request.target_id != params.target_id
+            or request.plan_digest != params.plan_digest
+            or request.risk is not params.risk
+            or request.approval_id != params.approval_id
+        ):
+            raise TransportError("target_envelope_binding_mismatch")
+        return request
+
+    async def _relay_signed(
+        self,
+        params: TransportPrepareParams | TransportApplyParams | TransportUndoParams |
+        TransportVerifyParams | TransportReconcileParams,
+        lifecycle: TargetLifecycle,
+    ) -> TransportResult:
+        try:
+            request = self._validated_signed_request(params, lifecycle)
+            identity = await self._probe_identity()
+        except (TransportError, TransportIdentityError) as error:
+            return TransportResult(ok=False, status=TransportStatus.FAILED, reason=error.code)
+        if identity_fingerprint(identity) != request.target_fingerprint:
+            return TransportResult(
+                ok=False, status=TransportStatus.IDENTITY_MISMATCH,
+                reason="target_identity_mismatch",
+            )
+        try:
+            outcome = await asyncio.wait_for(
+                self._runner.run(
+                    self._build_helper_argv(),
+                    payload=canonical_json_bytes(params.envelope.model_dump(mode="json")),
+                    output_limit_bytes=int(request.operation.output_limit_bytes),
+                ),
+                timeout=float(request.operation.timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            return TransportResult(ok=False, status=TransportStatus.EXECUTION_UNKNOWN, reason="execution_unknown")
+        if not outcome.started or outcome.returncode != 0:
+            return TransportResult(
+                ok=False,
+                status=TransportStatus.EXECUTION_UNKNOWN if outcome.timed_out else TransportStatus.FAILED,
+                reason="execution_unknown" if outcome.timed_out else "helper_failed",
+                stdout=outcome.stdout,
+                stderr=outcome.stderr,
+            )
+        try:
+            result = json.loads(outcome.stdout)
+            if type(result) is not dict:
+                raise ValueError("result must be object")
+        except (json.JSONDecodeError, ValueError):
+            return TransportResult(ok=False, status=TransportStatus.FAILED, reason="helper_result_invalid")
+        return TransportResult(
+            ok=True, status=TransportStatus.APPLIED,
+            stdout=outcome.stdout, stderr=outcome.stderr, data={"result": result},
+        )
+
+    async def prepare_typed(self, params: TransportPrepareParams, invocation: object) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycle.PREPARE)
+
+    async def apply_typed(self, params: TransportApplyParams, invocation: object) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycle.APPLY)
+
+    async def undo_typed(self, params: TransportUndoParams, invocation: object) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycle.UNDO)
+
+    async def verify_typed(self, params: TransportVerifyParams) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycle.VERIFY)
+
+    async def reconcile_typed(self, params: TransportReconcileParams) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycle.RECONCILE)
+
     async def _run_helper(
         self,
         argv: Sequence[str],
@@ -576,6 +704,26 @@ def build_transport_bindings(
         "read": MethodBinding(
             "read", ReadParams, TransportResult, transport.read, kind=MethodKind.READ
         ),
+        "prepare_typed": MethodBinding(
+            "prepare_typed", TransportPrepareParams, TransportResult,
+            transport.prepare_typed, kind=MethodKind.PREPARE,
+        ),
+        "apply_typed": MethodBinding(
+            "apply_typed", TransportApplyParams, TransportResult,
+            transport.apply_typed, kind=MethodKind.APPLY,
+        ),
+        "verify_typed": MethodBinding(
+            "verify_typed", TransportVerifyParams, TransportResult,
+            transport.verify_typed, kind=MethodKind.VERIFY,
+        ),
+        "undo_typed": MethodBinding(
+            "undo_typed", TransportUndoParams, TransportResult,
+            transport.undo_typed, kind=MethodKind.UNDO,
+        ),
+        "reconcile_typed": MethodBinding(
+            "reconcile_typed", TransportReconcileParams, TransportResult,
+            transport.reconcile_typed, kind=MethodKind.RECONCILE,
+        ),
         "execute_typed": MethodBinding(
             "execute_typed",
             ExecuteTypedParams,
@@ -610,6 +758,11 @@ __all__ = [
     "TransportIdentityError",
     "TransportReadError",
     "TransportResult",
+    "TransportPrepareParams",
+    "TransportApplyParams",
+    "TransportVerifyParams",
+    "TransportUndoParams",
+    "TransportReconcileParams",
     "TransportStatus",
     "VerifyIdentityParams",
     "build_transport_bindings",

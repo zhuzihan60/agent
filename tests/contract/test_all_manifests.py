@@ -40,8 +40,8 @@ _RISK_RANK = {Risk.LOW: 0, Risk.HIGH: 1}
 
 # Expected RPC surface per plugin type, keyed by manifest name.
 _EXPECTED_SURFACE: dict[str, frozenset[str]] = {
-    "transport-local": frozenset({"health", "describe", "capability_probe", "verify_identity", "read", "execute_typed"}),
-    "transport-ssh": frozenset({"health", "describe", "capability_probe", "verify_identity", "read", "execute_typed"}),
+    "transport-local": frozenset({"health", "describe", "capability_probe", "verify_identity", "read", "execute_typed", "prepare_typed", "apply_typed", "verify_typed", "undo_typed", "reconcile_typed"}),
+    "transport-ssh": frozenset({"health", "describe", "capability_probe", "verify_identity", "read", "execute_typed", "prepare_typed", "apply_typed", "verify_typed", "undo_typed", "reconcile_typed"}),
     "capability-files": frozenset({"health", "describe", "capability_probe", "prepare", "apply", "undo", "verify", "reconcile"}),
     "capability-services": frozenset({"health", "describe", "capability_probe", "prepare", "apply", "undo", "verify", "reconcile"}),
     "capability-packages": frozenset({"health", "describe", "capability_probe", "prepare", "apply", "undo", "verify", "reconcile"}),
@@ -68,6 +68,7 @@ _CLASS_NAMES: dict[str, str] = {
 
 _RPC_METHODS = frozenset(
     {"health", "describe", "capability_probe", "verify_identity", "read", "execute_typed",
+     "prepare_typed", "apply_typed", "verify_typed", "undo_typed", "reconcile_typed",
      "prepare", "apply", "undo", "verify", "reconcile", "diagnose", "plan", "critic", "send"}
 )
 
