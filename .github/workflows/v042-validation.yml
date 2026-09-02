@@ -1,6 +1,9 @@
 name: v0.4.2 validation
 
 on:
+  push:
+    branches:
+      - codex/v0.4.2-builtin-closure
   workflow_dispatch:
     inputs:
       suite:
@@ -39,7 +42,7 @@ jobs:
           python -m pip install --no-deps -e packages/a4diag-builtin-plugins
       - name: Select and run suite
         env:
-          SUITE: ${{ inputs.suite }}
+          SUITE: ${{ inputs.suite || 'core' }}
         shell: bash
         run: |
           set -euo pipefail
