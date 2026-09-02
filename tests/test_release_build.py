@@ -238,6 +238,70 @@ class ReleaseBuildContractTests(unittest.TestCase):
             self.assertEqual(manifest["version"], "0.4.1")
             self.assertEqual(set(manifest["artifacts"]), actual_paths - {"MANIFEST.json"})
 
+    def test_target_release_is_exact_and_independently_verifiable(self) -> None:
+        """The target bundle must contain the three pinned runtime wheels only once."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            wheelhouse = root / "dependencies"
+            wheelhouse.mkdir()
+            dependency = wheelhouse / "dependency-1.0-py3-none-any.whl"
+            self.write_minimal_wheel(dependency, "dependency", "1.0")
+            (wheelhouse / "SHA256SUMS").write_text(
+                f"{hashlib.sha256(dependency.read_bytes()).hexdigest()}  {dependency.name}\n",
+                encoding="utf-8",
+            )
+            wheels = []
+            for filename, distribution in (
+                ("a4diag-0.4.1-py3-none-any.whl", "a4diag"),
+                ("a4diag_builtin_plugins-0.4.1-py3-none-any.whl", "a4diag-builtin-plugins"),
+                ("a4diag_target_runtime-0.4.1-py3-none-any.whl", "a4diag-target-runtime"),
+            ):
+                wheel = root / filename
+                self.write_minimal_wheel(wheel, distribution, "0.4.1")
+                wheels.append(wheel)
+            output = root / "target-release"
+
+            assembled = subprocess.run(
+                [
+                    sys.executable,
+                    str(PROJECT_ROOT / "tools" / "build_release.py"),
+                    "assemble-target",
+                    "--project-root", str(PROJECT_ROOT),
+                    "--dependency-wheelhouse", str(wheelhouse),
+                    "--core-wheel", str(wheels[0]),
+                    "--builtin-wheel", str(wheels[1]),
+                    "--target-wheel", str(wheels[2]),
+                    "--output", str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(assembled.returncode, 0, assembled.stderr)
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {"MANIFEST.json", "SHA256SUMS", "VERSION", "install-a4diag-target.sh", "systemd", "tools", "wheelhouse"},
+            )
+            self.assertEqual(
+                {path.name for path in (output / "wheelhouse").iterdir()},
+                {dependency.name, *(wheel.name for wheel in wheels)},
+            )
+            verified = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / "tools" / "build_release.py"),
+                 "verify-target-release", "--release-root", str(output)],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
+            (output / "undeclared.txt").write_text("not reviewed\n", encoding="utf-8")
+            rejected = subprocess.run(
+                [sys.executable, str(PROJECT_ROOT / "tools" / "build_release.py"),
+                 "verify-target-release", "--release-root", str(output)],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("undeclared", rejected.stderr)
+
     def test_assembly_rejects_a_wheel_that_changed_after_input_manifest(self) -> None:
         """Catch copying a dependency whose bytes no longer match the reviewed manifest."""
         with tempfile.TemporaryDirectory() as temporary:
