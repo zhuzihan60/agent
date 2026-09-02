@@ -203,6 +203,7 @@ class TargetConfig(BaseModel):
     identity_file_ref: str | None = None
     known_hosts_ref: str | None = None
     operation_signing_key_ref: str | None = None
+    host_key_sha256: str | None = None
     write_enabled: bool = False
     auto_execute_low: bool = False
     capabilities: tuple[CapabilityGrant, ...] = ()
@@ -220,6 +221,13 @@ class TargetConfig(BaseModel):
     def validate_identity_fingerprint(cls, value: str | None) -> str | None:
         if value is not None and not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
             raise ValueError("identity_fingerprint must be a sha256 fingerprint")
+        return value
+
+    @field_validator("host_key_sha256")
+    @classmethod
+    def validate_host_key_sha256(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("host_key_sha256 must be a lowercase SHA256 digest")
         return value
 
     @field_validator(

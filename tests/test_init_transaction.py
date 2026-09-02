@@ -14,7 +14,11 @@ from pydantic import ValidationError
 
 from a4diag.domain import TargetMode
 from a4diag.init_config import InitRequest, InitService, NotificationInit, TargetInit
-from a4diag.init_transaction import InitTransaction, InitTransactionError
+from a4diag.init_transaction import (
+    InitTransaction,
+    InitTransactionError,
+    build_builtin_instance_specs,
+)
 from a4diag.plugin_instances import PluginInstanceSpec
 from a4diag.settings import load_settings
 
@@ -111,6 +115,7 @@ def request(*, write: bool = False, notification: bool = False) -> InitRequest:
                 identity_file_ref="file:targets/lab/id_ed25519",
                 known_hosts_ref="file:targets/lab/known_hosts",
                 operation_signing_key_ref="file:targets/lab/operation-ed25519.pem",
+                host_key_sha256="c" * 64,
                 write_enabled=write,
             ),
         ),
@@ -175,6 +180,7 @@ def test_success_persists_full_target_connection_and_pinned_identity(tmp_path: P
     assert configured.identity_file_ref == "file:targets/lab/id_ed25519"
     assert configured.known_hosts_ref == "file:targets/lab/known_hosts"
     assert configured.operation_signing_key_ref == "file:targets/lab/operation-ed25519.pem"
+    assert configured.host_key_sha256 == "c" * 64
     assert result.settings.global_mode == "read_write"
     assert write_probe.calls == [("lab", "sha256:" + "a" * 64)]
 
@@ -208,3 +214,14 @@ def test_any_activation_failure_restores_config_instances_and_core(
     assert core.enabled is True
     assert core.active is True
 
+
+def test_builtin_specs_start_transport_but_no_controller_capability_service() -> None:
+    built = build_builtin_instance_specs(
+        request(write=True), secrets_root=Path("/secure")
+    )
+
+    assert [item.instance for item in built] == ["transport-lab"]
+    assert all(not item.instance.startswith("capability-") for item in built)
+    assert built[0].manifest == "transport-ssh"
+    assert built[0].config["identity_file"] == "/secure/targets/lab/id_ed25519"
+    assert built[0].config["known_hosts"] == "/secure/targets/lab/known_hosts"

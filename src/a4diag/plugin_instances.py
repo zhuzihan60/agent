@@ -117,11 +117,13 @@ class PluginInstanceManager:
         manifest_root: Path,
         secrets_root: Path,
         systemd: SystemdController,
+        config_gid: int | None = None,
     ) -> None:
         self._config_root = Path(config_root)
         self._manifest_root = Path(manifest_root)
         self._secrets_root = Path(secrets_root)
         self._systemd = systemd
+        self._config_gid = config_gid
 
     def stage(self, spec: PluginInstanceSpec) -> StagedInstance:
         self._validate_manifest(spec)
@@ -187,6 +189,8 @@ class PluginInstanceManager:
         try:
             os.replace(staged.staged_path, staged.final_path)
             os.chmod(staged.final_path, 0o640)
+            if self._config_gid is not None:
+                os.chown(staged.final_path, -1, self._config_gid)
             self._fsync_directory(self._config_root)
             if not self._systemd.is_enabled(unit):
                 self._systemd.enable(unit)
@@ -239,6 +243,8 @@ class PluginInstanceManager:
                 os.fsync(handle.fileno())
             os.replace(temporary, receipt.final_path)
             os.chmod(receipt.final_path, receipt.prior_mode or 0o640)
+            if self._config_gid is not None:
+                os.chown(receipt.final_path, -1, self._config_gid)
         self._fsync_directory(receipt.final_path.parent)
         self._restore_systemd(
             self._socket_unit(receipt.instance),

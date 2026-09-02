@@ -162,6 +162,7 @@ class TargetInit(BaseModel):
     identity_file_ref: str | None = None
     known_hosts_ref: str | None = None
     operation_signing_key_ref: str | None = None
+    host_key_sha256: str | None = None
     write_enabled: bool = False
     auto_execute_low: bool = False
     capabilities: tuple[CapabilityInit, ...] = ()
@@ -217,6 +218,13 @@ class TargetInit(BaseModel):
         relative = value[5:]
         if not relative or any(part in {"", ".", ".."} for part in relative.split("/")):
             raise ValueError("unsafe target secret reference")
+        return value
+
+    @field_validator("host_key_sha256")
+    @classmethod
+    def validate_host_key_sha256(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("host_key_sha256 must be a lowercase SHA256 digest")
         return value
 
     @model_validator(mode="after")
@@ -427,7 +435,7 @@ class InitService:
                 or any(target.write_enabled for target in targets)
                 else "read_only",
                 targets=targets,
-                plugins=(),
+                plugins=self._plugin_names(request),
                 auto_execute_low=any(
                     target.auto_execute_low for target in targets
                 ),
@@ -465,6 +473,7 @@ class InitService:
                 identity_file_ref=target.identity_file_ref,
                 known_hosts_ref=target.known_hosts_ref,
                 operation_signing_key_ref=target.operation_signing_key_ref,
+                host_key_sha256=target.host_key_sha256,
                 write_enabled=target.write_enabled,
                 auto_execute_low=target.auto_execute_low,
                 capabilities=capabilities,
@@ -472,6 +481,22 @@ class InitService:
             )
         except ValueError as error:
             raise InitError("invalid_request", str(error)) from error
+
+    @staticmethod
+    def _plugin_names(request: InitRequest) -> tuple[str, ...]:
+        names = {
+            target.transport or f"transport-{target.mode.value}"
+            for target in request.targets
+        }
+        if request.model is not None:
+            names.add(request.model.plugin)
+        names.update(
+            item.channel
+            if item.channel.startswith("notification-")
+            else f"notification-{item.channel}"
+            for item in request.notifications
+        )
+        return tuple(sorted(names))
 
 
 def load_init_request(path: Path) -> InitRequest:

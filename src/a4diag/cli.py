@@ -394,12 +394,38 @@ def _cmd_plugin(args: argparse.Namespace) -> int:
 
 
 def _build_init_service() -> object:
-    """Return plugin-backed, fail-closed production initialization probes."""
+    """Return transactional plugin-backed production initialization."""
     from .init_config import InitService, ProductionModelProbe, ProductionTargetProbe
+    from .init_transaction import (
+        InitTransaction,
+        ProductionNotificationProbe,
+        ProductionTargetWriteProbe,
+        SystemdInitController,
+        build_builtin_instance_specs,
+        production_self_check,
+    )
+    from .plugin_instances import PluginInstanceManager
+    import grp
 
-    return InitService(
+    service = InitService(
         transport=ProductionTargetProbe(),
         model=ProductionModelProbe(),
+    )
+    systemd = SystemdInitController()
+    return InitTransaction(
+        service=service,
+        instances=PluginInstanceManager(
+            config_root=Path("/etc/a4diag/plugins"),
+            manifest_root=Path("/opt/a4diag/plugins"),
+            secrets_root=Path("/etc/a4diag/secrets"),
+            systemd=systemd,
+            config_gid=grp.getgrnam("a4diag").gr_gid,
+        ),
+        notification=ProductionNotificationProbe(),
+        target_write=ProductionTargetWriteProbe(),
+        core=systemd,
+        self_check=production_self_check,
+        instance_specs=lambda request: build_builtin_instance_specs(request),
     )
 
 
@@ -411,6 +437,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
         load_init_request,
     )
 
+    from .init_transaction import InitTransactionError
+
     service = _build_init_service()
     try:
         if args.input:
@@ -421,7 +449,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         result = service.write_atomic(  # type: ignore[attr-defined]
             request, Path(args.output or _config_path())
         )
-    except InitError as error:
+    except (InitError, InitTransactionError) as error:
         print(str(error), file=sys.stderr)
         return 65
     print(

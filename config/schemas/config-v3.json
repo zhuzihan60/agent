@@ -59,6 +59,10 @@
           "identity_file_ref": {"type": ["string", "null"]},
           "known_hosts_ref": {"type": ["string", "null"]},
           "operation_signing_key_ref": {"type": ["string", "null"]},
+          "host_key_sha256": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
           "capabilities": {
             "type": "array",
             "uniqueItems": true,
