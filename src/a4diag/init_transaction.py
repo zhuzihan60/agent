@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 import asyncio
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,11 @@ class CoreController(Protocol):
     def restore(self, enabled: bool, active: bool) -> None: ...
 
 
+class RegistryController(Protocol):
+    def activate(self, request: InitRequest) -> bytes: ...
+    def restore(self, prior: bytes) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _PriorFile:
     existed: bool
@@ -52,6 +58,7 @@ class InitTransaction:
         core: CoreController,
         self_check: Callable[[Path], bool],
         instance_specs: Callable[[InitRequest], tuple[PluginInstanceSpec, ...]],
+        registry: RegistryController | None = None,
     ) -> None:
         self._service = service
         self._instances = instances
@@ -60,6 +67,7 @@ class InitTransaction:
         self._core = core
         self._self_check = self_check
         self._instance_specs = instance_specs
+        self._registry = registry
 
     def execute(self, request: InitRequest, destination: Path) -> InitResult:
         destination = Path(destination)
@@ -67,6 +75,7 @@ class InitTransaction:
         core_state = self._core.snapshot()
         staged: list[object] = []
         receipts: list[ActivationReceipt] = []
+        prior_registry: bytes | None = None
         try:
             for spec in self._instance_specs(request):
                 staged.append(self._instances.stage(spec))
@@ -80,6 +89,8 @@ class InitTransaction:
                     self._target_write.probe(
                         target, validated.fingerprints[target.id]
                     )
+            if self._registry is not None:
+                prior_registry = self._registry.activate(request)
             result = self._service.write_atomic(request, destination)
             self._core.restart()
             if not self._self_check(destination):
@@ -87,6 +98,11 @@ class InitTransaction:
             return result
         except BaseException as error:
             self._restore_file(destination, prior)
+            if prior_registry is not None and self._registry is not None:
+                try:
+                    self._registry.restore(prior_registry)
+                except Exception:
+                    pass
             for receipt in reversed(receipts):
                 try:
                     self._instances.rollback(receipt)
@@ -281,6 +297,78 @@ class SystemdInitController:
             self._run("disable", self.CORE_UNIT)
 
 
+class RegistryActivation:
+    """Atomically enables only required built-in manifest pins."""
+
+    def __init__(self, path: Path, *, config_gid: int | None = None) -> None:
+        self._path = Path(path)
+        self._config_gid = config_gid
+
+    def activate(self, request: InitRequest) -> bytes:
+        prior = self._path.read_bytes()
+        try:
+            document = json.loads(prior)
+            plugins = document["plugins"]
+            if type(document) is not dict or type(plugins) is not list:
+                raise ValueError("invalid registry")
+            required = _required_manifests(request)
+            found: set[str] = set()
+            for entry in plugins:
+                if type(entry) is not dict or type(entry.get("name")) is not str:
+                    raise ValueError("invalid registry pin")
+                if entry["name"] in required:
+                    entry["enabled"] = True
+                    found.add(entry["name"])
+            if found != required:
+                raise ValueError("required built-in pin missing")
+            payload = json.dumps(
+                document, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8") + b"\n"
+            self._write(payload)
+        except Exception as error:
+            raise InitTransactionError("registry_activation_failed") from error
+        return prior
+
+    def restore(self, prior: bytes) -> None:
+        self._write(prior)
+
+    def _write(self, payload: bytes) -> None:
+        temporary = self._path.with_name(
+            f".{self._path.name}.init.{os.getpid()}"
+        )
+        descriptor = os.open(
+            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self._path)
+        os.chmod(self._path, 0o640)
+        if self._config_gid is not None:
+            os.chown(self._path, -1, self._config_gid)
+
+
+def _required_manifests(request: InitRequest) -> set[str]:
+    required = {
+        f"transport-{target.mode.value}" for target in request.targets
+    }
+    required.update(
+        f"capability-{capability.name}"
+        for target in request.targets
+        for capability in target.capabilities
+    )
+    if request.model is not None:
+        required.add(request.model.plugin)
+    required.update(
+        item.channel
+        if item.channel.startswith("notification-")
+        else f"notification-{item.channel}"
+        for item in request.notifications
+    )
+    return required
+
+
 class ProductionNotificationProbe:
     def probe(self, notification: NotificationInit) -> None:
         from a4diag.plugin_client import PluginClient
@@ -335,6 +423,7 @@ __all__ = [
     "InitTransactionError",
     "ProductionNotificationProbe",
     "ProductionTargetWriteProbe",
+    "RegistryActivation",
     "SystemdInitController",
     "build_builtin_instance_specs",
     "production_self_check",

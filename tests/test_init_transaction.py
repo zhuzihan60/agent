@@ -7,16 +7,24 @@ exercised later by the Task 10 systemd E2E gate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from a4diag.domain import TargetMode
-from a4diag.init_config import InitRequest, InitService, NotificationInit, TargetInit
+from a4diag.init_config import (
+    CapabilityInit,
+    InitRequest,
+    InitService,
+    NotificationInit,
+    TargetInit,
+)
 from a4diag.init_transaction import (
     InitTransaction,
     InitTransactionError,
+    RegistryActivation,
     build_builtin_instance_specs,
 )
 from a4diag.plugin_instances import PluginInstanceSpec
@@ -225,3 +233,48 @@ def test_builtin_specs_start_transport_but_no_controller_capability_service() ->
     assert built[0].manifest == "transport-ssh"
     assert built[0].config["identity_file"] == "/secure/targets/lab/id_ed25519"
     assert built[0].config["known_hosts"] == "/secure/targets/lab/known_hosts"
+
+
+def test_registry_enables_contracts_atomically_and_can_restore(tmp_path: Path) -> None:
+    path = tmp_path / "registry.json"
+    prior = {
+        "plugins": [
+            {"name": "transport-ssh", "enabled": False},
+            {"name": "capability-files", "enabled": False},
+            {"name": "notification-cli", "enabled": False},
+        ]
+    }
+    path.write_text(json.dumps(prior), encoding="utf-8")
+    activation = RegistryActivation(path)
+    base = request(notification=True)
+    configured = InitRequest(
+        global_mode=base.global_mode,
+        targets=(
+            base.targets[0].model_copy(
+                update={
+                    "capabilities": (
+                        CapabilityInit(
+                            name="files",
+                            actions=("replace_managed_file",),
+                            resources=("/srv/lab",),
+                        ),
+                    )
+                }
+            ),
+        ),
+        notifications=base.notifications,
+        write_confirmation=base.write_confirmation,
+    )
+
+    old = activation.activate(configured)
+    enabled = {
+        item["name"]: item["enabled"]
+        for item in json.loads(path.read_text(encoding="utf-8"))["plugins"]
+    }
+    assert enabled == {
+        "transport-ssh": True,
+        "capability-files": True,
+        "notification-cli": True,
+    }
+    activation.restore(old)
+    assert json.loads(path.read_text(encoding="utf-8")) == prior

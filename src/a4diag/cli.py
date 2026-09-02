@@ -400,6 +400,7 @@ def _build_init_service() -> object:
         InitTransaction,
         ProductionNotificationProbe,
         ProductionTargetWriteProbe,
+        RegistryActivation,
         SystemdInitController,
         build_builtin_instance_specs,
         production_self_check,
@@ -412,6 +413,7 @@ def _build_init_service() -> object:
         model=ProductionModelProbe(),
     )
     systemd = SystemdInitController()
+    config_gid = grp.getgrnam("a4diag").gr_gid
     return InitTransaction(
         service=service,
         instances=PluginInstanceManager(
@@ -419,13 +421,16 @@ def _build_init_service() -> object:
             manifest_root=Path("/opt/a4diag/plugins"),
             secrets_root=Path("/etc/a4diag/secrets"),
             systemd=systemd,
-            config_gid=grp.getgrnam("a4diag").gr_gid,
+            config_gid=config_gid,
         ),
         notification=ProductionNotificationProbe(),
         target_write=ProductionTargetWriteProbe(),
         core=systemd,
         self_check=production_self_check,
         instance_specs=lambda request: build_builtin_instance_specs(request),
+        registry=RegistryActivation(
+            Path("/etc/a4diag/plugin-registry.json"), config_gid=config_gid
+        ),
     )
 
 
