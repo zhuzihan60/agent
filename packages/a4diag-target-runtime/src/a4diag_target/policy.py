@@ -14,7 +14,7 @@ _UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,255}\.(service|socket|timer|t
 _FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 _PROTECTED_PATHS = (
-    "/etc/ssh", "/root/.ssh", "/etc/pam.d", "/etc/sudoers",
+    "/etc/ssh", "/root/.ssh", "/etc/pam.d", "/etc/sudoers", "/etc/sudoers.d",
     "/etc/NetworkManager", "/etc/sysconfig/network-scripts", "/etc/resolv.conf",
     "/etc/hosts", "/etc/firewalld", "/etc/nftables.conf", "/usr/libexec/a4diag",
     "/etc/a4diag-target", "/var/lib/a4diag-target", "/etc/cron.d",
@@ -111,7 +111,9 @@ class TargetPolicy(BaseModel):
             path = operation.resource
             if path.startswith("/home/") and "/.ssh" in path:
                 raise PolicyDenied("protected_resource")
-            if any(_at_or_below(path, protected) for protected in _PROTECTED_PATHS):
+            if path.startswith(("/usr/bin/qemu", "/usr/libexec/qemu")) or any(
+                _at_or_below(path, protected) for protected in _PROTECTED_PATHS
+            ):
                 raise PolicyDenied("protected_resource")
             if not any(_at_or_below(path, root) for root in self.managed_roots):
                 raise PolicyDenied("resource_not_granted")
