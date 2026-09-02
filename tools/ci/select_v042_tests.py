@@ -7,7 +7,11 @@ import sys
 
 SUITES: dict[str, tuple[str, ...]] = {
     "core": ("tests/test_core_security_acceptance.py",),
-    "catalog": ("tests/test_plugin_admin.py", "tests/test_cli.py"),
+    "catalog": (
+        "tests/test_builtin_catalog.py",
+        "tests/test_plugin_admin.py",
+        "tests/test_cli.py",
+    ),
     "target-protocol": ("tests/test_target_protocol.py",),
     "target-runtime": ("tests/target_runtime",),
     "remote-routing": (

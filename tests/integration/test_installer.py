@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -381,6 +382,46 @@ exit 0
             "a4diag-builtin-plugins",
             version,
         )
+        builtin_root = release / "builtin-plugins"
+        builtin_manifests = builtin_root / "manifests"
+        builtin_artifacts = builtin_root / "artifacts"
+        builtin_manifests.mkdir(parents=True)
+        builtin_artifacts.mkdir()
+        builtin_wheel = wheelhouse / f"a4diag_builtin_plugins-{version}-py3-none-any.whl"
+        installed_builtin_wheel = builtin_artifacts / builtin_wheel.name
+        shutil.copyfile(builtin_wheel, installed_builtin_wheel)
+        builtin_entries = []
+        manifest_source = ROOT / "packages" / "a4diag-builtin-plugins" / "manifests"
+        for source in sorted(manifest_source.glob("*.json")):
+            destination = builtin_manifests / source.name
+            shutil.copyfile(source, destination)
+            manifest = json.loads(destination.read_text(encoding="utf-8"))
+            manifest["version"] = version
+            destination.write_text(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            builtin_entries.append(
+                {
+                    "name": manifest["name"],
+                    "plugin_type": manifest["plugin_type"],
+                    "version": version,
+                    "api_version": "1.0",
+                    "manifest_path": f"manifests/{source.name}",
+                    "manifest_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+                    "artifact_path": f"artifacts/{installed_builtin_wheel.name}",
+                    "artifact_sha256": hashlib.sha256(installed_builtin_wheel.read_bytes()).hexdigest(),
+                }
+            )
+        (builtin_root / "builtin-index.json").write_text(
+            json.dumps(
+                {"release_version": version, "plugins": builtin_entries},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         config = release / "config"
         config.mkdir()
         (config / "config.example.yaml").write_text(
@@ -551,7 +592,12 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.4.1"
     assert stat.S_IMODE(installed.stat().st_mode) == 0o755
     registry = sandbox.root / "etc" / "a4diag" / "plugin-registry.json"
-    assert json.loads(registry.read_text(encoding="utf-8")) == {"plugins": []}
+    registry_payload = json.loads(registry.read_text(encoding="utf-8"))
+    assert len(registry_payload["plugins"]) == 10
+    assert all(pin["enabled"] is False for pin in registry_payload["plugins"])
+    assert not (
+        sandbox.root / "etc" / "a4diag" / "secrets" / "release-signing.key"
+    ).exists()
     assert stat.S_IMODE(registry.stat().st_mode) == 0o640
     plugin_root = sandbox.root / "opt" / "a4diag" / "plugins"
     assert plugin_root.is_dir()
