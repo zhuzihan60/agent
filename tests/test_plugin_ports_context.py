@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from a4diag.domain import Operation, Plan, Risk, TargetConfig, TargetMode
 from a4diag.plugin_api.manifest import PluginType
 from a4diag.plugin_ports import (
@@ -9,6 +14,10 @@ from a4diag.plugin_ports import (
     _RpcNotificationPort,
 )
 from a4diag.plugin_registry import PluginRegistry
+from a4diag.plugin_api.target_protocol import TargetSigner
+from a4diag.plugin_api.ticket import OperationPhase, OperationTicket, effect_payload_digest
+from a4diag.policy_engine import canonical_operation_digest
+from a4diag.domain import canonical_json_bytes
 
 
 class RecordingClient:
@@ -54,28 +63,48 @@ def operation() -> Operation:
     )
 
 
+def operation_ticket(operation: Operation) -> str:
+    claims = OperationTicket(
+        ticket_id="ticket-undo", transaction_id="txn-123", step_id="4",
+        target_id="lab", target_fingerprint="sha256:" + "f" * 64,
+        capability=operation.capability, action=operation.action, resource=operation.resource,
+        phase=OperationPhase.UNDO,
+        parameters_digest=hashlib.sha256(canonical_json_bytes(operation.parameters)).hexdigest(),
+        operation_digest=canonical_operation_digest(operation),
+        effect_payload_digest=effect_payload_digest({"marker": {"before_sha256": "1" * 64}, "undo": {"restore": True}}),
+        plan_digest="a" * 64, risk=Risk.LOW, approval_id=None,
+        issued_at=100, expires_at=130,
+    )
+    payload = canonical_json_bytes(claims.model_dump(mode="json"))
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode() + "." + base64.urlsafe_b64encode(b"x" * 32).rstrip(b"=").decode()
+
+
 def test_rpc_undo_binds_real_transaction_and_complete_effect_payload() -> None:
     client = RecordingClient()
-    port = _RpcExecutorPort({"files": client})  # type: ignore[arg-type]
+    port = _RpcExecutorPort(
+        {"lab": client},
+        signer_resolver=lambda _target: TargetSigner(Ed25519PrivateKey.generate()),
+        clock=lambda: 100,
+        nonce_factory=lambda: "nonce-00000000001",
+    )  # type: ignore[arg-type]
     port.bind_transaction("txn-123")
 
     result = port.undo(
-        TargetConfig(id="lab", mode=TargetMode.LOCAL, identity_ref="target/lab"),
+        TargetConfig(id="lab", mode=TargetMode.LOCAL, identity_ref="target/lab", transport="transport-lab"),
         "4",
         operation(),
         {"before_sha256": "1" * 64},
         {"restore": True},
-        "ticket",
+        operation_ticket(operation()),
     )
 
     assert result.ok is True
     method, params, ticket = client.calls[0]
-    assert method == "undo"
-    assert ticket == "ticket"
+    assert method == "undo_typed"
+    assert ticket == operation_ticket(operation())
     assert params["transaction_id"] == "txn-123"
     assert params["step_id"] == "4"
-    assert params["marker"] == {"before_sha256": "1" * 64}
-    assert params["undo"] == {"restore": True}
+    assert "envelope" in params
 
 
 def test_rpc_collector_uses_registered_transport_and_preserves_read_view() -> None:
