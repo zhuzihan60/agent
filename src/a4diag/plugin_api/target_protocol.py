@@ -235,9 +235,31 @@ class TargetVerifier:
             raise TargetProtocolError("issued_in_future")
         if request.expires_at < now:
             raise TargetProtocolError("expired")
-        if not self._replay_store.consume(request.nonce, request.expires_at):
+        consume_request = getattr(self._replay_store, "consume_request", None)
+        if callable(consume_request):
+            consumed = consume_request(
+                nonce=request.nonce,
+                expires_at=request.expires_at,
+                transaction_id=request.transaction_id,
+                step_id=request.step_id,
+                lifecycle=request.lifecycle.value,
+                request_digest=hashlib.sha256(payload).hexdigest(),
+                now=now,
+            )
+        else:
+            consumed = self._replay_store.consume(request.nonce, request.expires_at)
+        if not consumed:
             raise TargetProtocolError("replay")
         return request
+
+    def record_result(self, nonce: str, result: object) -> None:
+        recorder = getattr(self._replay_store, "record_result", None)
+        if not callable(recorder):
+            return
+        digest = hashlib.sha256(
+            canonical_json_bytes(result, max_bytes=MAX_TARGET_REQUEST_BYTES)
+        ).hexdigest()
+        recorder(nonce, digest, now=int(self._clock()))
 
     @staticmethod
     def _parse_unique_json(payload: bytes) -> object:
