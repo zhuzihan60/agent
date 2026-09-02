@@ -158,8 +158,9 @@ def test_units_execstart_match_installed_layout() -> None:
     )
     assert (
         units["a4diag-plugin@.service"]["Service"]["ExecStart"]
-        == "/opt/a4diag/current/venv/bin/a4diag-plugin --instance %i"
+        == "/opt/a4diag/plugins/current/venv/bin/a4diag-plugin --instance %i"
     )
+    assert "/opt/a4diag/plugins/current" in units["a4diag-plugin@.service"]["Service"]["ReadOnlyPaths"]
     cleanup = parse_unit((DEPLOY / "a4diag-cleanup.service").read_text(encoding="utf-8"))
     assert (
         cleanup["Service"]["ExecStart"]

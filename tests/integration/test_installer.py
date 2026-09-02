@@ -324,6 +324,11 @@ echo '{"ok": true, "version": "0.4.1", "global_mode": "read_only", "targets": []
 exit 0
 A4DIAG_SHIM
   chmod +x "$3/bin/a4diag"
+  cat > "$3/bin/a4diag-plugin" <<'PLUGIN_SHIM'
+#!/usr/bin/env bash
+exit 0
+PLUGIN_SHIM
+  chmod +x "$3/bin/a4diag-plugin"
   cat > "$3/bin/python" <<'PIP_SHIM'
 #!/usr/bin/env bash
 if [ "$1" = "-m" ] && [ "$2" = "a4diag.builtin_catalog" ]; then
@@ -609,6 +614,11 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     assert stat.S_IMODE(registry.stat().st_mode) == 0o640
     plugin_root = sandbox.root / "opt" / "a4diag" / "plugins"
     assert plugin_root.is_dir()
+    plugin_current = plugin_root / "current"
+    assert plugin_current.is_symlink()
+    assert plugin_current.resolve() == plugin_root / "releases" / "0.4.1"
+    assert (plugin_current / "venv" / "bin" / "a4diag-plugin").is_file()
+    assert (plugin_current / "venv").resolve() != (installed / "venv").resolve()
     runtime_dirs = (
         sandbox.root / "run" / "a4diag",
         sandbox.root / "var" / "lib" / "a4diag",
@@ -641,12 +651,15 @@ def test_offline_install_invokes_pip_without_index(tmp_path: Path) -> None:
     assert "--find-links" in sandbox.pip_argv
     assert "a4diag-0.4.1-py3-none-any.whl" in sandbox.pip_argv
     calls = sandbox.pip_argv.splitlines()
-    assert len(calls) == 2
+    assert len(calls) == 4
     assert "-r" in calls[0]
     assert "a4diag-0.4.1-py3-none-any.whl" not in calls[0]
     assert "--no-deps" in calls[1]
     assert "-r" not in calls[1].split()
     assert "a4diag_builtin_plugins-0.4.1-py3-none-any.whl" in calls[1]
+    assert "-r" in calls[2]
+    assert "--no-deps" in calls[3]
+    assert "a4diag_builtin_plugins-0.4.1-py3-none-any.whl" in calls[3]
 
 
 @pytest.mark.parametrize(
