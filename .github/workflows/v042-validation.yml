@@ -1,0 +1,58 @@
+name: v0.4.2 validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Validation suite
+        required: true
+        default: core
+        type: choice
+        options:
+          - core
+          - catalog
+          - target-protocol
+          - target-runtime
+          - remote-routing
+          - init
+          - e2e
+          - full
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.lock
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+          python -m pip install --no-deps -e packages/a4diag-builtin-plugins
+      - name: Select and run suite
+        env:
+          SUITE: ${{ inputs.suite }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t test_paths < <(python tools/ci/select_v042_tests.py "$SUITE")
+          test "${#test_paths[@]}" -gt 0
+          python -m pytest -q -rs "${test_paths[@]}"
+      - name: Production wiring E2E
+        if: ${{ inputs.suite == 'e2e' || inputs.suite == 'full' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -x tests/e2e/run_production_wiring.sh ]]; then
+            sudo tests/e2e/run_production_wiring.sh
+          else
+            echo "Production wiring harness is introduced by Task 10."
+          fi
