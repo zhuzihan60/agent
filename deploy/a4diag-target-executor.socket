@@ -1,0 +1,13 @@
+[Unit]
+Description=A4Diag target executor socket
+
+[Socket]
+ListenStream=/run/a4diag-target/executor.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=a4diag-target
+RemoveOnStop=yes
+Backlog=32
+
+[Install]
+WantedBy=sockets.target

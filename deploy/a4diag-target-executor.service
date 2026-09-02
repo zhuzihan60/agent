@@ -1,0 +1,30 @@
+[Unit]
+Description=A4Diag restricted target executor
+Requires=a4diag-target-executor.socket
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/opt/a4diag-target/current/venv/bin/a4diag-target-executor
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths=/etc/a4diag-target /opt/a4diag-target/current
+ReadWritePaths=/run/a4diag-target /var/lib/a4diag-target/executor
+RuntimeDirectory=a4diag-target
+RuntimeDirectoryMode=0750
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=1024
+TimeoutStartSec=30

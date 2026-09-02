@@ -31,6 +31,7 @@ def test_bootstrap_generates_public_bundle_and_keeps_private_keys_in_secret_root
     assert document["target_id"] == "lab-node-1"
     assert document["allowed_source_cidrs"] == ["192.0.2.10/32"]
     assert document["managed_resources"] == []
+    assert document["confirm_managed_resources"] == "DISABLED"
     assert document["ssh_public_key"].startswith("ssh-ed25519 ")
     assert "BEGIN PUBLIC KEY" in document["operation_public_key"]
     assert document["controller_key_fingerprint"].startswith("sha256:")

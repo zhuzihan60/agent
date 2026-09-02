@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import stat
 import subprocess
 import sys
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -17,13 +19,13 @@ POSIX = pytest.mark.skipif(os.name == "nt", reason="target installer is Linux-on
 
 def configuration(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
-        "version": 1,
+        "protocol_version": "1.0",
         "target_id": "disposable-sandbox",
-        "target_fingerprint": "machine-id:0123456789abcdef0123456789abcdef",
-        "source_cidr": "192.0.2.10/32",
-        "ssh_authorized_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyController controller",
+        "allowed_source_cidrs": ["192.0.2.10/32"],
+        "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyController controller",
         "operation_public_key": "-----BEGIN PUBLIC KEY-----\nTEST-ONLY\n-----END PUBLIC KEY-----\n",
-        "managed_resources": {"files": [], "services": [], "packages": []},
+        "controller_key_fingerprint": "sha256:" + "a" * 64,
+        "managed_resources": [],
         "confirm_managed_resources": "DISABLED",
     }
     value.update(overrides)
@@ -45,10 +47,10 @@ def run_validate(tmp_path: Path, payload: dict[str, object]) -> subprocess.Compl
 @pytest.mark.parametrize(
     ("overrides", "message"),
     (
-        ({"source_cidr": "192.0.2.10"}, "source_cidr"),
-        ({"source_cidr": "0.0.0.0/0"}, "source_cidr"),
+        ({"allowed_source_cidrs": ["192.0.2.10"]}, "source_cidr"),
+        ({"allowed_source_cidrs": ["0.0.0.0/0"]}, "source_cidr"),
         ({"operation_public_key": "-----BEGIN PRIVATE KEY-----\nNO\n-----END PRIVATE KEY-----"}, "private"),
-        ({"managed_resources": {"files": ["/srv/app/config"], "services": [], "packages": []}}, "ENABLE"),
+        ({"managed_resources": [{"capability": "files", "resource": "/srv/app/config"}]}, "ENABLE"),
     ),
 )
 def test_target_configuration_fails_closed(
@@ -64,7 +66,7 @@ def test_target_configuration_accepts_explicit_managed_resource_confirmation(tmp
     result = run_validate(
         tmp_path,
         configuration(
-            managed_resources={"files": ["/srv/app/config"], "services": [], "packages": []},
+            managed_resources=[{"capability": "files", "resource": "/srv/app/config"}],
             confirm_managed_resources="ENABLE",
         ),
     )
@@ -112,6 +114,22 @@ exit 0
         "a4diag_target_runtime-0.4.1-py3-none-any.whl",
     ):
         (release / "wheelhouse" / name).write_bytes(b"wheel")
+    artifacts = sorted(path for path in release.rglob("*") if path.is_file())
+    manifest = {
+        "version": "0.4.1",
+        "artifacts": {
+            path.relative_to(release).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in artifacts
+        },
+    }
+    (release / "MANIFEST.json").write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    lines = []
+    for path in sorted((p for p in release.rglob("*") if p.is_file()), key=lambda p: p.relative_to(release).as_posix()):
+        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(release).as_posix()}")
+    (release / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     config = tmp_path / "target-install.json"
     config.write_text(json.dumps(configuration()), encoding="utf-8")
@@ -124,9 +142,12 @@ exit 0
             "A4DIAG_TARGET_ALLOW_UNSIGNED": "1",
             "A4DIAG_TARGET_TEST_REAL_PYTHON": sys.executable,
             "A4DIAG_TEST_REAL_PYTHON": sys.executable,
+            "A4DIAG_TARGET_MACHINE_ID": "0123456789abcdef0123456789abcdef",
+            "A4DIAG_TARGET_OS_RELEASE": str(tmp_path / "os-release"),
             "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
         }
     )
+    (tmp_path / "os-release").write_text('ID="ubuntu"\nVERSION_ID="24.04"\n', encoding="utf-8")
     command = ["bash", str(INSTALLER), "install", str(release), str(config)]
     first = subprocess.run(command, env=environment, check=False, capture_output=True, text=True)
     assert first.returncode == 0, first.stderr
@@ -148,3 +169,20 @@ exit 0
     failed = subprocess.run(command, env=environment, check=False, capture_output=True, text=True)
     assert failed.returncode != 0
     assert os.readlink(target_root / "opt" / "a4diag-target" / "current") == before
+
+    ledger = target_root / "var" / "lib" / "a4diag-target" / "executor" / "replay.sqlite3"
+    connection = sqlite3.connect(ledger)
+    connection.execute("CREATE TABLE replay (completed_at INTEGER)")
+    connection.execute("INSERT INTO replay VALUES (NULL)")
+    connection.commit()
+    connection.close()
+    environment["A4DIAG_TARGET_CONFIRM_UNINSTALL"] = "REMOVE"
+    uninstall = subprocess.run(
+        ["bash", str(INSTALLER), "uninstall"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert uninstall.returncode != 0
+    assert "incomplete" in uninstall.stderr

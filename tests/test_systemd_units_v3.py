@@ -21,6 +21,8 @@ EXPECTED_UNITS = frozenset(
         "a4diag-core.service",
         "a4diag-plugin@.service",
         "a4diag-plugin@.socket",
+        "a4diag-target-executor.service",
+        "a4diag-target-executor.socket",
     }
 )
 EXPECTED_SUPPORT_FILES = frozenset(
@@ -79,6 +81,8 @@ def test_support_files_exist_with_exact_names() -> None:
     sysusers = DEPLOY / "sysusers.d" / "a4diag.conf"
     assert tmpfiles.is_file()
     assert sysusers.is_file()
+    assert (DEPLOY / "tmpfiles.d" / "a4diag-target.conf").is_file()
+    assert (DEPLOY / "sysusers.d" / "a4diag-target.conf").is_file()
 
 
 def test_units_contain_no_fixed_target_literals() -> None:
@@ -149,6 +153,22 @@ def test_plugin_template_fails_closed_without_declared_network() -> None:
     )
 
 
+def test_target_executor_is_socket_only_and_hardened() -> None:
+    units = read_deploy_units()
+    socket = units["a4diag-target-executor.socket"]["Socket"]
+    assert socket["ListenStream"] == "/run/a4diag-target/executor.sock"
+    assert socket["SocketMode"] == "0660"
+    assert socket["SocketGroup"] == "a4diag-target"
+    service = units["a4diag-target-executor.service"]["Service"]
+    assert service["User"] == "root"
+    assert service["RestrictAddressFamilies"] == "AF_UNIX"
+    assert service["ProtectSystem"] == "strict"
+    assert service["ProtectHome"] == "yes"
+    assert service["NoNewPrivileges"] == "yes"
+    assert "/etc/a4diag-target" in service["ReadOnlyPaths"]
+    assert "/var/lib/a4diag-target/executor" in service["ReadWritePaths"]
+
+
 def test_units_execstart_match_installed_layout() -> None:
     """ExecStart must point at the real venv layout created by the installer."""
     units = read_deploy_units()
@@ -159,6 +179,10 @@ def test_units_execstart_match_installed_layout() -> None:
     assert (
         units["a4diag-plugin@.service"]["Service"]["ExecStart"]
         == "/opt/a4diag/plugins/current/venv/bin/a4diag-plugin --instance %i"
+    )
+    assert (
+        units["a4diag-target-executor.service"]["Service"]["ExecStart"]
+        == "/opt/a4diag-target/current/venv/bin/a4diag-target-executor"
     )
     assert "/opt/a4diag/plugins/current" in units["a4diag-plugin@.service"]["Service"]["ReadOnlyPaths"]
     cleanup = parse_unit((DEPLOY / "a4diag-cleanup.service").read_text(encoding="utf-8"))

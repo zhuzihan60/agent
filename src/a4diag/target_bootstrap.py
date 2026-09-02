@@ -124,6 +124,7 @@ def build_target_bootstrap(
         + hashlib.sha256(operation_public_raw).hexdigest(),
         "allowed_source_cidrs": list(request.allowed_source_cidrs),
         "managed_resources": [],
+        "confirm_managed_resources": "DISABLED",
     }
     install_document = output_dir / "target-install.json"
     descriptor = os.open(

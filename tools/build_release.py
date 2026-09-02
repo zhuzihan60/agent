@@ -34,6 +34,7 @@ from pathlib import Path
 RELEASE_VERSION = "0.4.1"
 CORE_WHEEL = f"a4diag-{RELEASE_VERSION}-py3-none-any.whl"
 BUILTIN_WHEEL = f"a4diag_builtin_plugins-{RELEASE_VERSION}-py3-none-any.whl"
+TARGET_WHEEL = f"a4diag_target_runtime-{RELEASE_VERSION}-py3-none-any.whl"
 EXPECTED_BUILTINS = frozenset(
     {
         "capability-files",
@@ -57,6 +58,9 @@ EXPECTED_SYSTEMD_UNITS = frozenset(
         "a4diag-plugin@.service",
         "a4diag-plugin@.socket",
     }
+)
+EXPECTED_TARGET_SYSTEMD_UNITS = frozenset(
+    {"a4diag-target-executor.service", "a4diag-target-executor.socket"}
 )
 
 FORBIDDEN_RUNTIME_LITERALS = (
@@ -241,6 +245,26 @@ def verify_project_wheels(project_wheels: Sequence[Path]) -> None:
             raise ValueError(
                 f"invalid project wheel {wheel_name}: METADATA contract mismatch"
             )
+
+
+def verify_target_project_wheels(project_wheels: Sequence[Path]) -> None:
+    if len(project_wheels) != 3:
+        raise ValueError("missing target project wheel: exactly three wheels are required")
+    verify_project_wheels(project_wheels[:2])
+    wheel = project_wheels[2]
+    if wheel.name != TARGET_WHEEL:
+        raise ValueError(f"missing target project wheel: {TARGET_WHEEL}")
+    _wheels_are_clean(wheel)
+    metadata = _wheel_metadata(wheel)
+    python_clauses = {
+        clause.strip() for clause in (metadata["Requires-Python"] or "").split(",")
+    }
+    if (
+        metadata["Name"] != "a4diag-target-runtime"
+        or metadata["Version"] != RELEASE_VERSION
+        or python_clauses != {">=3.11", "<3.12"}
+    ):
+        raise ValueError(f"invalid project wheel {TARGET_WHEEL}: METADATA contract mismatch")
 
 
 def verified_dependency_wheels(wheelhouse: Path) -> list[Path]:
@@ -532,6 +556,61 @@ def assemble_release(
         raise
 
 
+def copy_target_systemd(project_root: Path, output: Path) -> None:
+    output.mkdir()
+    for unit in sorted(EXPECTED_TARGET_SYSTEMD_UNITS):
+        shutil.copy2(project_root / "deploy" / unit, output / unit)
+    for subdir in ("sysusers.d", "tmpfiles.d"):
+        destination = output / subdir
+        destination.mkdir()
+        shutil.copy2(
+            project_root / "deploy" / subdir / "a4diag-target.conf",
+            destination / "a4diag-target.conf",
+        )
+
+
+def assemble_target_release(
+    project_root: Path,
+    dependency_wheelhouse: Path,
+    project_wheels: Sequence[Path],
+    output: Path,
+    *,
+    signing_key: Path | None = None,
+) -> None:
+    if output.exists():
+        raise FileExistsError(f"output already exists: {output}")
+    verify_source(project_root)
+    verify_target_project_wheels(project_wheels)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
+    try:
+        wheelhouse = staging / "wheelhouse"
+        wheelhouse.mkdir()
+        for wheel in verified_dependency_wheels(dependency_wheelhouse):
+            shutil.copy2(wheel, wheelhouse / wheel.name)
+        for wheel in project_wheels:
+            shutil.copy2(wheel, wheelhouse / wheel.name)
+        (staging / "VERSION").write_text(RELEASE_VERSION + "\n", encoding="utf-8")
+        shutil.copy2(
+            project_root / "install-a4diag-target.sh",
+            staging / "install-a4diag-target.sh",
+        )
+        tools_dir = staging / "tools"
+        tools_dir.mkdir()
+        shutil.copy2(
+            project_root / "tools" / "install_target_lib.sh",
+            tools_dir / "install_target_lib.sh",
+        )
+        copy_target_systemd(project_root, staging / "systemd")
+        write_manifest(staging)
+        if signing_key is not None:
+            sign_manifest(staging, signing_key)
+        os.replace(staging, output)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
 # ---------------------------------------------------------------------------
 # release verification
 # ---------------------------------------------------------------------------
@@ -652,6 +731,61 @@ def verify_release(
         raise ValueError("release is missing tools/install_lib.sh")
 
 
+def verify_target_release(
+    release_root: Path, *, verification_key: Path | None = None
+) -> None:
+    release_root = Path(release_root).resolve()
+    declared = _read_hash_manifest(release_root)
+    actual = {
+        path.relative_to(release_root).as_posix()
+        for path in release_root.rglob("*")
+        if path.is_file() and path.name not in {"SHA256SUMS", "MANIFEST.sig"}
+    }
+    if set(declared) != actual:
+        raise ValueError(
+            f"undeclared files={sorted(actual - set(declared))}; "
+            f"missing files={sorted(set(declared) - actual)}"
+        )
+    for relative, digest in declared.items():
+        if hashlib.sha256((release_root / relative).read_bytes()).hexdigest() != digest:
+            raise ValueError(f"SHA256 mismatch for release artifact: {relative}")
+    try:
+        manifest = json.loads((release_root / "MANIFEST.json").read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("target release is missing a valid MANIFEST.json") from exc
+    if manifest.get("version") != RELEASE_VERSION:
+        raise ValueError("target release manifest version mismatch")
+    if set(manifest.get("artifacts", {})) != set(declared) - {"MANIFEST.json"}:
+        raise ValueError("target release manifest does not exactly cover artifacts")
+    if any(declared.get(name) != digest for name, digest in manifest["artifacts"].items()):
+        raise ValueError("target release manifest digest mismatch")
+    if (release_root / "VERSION").read_text(encoding="utf-8").strip() != RELEASE_VERSION:
+        raise ValueError("target release VERSION lock mismatch")
+    signature = release_root / "MANIFEST.sig"
+    if verification_key is not None:
+        if not signature.is_file():
+            raise ValueError("target release is missing MANIFEST.sig")
+        _run_openssl(
+            ("dgst", "-sha256", "-verify", str(Path(verification_key).resolve()),
+             "-signature", str(signature), str(release_root / "MANIFEST.json")),
+            failure="target release manifest signature mismatch",
+        )
+    elif signature.is_file():
+        raise ValueError("target release carries a signature but no verification key was provided")
+    wheel_names = {path.name for path in (release_root / "wheelhouse").glob("*.whl")}
+    if not {CORE_WHEEL, BUILTIN_WHEEL, TARGET_WHEEL} <= wheel_names:
+        raise ValueError("target release wheelhouse is missing a required project wheel")
+    systemd = release_root / "systemd"
+    if {path.name for path in systemd.iterdir() if path.is_file()} != EXPECTED_TARGET_SYSTEMD_UNITS:
+        raise ValueError("target release systemd inventory mismatch")
+    for subdir in ("sysusers.d", "tmpfiles.d"):
+        if not (systemd / subdir / "a4diag-target.conf").is_file():
+            raise ValueError(f"target release is missing systemd/{subdir}/a4diag-target.conf")
+    for relative in ("install-a4diag-target.sh", "tools/install_target_lib.sh"):
+        if not (release_root / relative).is_file():
+            raise ValueError(f"target release is missing {relative}")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -670,11 +804,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     assemble_parser.add_argument("--builtin-wheel", type=Path, required=True)
     assemble_parser.add_argument("--output", type=Path, required=True)
     assemble_parser.add_argument("--signing-key", type=Path)
+    assemble_target_parser = subparsers.add_parser("assemble-target")
+    assemble_target_parser.add_argument("--project-root", type=Path, required=True)
+    assemble_target_parser.add_argument("--dependency-wheelhouse", type=Path, required=True)
+    assemble_target_parser.add_argument("--core-wheel", type=Path, required=True)
+    assemble_target_parser.add_argument("--builtin-wheel", type=Path, required=True)
+    assemble_target_parser.add_argument("--target-wheel", type=Path, required=True)
+    assemble_target_parser.add_argument("--output", type=Path, required=True)
+    assemble_target_parser.add_argument("--signing-key", type=Path)
     verify_source_parser = subparsers.add_parser("verify-source")
     verify_source_parser.add_argument("--project-root", type=Path, required=True)
     verify_release_parser = subparsers.add_parser("verify-release")
     verify_release_parser.add_argument("--release-root", type=Path, required=True)
     verify_release_parser.add_argument("--verification-key", type=Path)
+    verify_target_parser = subparsers.add_parser("verify-target-release")
+    verify_target_parser.add_argument("--release-root", type=Path, required=True)
+    verify_target_parser.add_argument("--verification-key", type=Path)
     return parser.parse_args(argv)
 
 
@@ -693,6 +838,15 @@ def main(argv: list[str] | None = None) -> int:
                 signing_key=args.signing_key.resolve() if args.signing_key else None,
             )
             return 0
+        if args.command == "assemble-target":
+            assemble_target_release(
+                args.project_root.resolve(),
+                args.dependency_wheelhouse.resolve(),
+                (args.core_wheel.resolve(), args.builtin_wheel.resolve(), args.target_wheel.resolve()),
+                args.output.resolve(),
+                signing_key=args.signing_key.resolve() if args.signing_key else None,
+            )
+            return 0
         if args.command == "verify-source":
             verify_source(args.project_root.resolve())
             return 0
@@ -702,6 +856,12 @@ def main(argv: list[str] | None = None) -> int:
                 verification_key=(
                     args.verification_key.resolve() if args.verification_key else None
                 ),
+            )
+            return 0
+        if args.command == "verify-target-release":
+            verify_target_release(
+                args.release_root.resolve(),
+                verification_key=args.verification_key.resolve() if args.verification_key else None,
             )
             return 0
     except (OSError, ValueError) as exc:
