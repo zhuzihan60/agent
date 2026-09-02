@@ -103,10 +103,11 @@ class _RpcExecutorPort:
         self, claims: OperationTicket, target: TargetConfig, step_id: str,
         operation: Operation, phase: OperationPhase,
     ) -> None:
+        if claims.target_id != target.id:
+            raise RuntimeFailure("target_ticket_mismatch")
         if (
             claims.transaction_id != self._transaction_id()
             or claims.step_id != step_id
-            or claims.target_id != target.id
             or claims.operation_digest != canonical_operation_digest(operation)
             or claims.phase is not phase
         ):
