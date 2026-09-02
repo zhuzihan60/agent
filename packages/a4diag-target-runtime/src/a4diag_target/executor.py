@@ -138,7 +138,9 @@ class TargetExecutor:
 
 
 def main() -> int:
-    raise SystemExit("a4diag-target-executor is started by its systemd socket service")
+    from a4diag_target.server import main as server_main
+
+    return server_main()
 
 
 __all__ = ["ExecutorError", "TargetExecutor", "main"]

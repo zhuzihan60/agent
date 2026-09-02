@@ -118,10 +118,17 @@ PY
 }
 
 write_configuration() {
-  local config="$1" machine_id fingerprint
+  local config="$1" runtime_python="$2" machine_id fingerprint
   machine_id="${A4DIAG_TARGET_MACHINE_ID:-$(cat /etc/machine-id)}"
   [ -n "$machine_id" ] || die "target identity unavailable"
-  fingerprint="sha256:$(printf '%s' "$machine_id" | sha256sum | cut -d' ' -f1)"
+  fingerprint="$($runtime_python - "$TARGET_ROOT" "$machine_id" <<'PY'
+import os, pathlib, sys
+from a4diag_target.server import target_fingerprint
+release = os.environ.get("A4DIAG_TARGET_OS_RELEASE")
+print(target_fingerprint(pathlib.Path(sys.argv[1] or "/"), machine_id_override=sys.argv[2], os_release_path=pathlib.Path(release) if release else None))
+PY
+)"
+  [ -n "$fingerprint" ] || die "target fingerprint unavailable"
   install -d -m 0755 "$TARGET_ETC"
   python3.11 - "$config" "$TARGET_ETC/policy.json.tmp" "$fingerprint" <<'PY'
 import json, pathlib, sys
@@ -178,7 +185,7 @@ install_target() {
   ln -sfn "$destination" "$TARGET_CURRENT.tmp.$$"
   mv -Tf "$TARGET_CURRENT.tmp.$$" "$TARGET_CURRENT"
   install -m 0755 "$destination/venv/bin/a4diag-transport-helper" "$TARGET_LIBEXEC/a4diag-transport-helper"
-  write_configuration "$config"
+  write_configuration "$config" "$destination/venv/bin/python"
   install -m 0644 "$destination/systemd/a4diag-target-executor.service" "$TARGET_SYSTEMD/a4diag-target-executor.service"
   install -m 0644 "$destination/systemd/a4diag-target-executor.socket" "$TARGET_SYSTEMD/a4diag-target-executor.socket"
   if [ "${A4DIAG_TARGET_SKIP_SYSTEMD:-0}" != "1" ]; then

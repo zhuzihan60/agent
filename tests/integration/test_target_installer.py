@@ -84,7 +84,7 @@ set -euo pipefail
 if [ \"${1:-}\" = \"-\" ]; then exec \"$A4DIAG_TEST_REAL_PYTHON\" \"$@\"; fi
 if [ \"${1:-}\" = \"-m\" ] && [ \"${2:-}\" = \"venv\" ]; then
   mkdir -p \"$3/bin\"
-  printf '#!/usr/bin/env bash\\nexit 0\\n' > \"$3/bin/python\"
+  printf '#!/usr/bin/env bash\\nexec \"$A4DIAG_TEST_REAL_PYTHON\" \"$@\"\\n' > \"$3/bin/python\"
   printf '#!/usr/bin/env bash\\nexit 0\\n' > \"$3/bin/a4diag-target-executor\"
   printf '#!/usr/bin/env bash\\nexit 0\\n' > \"$3/bin/a4diag-transport-helper\"
   chmod 755 \"$3/bin/\"*
