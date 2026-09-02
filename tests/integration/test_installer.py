@@ -82,7 +82,7 @@ def test_install_lib_uses_offline_wheelhouse_flags() -> None:
     assert "--no-index" in lib
     assert "--find-links" in lib
     assert "wheelhouse" in lib
-    assert lib.count('"$pip" -m pip install') == 2
+    assert lib.count('"$pip" -m pip install') == 4
     assert "--no-deps" in lib
 
 
@@ -561,6 +561,10 @@ exit 0
         return self.root / "opt" / "a4diag" / "current"
 
     @property
+    def plugin_current(self) -> Path:
+        return self.root / "opt" / "a4diag" / "plugins" / "current"
+
+    @property
     def pip_argv(self) -> str:
         return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
 
@@ -694,12 +698,14 @@ def test_failed_upgrade_keeps_current_symlink(tmp_path: Path) -> None:
     first = sandbox.install(release_v1, version="0.4.0")
     assert first.returncode == 0, first.stderr
     before = sandbox.current.resolve()
+    plugin_before = sandbox.plugin_current.resolve()
 
     failed = sandbox.install(
         release_v2, version="0.4.1", inject_failure="before_switch"
     )
     assert failed.returncode != 0
     assert sandbox.current.resolve() == before
+    assert sandbox.plugin_current.resolve() == plugin_before
 
 
 @POSIX

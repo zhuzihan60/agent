@@ -10,6 +10,10 @@ SUITES: dict[str, tuple[str, ...]] = {
     "catalog": (
         "tests/test_builtin_catalog.py",
         "tests/test_plugin_admin.py",
+        "tests/test_plugin_instances.py",
+        "tests/test_plugin_host_and_ports.py",
+        "tests/test_systemd_units_v3.py",
+        "tests/integration/test_installer.py",
         "tests/test_cli.py",
     ),
     "target-protocol": ("tests/test_target_protocol.py",),

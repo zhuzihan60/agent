@@ -309,6 +309,32 @@ a4diag_install_builtin_catalog() {
   log "installed ${version} built-in plugin catalog"
 }
 
+a4diag_install_plugin_runtime() {
+  local version="$1"
+  local core_release="${RELEASE_BASE}/${version}"
+  local plugin_release="$PLUGIN_ROOT/releases/$version"
+  [ -f "$plugin_release/builtin-index.json" ] || die "built-in plugin catalog is not installed"
+
+  log "creating isolated built-in plugin environment for $version"
+  python3.11 -m venv "$plugin_release/venv"
+  local pip="$plugin_release/venv/bin/python"
+  [ -x "$pip" ] || die "plugin virtual environment is missing python"
+  "$pip" -m pip install \
+    --no-index \
+    --find-links "$core_release/wheelhouse" \
+    -r "$core_release/requirements.lock"
+  "$pip" -m pip install \
+    --no-index \
+    --no-deps \
+    "$core_release/wheelhouse/a4diag-${version}-py3-none-any.whl" \
+    "$core_release/wheelhouse/a4diag_builtin_plugins-${version}-py3-none-any.whl"
+  [ -x "$plugin_release/venv/bin/a4diag-plugin" ] || die "plugin entrypoint is missing"
+  if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
+    chown -R root:root "$plugin_release/venv"
+  fi
+  log "isolated built-in plugin environment created"
+}
+
 a4diag_install_units() {
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" = "1" ]; then
     log "skipping systemd unit installation (A4DIAG_SKIP_SYSTEMD=1)"
@@ -337,6 +363,14 @@ a4diag_switch_current() {
   ln -s "releases/${version}" "$temporary_link"
   mv -T "$temporary_link" "$CURRENT_LINK"
   log "switched current -> $version"
+}
+
+a4diag_switch_plugin_current() {
+  local version="$1"
+  local temporary_link="$PLUGIN_ROOT/.current.tmp.$$"
+  ln -s "releases/${version}" "$temporary_link"
+  mv -T "$temporary_link" "$PLUGIN_ROOT/current"
+  log "switched plugin current -> $version"
 }
 
 a4diag_install_cli_link() {
@@ -385,21 +419,32 @@ a4diag_restart_services() {
 a4diag_install_release_tree() {
   local release_dir="$1"
   a4diag_verify_release "$release_dir"
-  local version previous=""
+  local version previous="" previous_plugin=""
   version="$(cat "$release_dir/VERSION")"
   if [ -L "$CURRENT_LINK" ]; then
     previous="$(readlink "$CURRENT_LINK" | sed 's#^releases/##')"
+  fi
+  if [ -L "$PLUGIN_ROOT/current" ]; then
+    previous_plugin="$(readlink "$PLUGIN_ROOT/current" | sed 's#^releases/##')"
   fi
 
   a4diag_install_release "$release_dir"
   a4diag_install_identities "$version"
   a4diag_initialize_runtime
   a4diag_install_builtin_catalog "$version"
+  a4diag_install_plugin_runtime "$version"
   a4diag_install_units "$version"
   a4diag_install_cli_link
   a4diag_switch_current "$version"
+  a4diag_switch_plugin_current "$version"
 
   if ! a4diag_restart_services "$version"; then
+    if [ -n "$previous_plugin" ] && [ "$previous_plugin" != "$version" ]; then
+      ln -s "releases/${previous_plugin}" "$PLUGIN_ROOT/.current.tmp.$$"
+      mv -T "$PLUGIN_ROOT/.current.tmp.$$" "$PLUGIN_ROOT/current"
+    elif [ -z "$previous_plugin" ] && [ -L "$PLUGIN_ROOT/current" ]; then
+      unlink "$PLUGIN_ROOT/current"
+    fi
     if [ -n "$previous" ] && [ "$previous" != "$version" ]; then
       log "new services failed; rolling back to $previous"
       ln -s "releases/${previous}" "${A4DIAG_ROOT}opt/a4diag/.current.tmp.$$"

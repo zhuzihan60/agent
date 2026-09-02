@@ -206,6 +206,11 @@ def inherited_systemd_socket() -> socket.socket | None:
 
 async def _serve_forever(host: PluginHost, socket_path: str) -> None:
     inherited = inherited_systemd_socket()
+    if inherited is not None and inherited.getsockname() != socket_path:
+        inherited.close()
+        raise RuntimeFailure(
+            "socket_activation_invalid", "inherited socket does not match instance"
+        )
     server = (
         await host.start_activated(inherited)
         if inherited is not None
@@ -222,6 +227,12 @@ def serve_instance(instance_config: dict[str, object], *, instance_name: str | N
     import time
 
     manifest_name = str(instance_config["manifest"])
+    if instance_name is not None:
+        expected_socket = f"/run/a4diag/{instance_name}.sock"
+        if instance_config.get("socket") != expected_socket:
+            raise RuntimeFailure(
+                "instance_config_invalid", "socket does not match instance identity"
+            )
     plugin = build_plugin(manifest_name, instance_config.get("config"))  # type: ignore[arg-type]
     bindings = build_bindings(manifest_name, plugin)
     key = _resolve_ticket_key(str(instance_config["ticket_key_ref"]))

@@ -10,7 +10,7 @@
 
 [Unit]
 Description=A4Diag plugin instance %i (isolated)
-Documentation=docs/migration/v0.3-to-v0.4.md
+Documentation=https://github.com/zhuzihan60/agent/blob/main/docs/migration/v0.3-to-v0.4.md
 Requires=a4diag-plugin@%i.socket
 After=network-online.target a4diag-core.service
 Wants=network-online.target
@@ -21,7 +21,7 @@ User=a4diag-plugin-%i
 Group=a4diag-plugin-%i
 DynamicUser=yes
 SupplementaryGroups=a4diag
-ExecStart=/opt/a4diag/current/venv/bin/a4diag-plugin --instance %i
+ExecStart=/opt/a4diag/plugins/current/venv/bin/a4diag-plugin --instance %i
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=30
@@ -47,7 +47,7 @@ AmbientCapabilities=
 
 # The plugin may only write its own socket; configuration is read-only.
 ReadWritePaths=/run/a4diag
-ReadOnlyPaths=/etc/a4diag /etc/a4diag/plugins/%i.yaml /opt/a4diag/current
+ReadOnlyPaths=/etc/a4diag /etc/a4diag/plugins/%i.yaml /opt/a4diag/plugins/current
 
 MemoryMax=256M
 TasksMax=64

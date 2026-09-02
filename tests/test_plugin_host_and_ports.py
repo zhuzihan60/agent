@@ -108,6 +108,21 @@ def test_host_rejects_malformed_instance_config(tmp_path: Path) -> None:
         load_instance_config(missing)
 
 
+def test_host_rejects_socket_not_bound_to_cli_instance() -> None:
+    from a4diag_builtin_plugins.host import serve_instance
+
+    with pytest.raises(RuntimeFailure, match="socket does not match instance identity"):
+        serve_instance(
+            {
+                "manifest": "capability-files",
+                "socket": "/run/a4diag/a-different-instance.sock",
+                "ticket_key_ref": "file:plugin-ticket.key",
+                "config": {},
+            },
+            instance_name="capability-lab-node-1",
+        )
+
+
 def test_host_wires_capability_and_transport_hosts_with_strict_config() -> None:
     from a4diag_builtin_plugins.host import build_plugin
 
