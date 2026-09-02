@@ -441,6 +441,19 @@ def test_cli_plugin_verify_failure_exit_65(tmp_path: Path, monkeypatch: pytest.M
     assert "signature" in stderr
 
 
+def test_cli_plugin_verify_without_package_trust_exits_69(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin = make_admin(tmp_path, signing_key=None)
+
+    code, _stdout, stderr = run_cli(
+        ["plugin", "verify", str(tmp_path / "third-party")], monkeypatch, admin
+    )
+
+    assert code == 69
+    assert stderr.strip() == "third_party_plugins_unsupported"
+
+
 def test_cli_plugin_install_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     admin = make_admin(tmp_path)
     package = make_package(tmp_path)

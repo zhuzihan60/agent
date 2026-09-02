@@ -85,11 +85,13 @@ class PluginAdmin:
         service_manager: ServiceManager,
         plugin_root: Path,
         registry_path: Path,
-        signing_key: bytes,
+        signing_key: bytes | None = None,
     ) -> None:
         if not isinstance(authorizer, Authorizer):
             raise TypeError("authorizer must be an Authorizer")
-        if type(signing_key) is not bytes or len(signing_key) < 32:
+        if signing_key is not None and (
+            type(signing_key) is not bytes or len(signing_key) < 32
+        ):
             raise PluginAdminError("invalid_key")
         self.authorizer = authorizer
         self.service_manager = service_manager
@@ -105,6 +107,7 @@ class PluginAdmin:
 
     def verify(self, package_path: Path) -> VerificationResult:
         """Verify a package without changing any state."""
+        signing_key = self._require_package_trust()
         package = Path(package_path)
         try:
             manifest_bytes = _read_bounded(package / "manifest.json", MAX_MANIFEST_BYTES)
@@ -123,7 +126,7 @@ class PluginAdmin:
             manifest = PluginManifest.model_validate(json.loads(manifest_bytes.decode("utf-8")))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             return VerificationResult(ok=False, reason=f"invalid_manifest: {error}")
-        if not _verify_signature(sums_bytes, signature, self._signing_key):
+        if not _verify_signature(sums_bytes, signature, signing_key):
             return VerificationResult(ok=False, reason="signature_mismatch")
         digest_error = _verify_sums(sums_bytes, {"manifest.json": manifest_bytes, "plugin.whl": wheel_bytes})
         if digest_error is not None:
@@ -266,6 +269,11 @@ class PluginAdmin:
     def _require_admin(self) -> None:
         if not self.authorizer.is_admin:
             raise AdminRequired("administrative authority required")
+
+    def _require_package_trust(self) -> bytes:
+        if self._signing_key is None:
+            raise PluginAdminError("third_party_plugins_unsupported")
+        return self._signing_key
 
     def _read_registry(self) -> list[PluginPin]:
         path = self.registry_path

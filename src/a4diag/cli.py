@@ -95,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_plugin_admin() -> object:
+def _build_plugin_admin(*, package_trust: bool = False) -> object:
     """Return the plugin admin; paths default to the production layout."""
     from .plugin_admin import Authorizer, PluginAdmin
 
@@ -104,7 +104,7 @@ def _build_plugin_admin() -> object:
         service_manager=SystemdServiceManager(),
         plugin_root=Path("/opt/a4diag/plugins"),
         registry_path=Path("/etc/a4diag/plugin-registry.json"),
-        signing_key=_signing_key(),
+        signing_key=_signing_key() if package_trust else None,
     )
 
 
@@ -343,6 +343,7 @@ def _cmd_plugin(args: argparse.Namespace) -> int:
         code = {
             "verification_failed": 65,
             "unavailable_dependency": 69,
+            "third_party_plugins_unsupported": 69,
             "not_found": 64,
             "registry_corrupt": 64,
         }.get(error.code, 64)
