@@ -16,7 +16,10 @@ SUITES: dict[str, tuple[str, ...]] = {
         "tests/integration/test_installer.py",
         "tests/test_cli.py",
     ),
-    "target-protocol": ("tests/test_target_protocol.py",),
+    "target-protocol": (
+        "tests/test_target_protocol.py",
+        "tests/test_target_bootstrap.py",
+    ),
     "target-runtime": ("tests/target_runtime",),
     "remote-routing": (
         "tests/test_plugin_ports_remote.py",
