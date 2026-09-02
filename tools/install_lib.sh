@@ -292,9 +292,15 @@ a4diag_install_builtin_catalog() {
     install "$index" "$PLUGIN_ROOT" "$registry" \
     || die "built-in plugin catalog installation failed"
 
-  find "$PLUGIN_ROOT/releases/$version" -type d -exec chmod 0750 {} +
-  find "$PLUGIN_ROOT/releases/$version" -type f -exec chmod 0640 {} +
-  find "$PLUGIN_ROOT" -maxdepth 1 -type f -name '*.json' -exec chmod 0640 {} +
+  chmod 0750 \
+    "$PLUGIN_ROOT/releases/$version" \
+    "$PLUGIN_ROOT/releases/$version/manifests" \
+    "$PLUGIN_ROOT/releases/$version/artifacts"
+  chmod 0640 \
+    "$PLUGIN_ROOT/releases/$version/builtin-index.json" \
+    "$PLUGIN_ROOT/releases/$version/manifests/"*.json \
+    "$PLUGIN_ROOT/releases/$version/artifacts/"*.whl \
+    "$PLUGIN_ROOT/"*.json
   chmod 0640 "$registry"
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
     chown -R root:a4diag "$PLUGIN_ROOT/releases/$version"
