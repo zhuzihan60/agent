@@ -281,6 +281,28 @@ PY
   fi
 }
 
+a4diag_install_builtin_catalog() {
+  local version="$1"
+  local release="${RELEASE_BASE}/${version}"
+  local index="${release}/builtin-plugins/builtin-index.json"
+  local registry="$ETC_DIR/plugin-registry.json"
+
+  [ -f "$index" ] || die "release is missing the built-in plugin index"
+  "$release/venv/bin/python" -m a4diag.builtin_catalog \
+    install "$index" "$PLUGIN_ROOT" "$registry" \
+    || die "built-in plugin catalog installation failed"
+
+  find "$PLUGIN_ROOT/releases/$version" -type d -exec chmod 0750 {} +
+  find "$PLUGIN_ROOT/releases/$version" -type f -exec chmod 0640 {} +
+  find "$PLUGIN_ROOT" -maxdepth 1 -type f -name '*.json' -exec chmod 0640 {} +
+  chmod 0640 "$registry"
+  if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
+    chown -R root:a4diag "$PLUGIN_ROOT/releases/$version"
+    chown root:a4diag "$PLUGIN_ROOT"/*.json "$registry"
+  fi
+  log "installed ${version} built-in plugin catalog"
+}
+
 a4diag_install_units() {
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" = "1" ]; then
     log "skipping systemd unit installation (A4DIAG_SKIP_SYSTEMD=1)"
@@ -366,6 +388,7 @@ a4diag_install_release_tree() {
   a4diag_install_release "$release_dir"
   a4diag_install_identities "$version"
   a4diag_initialize_runtime
+  a4diag_install_builtin_catalog "$version"
   a4diag_install_units "$version"
   a4diag_install_cli_link
   a4diag_switch_current "$version"

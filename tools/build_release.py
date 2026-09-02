@@ -34,6 +34,20 @@ from pathlib import Path
 RELEASE_VERSION = "0.4.1"
 CORE_WHEEL = f"a4diag-{RELEASE_VERSION}-py3-none-any.whl"
 BUILTIN_WHEEL = f"a4diag_builtin_plugins-{RELEASE_VERSION}-py3-none-any.whl"
+EXPECTED_BUILTINS = frozenset(
+    {
+        "capability-files",
+        "capability-packages",
+        "capability-services",
+        "model-openai-compatible",
+        "notification-cli",
+        "notification-flashduty",
+        "notification-smtp",
+        "notification-webhook",
+        "transport-local",
+        "transport-ssh",
+    }
+)
 
 EXPECTED_SYSTEMD_UNITS = frozenset(
     {
@@ -315,6 +329,125 @@ def write_manifest(release_root: Path) -> None:
     )
 
 
+def copy_builtin_catalog(project_root: Path, builtin_wheel: Path, release_root: Path) -> None:
+    """Stage the exact built-in manifests and their shared wheel with digests."""
+    source_root = project_root / "packages" / "a4diag-builtin-plugins" / "manifests"
+    sources = sorted(source_root.glob("*.json"))
+    parsed: list[tuple[Path, dict[str, object]]] = []
+    for source in sources:
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"invalid built-in manifest: {source.name}") from error
+        if type(payload) is not dict:
+            raise ValueError(f"invalid built-in manifest: {source.name}")
+        parsed.append((source, payload))
+    if {str(payload.get("name")) for _, payload in parsed} != EXPECTED_BUILTINS:
+        raise ValueError("built-in manifest inventory mismatch")
+    if len(parsed) != len(EXPECTED_BUILTINS):
+        raise ValueError("duplicate or extra built-in manifest")
+
+    catalog_root = release_root / "builtin-plugins"
+    manifest_root = catalog_root / "manifests"
+    artifact_root = catalog_root / "artifacts"
+    manifest_root.mkdir(parents=True)
+    artifact_root.mkdir()
+    installed_wheel = artifact_root / BUILTIN_WHEEL
+    shutil.copy2(builtin_wheel, installed_wheel)
+    wheel_digest = hashlib.sha256(installed_wheel.read_bytes()).hexdigest()
+    entries: list[dict[str, object]] = []
+    for source, payload in parsed:
+        name = str(payload.get("name"))
+        if payload.get("version") != RELEASE_VERSION:
+            raise ValueError(f"built-in manifest version mismatch: {name}")
+        plugin_type = payload.get("plugin_type")
+        if plugin_type not in {"transport", "capability", "model", "notification"}:
+            raise ValueError(f"built-in manifest type mismatch: {name}")
+        destination = manifest_root / source.name
+        shutil.copy2(source, destination)
+        entries.append(
+            {
+                "name": name,
+                "plugin_type": plugin_type,
+                "version": RELEASE_VERSION,
+                "api_version": "1.0",
+                "manifest_path": f"manifests/{source.name}",
+                "manifest_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+                "artifact_path": f"artifacts/{BUILTIN_WHEEL}",
+                "artifact_sha256": wheel_digest,
+            }
+        )
+    index = {"release_version": RELEASE_VERSION, "plugins": entries}
+    (catalog_root / "builtin-index.json").write_text(
+        json.dumps(index, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def verify_builtin_catalog(release_root: Path) -> None:
+    root = release_root / "builtin-plugins"
+    index_path = root / "builtin-index.json"
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        entries = index["plugins"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError("invalid built-in index") from error
+    if index.get("release_version") != RELEASE_VERSION or type(entries) is not list:
+        raise ValueError("built-in index version mismatch")
+    if {entry.get("name") for entry in entries if type(entry) is dict} != EXPECTED_BUILTINS:
+        raise ValueError("built-in index inventory mismatch")
+    if len(entries) != len(EXPECTED_BUILTINS):
+        raise ValueError("duplicate built-in index entry")
+    declared_manifests: set[str] = set()
+    declared_artifacts: set[str] = set()
+    for entry in entries:
+        if type(entry) is not dict:
+            raise ValueError("invalid built-in index entry")
+        if entry.get("version") != RELEASE_VERSION or entry.get("api_version") != "1.0":
+            raise ValueError("built-in index entry version mismatch")
+        for path_key, digest_key, declared in (
+            ("manifest_path", "manifest_sha256", declared_manifests),
+            ("artifact_path", "artifact_sha256", declared_artifacts),
+        ):
+            relative = entry.get(path_key)
+            digest = entry.get(digest_key)
+            if (
+                type(relative) is not str
+                or "\\" in relative
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+                or type(digest) is not str
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            ):
+                raise ValueError("unsafe built-in index entry")
+            path = root / relative
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError(f"built-in catalog digest mismatch: {relative}")
+            declared.add(relative)
+        manifest_path = root / entry["manifest_path"]
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("invalid built-in manifest") from error
+        if (
+            manifest.get("name") != entry.get("name")
+            or manifest.get("version") != entry.get("version")
+            or manifest.get("plugin_type") != entry.get("plugin_type")
+        ):
+            raise ValueError("built-in manifest binding mismatch")
+    actual_manifests = {
+        path.relative_to(root).as_posix() for path in (root / "manifests").glob("*") if path.is_file()
+    }
+    actual_artifacts = {
+        path.relative_to(root).as_posix() for path in (root / "artifacts").glob("*") if path.is_file()
+    }
+    if declared_manifests != actual_manifests or declared_artifacts != actual_artifacts:
+        raise ValueError("built-in catalog file inventory mismatch")
+    if declared_artifacts != {f"artifacts/{BUILTIN_WHEEL}"}:
+        raise ValueError("built-in artifact inventory mismatch")
+
+
 def _run_openssl(arguments: Sequence[str], *, failure: str) -> None:
     try:
         completed = subprocess.run(
@@ -370,6 +503,9 @@ def assemble_release(
             shutil.copy2(wheel, wheelhouse / wheel.name)
         for wheel in project_wheels:
             shutil.copy2(wheel, wheelhouse / wheel.name)
+
+        builtin_wheel = next(wheel for wheel in project_wheels if wheel.name == BUILTIN_WHEEL)
+        copy_builtin_catalog(project_root, builtin_wheel, staging)
 
         (staging / "VERSION").write_text(RELEASE_VERSION + "\n", encoding="utf-8")
         shutil.copy2(project_root / "requirements.lock", staging / "requirements.lock")
@@ -461,6 +597,7 @@ def verify_release(
 
     if (release_root / "VERSION").read_text(encoding="utf-8").strip() != RELEASE_VERSION:
         raise ValueError("release VERSION lock mismatch")
+    verify_builtin_catalog(release_root)
 
     signature_path = release_root / "MANIFEST.sig"
     if verification_key is not None:

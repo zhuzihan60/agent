@@ -206,6 +206,11 @@ def test_release_assembly_includes_the_installer(tmp_path: Path) -> None:
     )
     (project / "install.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
     (project / "tools" / "install_lib.sh").write_text("#!/usr/bin/env bash\n")
+    manifest_source = ROOT / "packages" / "a4diag-builtin-plugins" / "manifests"
+    manifest_target = project / "packages" / "a4diag-builtin-plugins" / "manifests"
+    manifest_target.mkdir(parents=True)
+    for source in manifest_source.glob("*.json"):
+        shutil.copy2(source, manifest_target / source.name)
 
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
@@ -321,6 +326,9 @@ A4DIAG_SHIM
   chmod +x "$3/bin/a4diag"
   cat > "$3/bin/python" <<'PIP_SHIM'
 #!/usr/bin/env bash
+if [ "$1" = "-m" ] && [ "$2" = "a4diag.builtin_catalog" ]; then
+  exec "$A4DIAG_TEST_REAL_PYTHON" "$@"
+fi
 if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then
   echo "${*:3}" >> "${A4DIAG_PIP_LOG:-/dev/null}"
 fi

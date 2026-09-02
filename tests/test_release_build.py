@@ -111,6 +111,11 @@ class ReleaseBuildContractTests(unittest.TestCase):
         (project / "tools" / "install_lib.sh").write_text(
             "#!/usr/bin/env bash\n", encoding="utf-8"
         )
+        manifest_source = PROJECT_ROOT / "packages" / "a4diag-builtin-plugins" / "manifests"
+        manifest_target = project / "packages" / "a4diag-builtin-plugins" / "manifests"
+        manifest_target.mkdir(parents=True)
+        for source in manifest_source.glob("*.json"):
+            shutil.copy2(source, manifest_target / source.name)
         dependency_wheel = dependency_wheelhouse / "dependency-1.0-py3-none-any.whl"
         self.write_minimal_wheel(dependency_wheel, "dependency", "1.0")
         dependency_digest = hashlib.sha256(dependency_wheel.read_bytes()).hexdigest()
@@ -168,6 +173,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
                     "MANIFEST.json",
                     "SHA256SUMS",
                     "VERSION",
+                    "builtin-plugins",
                     "config",
                     "install.sh",
                     "requirements-build.lock",
@@ -191,6 +197,25 @@ class ReleaseBuildContractTests(unittest.TestCase):
             )
             self.assertEqual(
                 (output / "VERSION").read_text("utf-8").strip(), "0.4.1"
+            )
+            builtin_index = json.loads(
+                (output / "builtin-plugins" / "builtin-index.json").read_text("utf-8")
+            )
+            self.assertEqual(len(builtin_index["plugins"]), 10)
+            self.assertEqual(
+                {entry["name"] for entry in builtin_index["plugins"]},
+                {
+                    "capability-files",
+                    "capability-packages",
+                    "capability-services",
+                    "model-openai-compatible",
+                    "notification-cli",
+                    "notification-flashduty",
+                    "notification-smtp",
+                    "notification-webhook",
+                    "transport-local",
+                    "transport-ssh",
+                },
             )
 
             manifest_lines = (output / "SHA256SUMS").read_text("utf-8").splitlines()

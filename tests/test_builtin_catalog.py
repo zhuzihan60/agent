@@ -27,7 +27,7 @@ def _sha256(path: Path) -> str:
 
 
 def make_catalog(root: Path) -> Path:
-    catalog_root = root / "builtin-plugins"
+    catalog_root = root / "plugins" / "releases" / build_release.RELEASE_VERSION
     manifests = catalog_root / "manifests"
     artifacts = catalog_root / "artifacts"
     manifests.mkdir(parents=True)
@@ -80,7 +80,7 @@ def test_fresh_registry_pins_all_builtins_disabled(tmp_path: Path) -> None:
     index = make_catalog(tmp_path)
     catalog = load_builtin_catalog(index)
 
-    pins = merge_builtin_registry((), catalog, index.parent)
+    pins = merge_builtin_registry((), catalog, index.parents[2])
 
     assert len(pins) == 10
     assert all(pin.enabled is False for pin in pins)
@@ -100,7 +100,7 @@ def test_registry_merge_preserves_only_matching_builtin_enabled_state(tmp_path: 
         enabled=True,
     )
 
-    pins = merge_builtin_registry((existing,), catalog, index.parent)
+    pins = merge_builtin_registry((existing,), catalog, index.parents[2])
 
     assert {pin.name: pin.enabled for pin in pins}[entry.name] is True
 
