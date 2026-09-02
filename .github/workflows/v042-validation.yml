@@ -40,6 +40,7 @@ jobs:
           python -m pip install -r requirements.lock
           python -m pip install --no-deps -e .
           python -m pip install --no-deps -e packages/a4diag-builtin-plugins
+          python -m pip install --no-deps -e packages/a4diag-target-runtime
       - name: Select and run suite
         env:
           SUITE: ${{ inputs.suite || 'core' }}

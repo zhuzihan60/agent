@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a4diag-target-runtime"
+version = "0.4.1"
+requires-python = ">=3.11,<3.12"
+dependencies = ["a4diag==0.4.1", "a4diag-builtin-plugins==0.4.1"]
+
+[project.scripts]
+a4diag-transport-helper = "a4diag_target.helper:main"
+a4diag-target-executor = "a4diag_target.executor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

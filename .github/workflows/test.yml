@@ -26,6 +26,7 @@ jobs:
           python -m pip install -r requirements.lock
           python -m pip install --no-deps -e .
           python -m pip install --no-deps -e packages/a4diag-builtin-plugins
+          python -m pip install --no-deps -e packages/a4diag-target-runtime
       - name: Full test suite (unit, contract, integration, acceptance)
         run: python -m pytest -q -rs
 
