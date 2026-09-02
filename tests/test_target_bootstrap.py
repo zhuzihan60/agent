@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import contextlib
+import io
 from pathlib import Path
 
 from a4diag.target_bootstrap import TargetBootstrapRequest, build_target_bootstrap
@@ -72,3 +74,32 @@ def test_bootstrap_request_rejects_invalid_target_and_network() -> None:
         except ValueError:
             continue
         raise AssertionError(f"unsafe request accepted: {values}")
+
+
+def test_cli_target_bootstrap_uses_controller_secret_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from a4diag.cli import main
+
+    output = tmp_path / "bundle"
+    secrets = tmp_path / "secrets"
+    monkeypatch.setenv("A4DIAG_TARGET_SECRET_ROOT", str(secrets))
+    stdout = io.StringIO()
+    with contextlib.redirect_stdout(stdout):
+        code = main(
+            [
+                "target",
+                "bootstrap",
+                "lab-node-1",
+                "--output",
+                str(output),
+                "--source-cidr",
+                "192.0.2.10/32",
+            ]
+        )
+    assert code == 0
+    result = json.loads(stdout.getvalue())
+    assert result["target_id"] == "lab-node-1"
+    assert result["private_keys"] == "stored_in_controller_secret_root"
+    assert (output / "target-install.json").is_file()
+    assert (secrets / "lab-node-1" / "operation-ed25519.pem").is_file()

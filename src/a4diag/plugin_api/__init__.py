@@ -27,11 +27,24 @@ _PROTOCOL_EXPORTS = frozenset(
     }
 )
 
+_TARGET_PROTOCOL_EXPORTS = frozenset(
+    {
+        "SignedTargetRequest",
+        "TargetLifecycle",
+        "TargetProtocolError",
+        "TargetRequest",
+        "TargetSigner",
+        "TargetVerifier",
+    }
+)
+
 
 def __getattr__(name: str) -> object:
-    if name not in _PROTOCOL_EXPORTS:
-        raise AttributeError(name)
-    return getattr(import_module("a4diag.plugin_api.protocol"), name)
+    if name in _PROTOCOL_EXPORTS:
+        return getattr(import_module("a4diag.plugin_api.protocol"), name)
+    if name in _TARGET_PROTOCOL_EXPORTS:
+        return getattr(import_module("a4diag.plugin_api.target_protocol"), name)
+    raise AttributeError(name)
 
 __all__ = [
     "MethodBinding",
@@ -48,6 +61,12 @@ __all__ = [
     "RpcSuccess",
     "SecretReference",
     "TargetCompatibility",
+    "SignedTargetRequest",
+    "TargetLifecycle",
+    "TargetProtocolError",
+    "TargetRequest",
+    "TargetSigner",
+    "TargetVerifier",
     "TicketedEffectParams",
     "VerifiedInvocation",
 ]

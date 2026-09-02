@@ -92,7 +92,49 @@ def _parser() -> argparse.ArgumentParser:
     )
     resume_parser.add_argument("transaction")
     resume_parser.add_argument("--json", action="store_true")
+    target_parser = subcommands.add_parser(
+        "target", help="offline target bootstrap administration"
+    )
+    target_sub = target_parser.add_subparsers(dest="action", required=True)
+    target_bootstrap = target_sub.add_parser(
+        "bootstrap", help="generate public target install material offline"
+    )
+    target_bootstrap.add_argument("target_id")
+    target_bootstrap.add_argument("--output", required=True, metavar="DIRECTORY")
+    target_bootstrap.add_argument(
+        "--source-cidr", action="append", default=[], metavar="CIDR"
+    )
     return parser
+
+
+def _cmd_target(args: argparse.Namespace) -> int:
+    from .target_bootstrap import TargetBootstrapRequest, build_target_bootstrap
+
+    if args.action != "bootstrap":
+        return 64
+    request = TargetBootstrapRequest(
+        target_id=args.target_id,
+        allowed_source_cidrs=tuple(args.source_cidr),
+    )
+    secret_root = Path(
+        os.environ.get(
+            "A4DIAG_TARGET_SECRET_ROOT", "/etc/a4diag/secrets/targets"
+        )
+    )
+    receipt = build_target_bootstrap(
+        request, Path(args.output), secret_root=secret_root
+    )
+    print(
+        json.dumps(
+            {
+                "target_id": request.target_id,
+                "install_document": str(receipt.install_document),
+                "private_keys": "stored_in_controller_secret_root",
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def _build_plugin_admin(*, package_trust: bool = False) -> object:
@@ -545,6 +587,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_approvals(args)
     if args.command == "resume":
         return _cmd_resume(args)
+    if args.command == "target":
+        return _cmd_target(args)
     if args.command == "cleanup":
         from .settings import load_settings
 
