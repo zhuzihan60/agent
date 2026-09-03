@@ -9,7 +9,11 @@ cat >"$config" <<'JSON'
 JSON
 
 echo "target-distro-smoke: verify exact inventory"
-python3.11 tools/build_release.py verify-target-release --release-root "$release"
+verify_args=(verify-target-release --release-root "$release")
+if [ -n "${A4DIAG_TARGET_TRUSTED_KEY:-}" ]; then
+  verify_args+=(--verification-key "$A4DIAG_TARGET_TRUSTED_KEY")
+fi
+python3.11 tools/build_release.py "${verify_args[@]}"
 
 echo "target-distro-smoke: offline install with no managed resources"
 A4DIAG_TARGET_SKIP_SYSTEMD=1 \
