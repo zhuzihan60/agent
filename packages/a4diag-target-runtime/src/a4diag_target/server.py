@@ -25,6 +25,15 @@ from a4diag_target.policy import TargetPolicy
 from a4diag_target.replay import SqliteReplayLedger
 
 MAX_FRAME_BYTES = 1_048_576
+SYSTEMCTL_EXECUTABLE = "/usr/bin/systemctl"
+
+
+def _systemd_version() -> bytes:
+    """Read the version through systemctl's stable cross-distro path."""
+    return subprocess.run(
+        [SYSTEMCTL_EXECUTABLE, "--version"], check=True, capture_output=True,
+        timeout=10,
+    ).stdout
 
 
 def probe_identity(
@@ -41,10 +50,7 @@ def probe_identity(
         if "=" in line:
             key, value = line.split("=", 1)
             values[key] = value.strip().strip('"')
-    systemd = subprocess.run(
-        ["/usr/bin/systemd", "--version"], check=True, capture_output=True,
-        text=True, timeout=10,
-    ).stdout.splitlines()[0]
+    systemd = _systemd_version().decode("utf-8", errors="replace").splitlines()[0]
     return TargetIdentity(
         machine_id=machine_id,
         host_key_sha256=_host_key_sha256(root),
@@ -82,10 +88,7 @@ def read_identity(root: Path, request: dict[str, object]) -> dict[str, object]:
     elif kind == "os_release":
         raw = (Path(root) / "etc/os-release").read_bytes()
     elif kind == "systemd_version":
-        raw = subprocess.run(
-            ["/usr/bin/systemd", "--version"], check=True, capture_output=True,
-            timeout=10,
-        ).stdout
+        raw = _systemd_version()
     else:
         return {"ok": False, "reason": "read_kind_not_allowed"}
     if request.get("path") is not None:
@@ -208,4 +211,4 @@ def main() -> int:
     return 0
 
 
-__all__ = ["TargetSocketServer", "activated_socket", "main", "probe_identity", "read_identity", "serve_socket", "target_fingerprint"]
+__all__ = ["SYSTEMCTL_EXECUTABLE", "TargetSocketServer", "activated_socket", "main", "probe_identity", "read_identity", "serve_socket", "target_fingerprint"]

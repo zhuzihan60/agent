@@ -170,6 +170,22 @@ jobs:
         run: |
           uv python install 3.11
           python3.11 --version
+      - name: Install target systemd identity prerequisite
+        shell: bash
+        run: |
+          if command -v systemctl >/dev/null 2>&1; then exit 0; fi
+          if command -v dnf >/dev/null 2>&1; then
+            dnf -y install systemd
+          elif command -v yum >/dev/null 2>&1; then
+            yum -y install systemd
+          elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y systemd
+          else
+            echo "no supported package manager for systemd prerequisite" >&2
+            exit 1
+          fi
+          test -x /usr/bin/systemctl
       - uses: actions/download-artifact@v4
         with:
           name: a4diag-target-release

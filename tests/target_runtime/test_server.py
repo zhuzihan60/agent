@@ -3,9 +3,24 @@ from __future__ import annotations
 import base64
 import hashlib
 from pathlib import Path
+from unittest.mock import patch
 
 from a4diag_builtin_plugins.transport_common import identity_fingerprint
 from a4diag_target.server import probe_identity, read_identity, target_fingerprint
+
+
+def test_target_systemd_version_uses_fixed_cross_distro_systemctl() -> None:
+    completed = type("Completed", (), {"stdout": b"systemd 255 (255.4-1)\n"})()
+    with patch("a4diag_target.server.subprocess.run", return_value=completed) as execute:
+        from a4diag_target.server import _systemd_version
+
+        assert _systemd_version() == completed.stdout
+    execute.assert_called_once_with(
+        ["/usr/bin/systemctl", "--version"],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
 
 
 def test_target_identity_uses_machine_os_systemd_and_host_key(tmp_path: Path) -> None:
