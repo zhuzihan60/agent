@@ -68,7 +68,10 @@ def target_fingerprint(
 
 def read_identity(root: Path, request: dict[str, object]) -> dict[str, object]:
     """Serve the three fixed diagnostic reads used by the controller collector."""
-    if set(request) != {"method", "kind", "limit"} or request.get("method") != "read":
+    if (
+        set(request) not in ({"method", "kind", "limit"}, {"method", "kind", "path", "limit"})
+        or request.get("method") != "read"
+    ):
         return {"ok": False, "reason": "read_request_invalid"}
     limit = request.get("limit")
     if type(limit) is not int or not 1 <= limit <= 65_536:
@@ -85,6 +88,8 @@ def read_identity(root: Path, request: dict[str, object]) -> dict[str, object]:
         ).stdout
     else:
         return {"ok": False, "reason": "read_kind_not_allowed"}
+    if request.get("path") is not None:
+        return {"ok": False, "reason": "read_request_invalid"}
     truncated = len(raw) > limit
     return {
         "content": raw[:limit].decode("utf-8", errors="replace"),

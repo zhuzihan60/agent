@@ -46,6 +46,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
           tests/e2e/run_production_wiring.sh
           echo "A4DIAG_E2E=1" >> "$GITHUB_ENV"
           echo "A4DIAG_E2E_EVIDENCE=/tmp/a4diag-e2e/evidence.json" >> "$GITHUB_ENV"
