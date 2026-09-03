@@ -5,7 +5,7 @@ import hashlib
 from pathlib import Path
 
 from a4diag_builtin_plugins.transport_common import identity_fingerprint
-from a4diag_target.server import probe_identity, target_fingerprint
+from a4diag_target.server import probe_identity, read_identity, target_fingerprint
 
 
 def test_target_identity_uses_machine_os_systemd_and_host_key(tmp_path: Path) -> None:
@@ -29,3 +29,21 @@ def test_target_identity_uses_machine_os_systemd_and_host_key(tmp_path: Path) ->
     assert identity.host_key_sha256 == hashlib.sha256(raw_key).hexdigest()
     assert target_fingerprint(root) == identity_fingerprint(identity)
 
+
+def test_target_read_surface_is_fixed_to_identity_fields(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / "etc/machine-id").write_text("machine-1\n", encoding="utf-8")
+    (root / "etc/os-release").write_text(
+        'ID="ubuntu"\nVERSION_ID="24.04"\n', encoding="utf-8"
+    )
+
+    machine = read_identity(root, {"method": "read", "kind": "machine_id", "limit": 65536})
+    release = read_identity(root, {"method": "read", "kind": "os_release", "limit": 65536})
+
+    assert machine == {"content": "machine-1\n", "truncated": False}
+    assert 'ID="ubuntu"' in release["content"]
+    assert read_identity(root, {"method": "read", "kind": "file", "path": "/etc/shadow", "limit": 65536}) == {
+        "ok": False,
+        "reason": "read_kind_not_allowed",
+    }
