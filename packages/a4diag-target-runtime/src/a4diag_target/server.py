@@ -93,6 +93,7 @@ class TargetSocketServer:
         public_key_path: Path = Path("/etc/a4diag-target/operation-public.pem"),
         replay_path: Path = Path("/var/lib/a4diag-target/executor/replay.sqlite3"),
     ) -> None:
+        self._identity_root = Path(os.environ.get("A4DIAG_TARGET_IDENTITY_ROOT", "/"))
         policy = TargetPolicy.model_validate_json(policy_path.read_text(encoding="utf-8"))
         key = serialization.load_pem_public_key(public_key_path.read_bytes())
         if not isinstance(key, Ed25519PublicKey):
@@ -103,7 +104,7 @@ class TargetSocketServer:
                 clock=lambda: int(time.time()),
             ),
             policy=policy,
-            identity_probe=target_fingerprint,
+            identity_probe=lambda: target_fingerprint(self._identity_root),
             adapter=LocalFileAdapter(),
         )
 
@@ -113,7 +114,9 @@ class TargetSocketServer:
             if type(value) is not dict:
                 raise ValueError("request must be object")
             if value == {"method": "identity"}:
-                return canonical_json_bytes(probe_identity().model_dump(mode="json"))
+                return canonical_json_bytes(
+                    probe_identity(self._identity_root).model_dump(mode="json")
+                )
             result = await self._executor.execute(
                 SignedTargetRequest.model_validate(value)
             )
@@ -161,7 +164,12 @@ def activated_socket() -> socket.socket:
 def main() -> int:
     listener = activated_socket()
     try:
-        serve_socket(listener, TargetSocketServer())
+        server = TargetSocketServer(
+            policy_path=Path(os.environ.get("A4DIAG_TARGET_POLICY", "/etc/a4diag-target/policy.json")),
+            public_key_path=Path(os.environ.get("A4DIAG_TARGET_PUBLIC_KEY", "/etc/a4diag-target/operation-public.pem")),
+            replay_path=Path(os.environ.get("A4DIAG_TARGET_REPLAY", "/var/lib/a4diag-target/executor/replay.sqlite3")),
+        )
+        serve_socket(listener, server)
     finally:
         listener.close()
     return 0

@@ -1,0 +1,6 @@
+HostKey /tmp/a4diag-e2e/ssh_host_ed25519_key
+PidFile /tmp/a4diag-e2e/sshd.pid
+Port 0
+UsePAM no
+PasswordAuthentication no
+PermitRootLogin no

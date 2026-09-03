@@ -41,6 +41,14 @@ jobs:
           python -m pip install --no-deps -e .
           python -m pip install --no-deps -e packages/a4diag-builtin-plugins
           python -m pip install --no-deps -e packages/a4diag-target-runtime
+      - name: Production wiring E2E
+        if: ${{ inputs.suite == 'e2e' || inputs.suite == 'full' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo tests/e2e/run_production_wiring.sh
+          echo "A4DIAG_E2E=1" >> "$GITHUB_ENV"
+          echo "A4DIAG_E2E_EVIDENCE=/tmp/a4diag-e2e/evidence.json" >> "$GITHUB_ENV"
       - name: Select and run suite
         env:
           SUITE: ${{ inputs.suite || 'core' }}
@@ -51,13 +59,3 @@ jobs:
           mapfile -t test_paths < <(python tools/ci/select_v042_tests.py "$SUITE")
           test "${#test_paths[@]}" -gt 0
           python -m pytest -q -rs "${test_paths[@]}"
-      - name: Production wiring E2E
-        if: ${{ inputs.suite == 'e2e' || inputs.suite == 'full' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -x tests/e2e/run_production_wiring.sh ]]; then
-            sudo tests/e2e/run_production_wiring.sh
-          else
-            echo "Production wiring harness is introduced by Task 10."
-          fi
