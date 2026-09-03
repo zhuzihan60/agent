@@ -264,7 +264,7 @@ def test_self_check_reports_read_only_defaults(tmp_path: Path, monkeypatch: pyte
     assert code == 0
     payload = json.loads(output)
     assert payload["ok"] is True
-    assert payload["version"] == "0.4.1"
+    assert payload["version"] == "0.4.2"
     assert payload["global_mode"] == "read_only"
     assert payload["targets"] == []
     assert payload["offline"] is True
@@ -320,7 +320,7 @@ if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   mkdir -p "$3/bin"
   cat > "$3/bin/a4diag" <<'A4DIAG_SHIM'
 #!/usr/bin/env bash
-echo '{"ok": true, "version": "0.4.1", "global_mode": "read_only", "targets": [], "offline": true}'
+echo '{"ok": true, "version": "0.4.2", "global_mode": "read_only", "targets": [], "offline": true}'
 exit 0
 A4DIAG_SHIM
   chmod +x "$3/bin/a4diag"
@@ -374,7 +374,7 @@ exit 0
         self,
         root: Path,
         *,
-        version: str = "0.4.1",
+        version: str = "0.4.2",
         signing_key: Path | None = None,
     ) -> Path:
         release = root / f"release-{version}"
@@ -508,7 +508,7 @@ exit 0
     def env(
         self,
         *,
-        version: str = "0.4.1",
+        version: str = "0.4.2",
         skip_systemd: bool = True,
         service_state: str = "active",
     ) -> dict[str, str]:
@@ -536,7 +536,7 @@ exit 0
         self,
         release_dir: Path,
         *,
-        version: str = "0.4.1",
+        version: str = "0.4.2",
         inject_failure: str | None = None,
         skip_systemd: bool = True,
         service_state: str = "active",
@@ -606,7 +606,7 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     result = sandbox.install(release)
 
     assert result.returncode == 0, result.stderr
-    installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.4.1"
+    installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.4.2"
     assert stat.S_IMODE(installed.stat().st_mode) == 0o755
     registry = sandbox.root / "etc" / "a4diag" / "plugin-registry.json"
     registry_payload = json.loads(registry.read_text(encoding="utf-8"))
@@ -620,7 +620,7 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     assert plugin_root.is_dir()
     plugin_current = plugin_root / "current"
     assert plugin_current.is_symlink()
-    assert plugin_current.resolve() == plugin_root / "releases" / "0.4.1"
+    assert plugin_current.resolve() == plugin_root / "releases" / "0.4.2"
     assert (plugin_current / "venv" / "bin" / "a4diag-plugin").is_file()
     assert (plugin_current / "venv").resolve() != (installed / "venv").resolve()
     runtime_dirs = (
@@ -653,17 +653,17 @@ def test_offline_install_invokes_pip_without_index(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "--no-index" in sandbox.pip_argv
     assert "--find-links" in sandbox.pip_argv
-    assert "a4diag-0.4.1-py3-none-any.whl" in sandbox.pip_argv
+    assert "a4diag-0.4.2-py3-none-any.whl" in sandbox.pip_argv
     calls = sandbox.pip_argv.splitlines()
     assert len(calls) == 4
     assert "-r" in calls[0]
-    assert "a4diag-0.4.1-py3-none-any.whl" not in calls[0]
+    assert "a4diag-0.4.2-py3-none-any.whl" not in calls[0]
     assert "--no-deps" in calls[1]
     assert "-r" not in calls[1].split()
-    assert "a4diag_builtin_plugins-0.4.1-py3-none-any.whl" in calls[1]
+    assert "a4diag_builtin_plugins-0.4.2-py3-none-any.whl" in calls[1]
     assert "-r" in calls[2]
     assert "--no-deps" in calls[3]
-    assert "a4diag_builtin_plugins-0.4.1-py3-none-any.whl" in calls[3]
+    assert "a4diag_builtin_plugins-0.4.2-py3-none-any.whl" in calls[3]
 
 
 @pytest.mark.parametrize(
@@ -693,7 +693,7 @@ def test_install_accepts_supported_rhel_family_point_releases(
 def test_failed_upgrade_keeps_current_symlink(tmp_path: Path) -> None:
     sandbox = InstallerSandbox(tmp_path)
     release_v1 = sandbox.make_release(tmp_path, version="0.4.0")
-    release_v2 = sandbox.make_release(tmp_path, version="0.4.1")
+    release_v2 = sandbox.make_release(tmp_path, version="0.4.2")
 
     first = sandbox.install(release_v1, version="0.4.0")
     assert first.returncode == 0, first.stderr
@@ -701,7 +701,7 @@ def test_failed_upgrade_keeps_current_symlink(tmp_path: Path) -> None:
     plugin_before = sandbox.plugin_current.resolve()
 
     failed = sandbox.install(
-        release_v2, version="0.4.1", inject_failure="before_switch"
+    release_v2, version="0.4.2", inject_failure="before_switch"
     )
     assert failed.returncode != 0
     assert sandbox.current.resolve() == before

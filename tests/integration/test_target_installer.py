@@ -107,16 +107,16 @@ exit 0
         (release / "systemd" / name).write_text("[Unit]\n", encoding="utf-8")
     (release / "systemd" / "sysusers.d" / "a4diag-target.conf").write_text("u a4diag-target\n", encoding="utf-8")
     (release / "systemd" / "tmpfiles.d" / "a4diag-target.conf").write_text("d /run/a4diag-target\n", encoding="utf-8")
-    (release / "VERSION").write_text("0.4.1\n", encoding="utf-8")
+    (release / "VERSION").write_text("0.4.2\n", encoding="utf-8")
     for name in (
-        "a4diag-0.4.1-py3-none-any.whl",
-        "a4diag_builtin_plugins-0.4.1-py3-none-any.whl",
-        "a4diag_target_runtime-0.4.1-py3-none-any.whl",
+        "a4diag-0.4.2-py3-none-any.whl",
+        "a4diag_builtin_plugins-0.4.2-py3-none-any.whl",
+        "a4diag_target_runtime-0.4.2-py3-none-any.whl",
     ):
         (release / "wheelhouse" / name).write_bytes(b"wheel")
     artifacts = sorted(path for path in release.rglob("*") if path.is_file())
     manifest = {
-        "version": "0.4.1",
+        "version": "0.4.2",
         "artifacts": {
             path.relative_to(release).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in artifacts
