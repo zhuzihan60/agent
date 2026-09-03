@@ -30,9 +30,32 @@ jobs:
       - name: Full test suite (unit, contract, integration, acceptance)
         run: python -m pytest -q -rs
 
+  production-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime and E2E prerequisites
+        run: |
+          python -m pip install -r requirements-build.lock
+          python -m pip install -r requirements.lock
+          python -m pip install --no-deps -e .
+          python -m pip install --no-deps -e packages/a4diag-builtin-plugins
+          python -m pip install --no-deps -e packages/a4diag-target-runtime
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
+      - name: Complete controller-to-target production wiring
+        run: |
+          tests/e2e/run_production_wiring.sh
+          A4DIAG_E2E=1 A4DIAG_E2E_EVIDENCE=/tmp/a4diag-e2e/evidence.json \
+            python -m pytest -q tests/e2e/test_production_wiring.py
+
   build:
     runs-on: ubuntu-latest
-    needs: unit
+    needs: [unit, production-e2e]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
