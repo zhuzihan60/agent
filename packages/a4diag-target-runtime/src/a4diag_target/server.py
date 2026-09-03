@@ -66,6 +66,32 @@ def target_fingerprint(
     )
 
 
+def read_identity(root: Path, request: dict[str, object]) -> dict[str, object]:
+    """Serve the three fixed diagnostic reads used by the controller collector."""
+    if set(request) != {"method", "kind", "limit"} or request.get("method") != "read":
+        return {"ok": False, "reason": "read_request_invalid"}
+    limit = request.get("limit")
+    if type(limit) is not int or not 1 <= limit <= 65_536:
+        return {"ok": False, "reason": "read_limit_invalid"}
+    kind = request.get("kind")
+    if kind == "machine_id":
+        raw = (Path(root) / "etc/machine-id").read_bytes()
+    elif kind == "os_release":
+        raw = (Path(root) / "etc/os-release").read_bytes()
+    elif kind == "systemd_version":
+        raw = subprocess.run(
+            ["/usr/bin/systemd", "--version"], check=True, capture_output=True,
+            timeout=10,
+        ).stdout
+    else:
+        return {"ok": False, "reason": "read_kind_not_allowed"}
+    truncated = len(raw) > limit
+    return {
+        "content": raw[:limit].decode("utf-8", errors="replace"),
+        "truncated": truncated,
+    }
+
+
 def _host_key_sha256(root: Path) -> str | None:
     for name in (
         "ssh_host_ed25519_key.pub", "ssh_host_ecdsa_key.pub",
@@ -117,6 +143,8 @@ class TargetSocketServer:
                 return canonical_json_bytes(
                     probe_identity(self._identity_root).model_dump(mode="json")
                 )
+            if value.get("method") == "read":
+                return canonical_json_bytes(read_identity(self._identity_root, value))
             result = await self._executor.execute(
                 SignedTargetRequest.model_validate(value)
             )
@@ -175,4 +203,4 @@ def main() -> int:
     return 0
 
 
-__all__ = ["TargetSocketServer", "activated_socket", "main", "probe_identity", "serve_socket", "target_fingerprint"]
+__all__ = ["TargetSocketServer", "activated_socket", "main", "probe_identity", "read_identity", "serve_socket", "target_fingerprint"]
