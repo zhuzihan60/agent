@@ -82,16 +82,16 @@ def main() -> int:
         probe_req = Operation(capability="files", action="replace_managed_file", resource=str(low_file),
                               parameters={"content": base64.b64encode(b"after\n").decode(), "mode": 0o640},
                               model_risk=Risk.LOW, verify={}, undo={"restore": True})
-        controller_fp = signer.sign(_request(target_fp=target_fp, target_id="e2e-target", signer=signer,
-                                              operation=probe_req, lifecycle=TargetLifecycle.PREPARE,
-                                              tx="fingerprint", step="0", nonce="f" * 16))["key_fingerprint"]
+        from cryptography.hazmat.primitives import serialization
+        controller_fp = "sha256:" + hashlib.sha256(
+            key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        ).hexdigest()
         policy = TargetPolicy(target_id="e2e-target", target_fingerprint=target_fp,
                               controller_key_fingerprint=controller_fp,
                               managed_roots=(str(managed),))
         policy_path = root / "policy.json"
         policy_path.write_text(policy.model_dump_json(), encoding="utf-8")
         pub_path = root / "operation-public.pem"
-        from cryptography.hazmat.primitives import serialization
         pub_path.write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
         replay = root / "replay.sqlite3"
         sock_path = root / "executor.sock"
