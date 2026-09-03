@@ -1,7 +1,7 @@
 {
   "name": "notification-webhook",
   "plugin_type": "notification",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "api_min": "1.0",
   "api_max": "1.0",
   "executable": "a4diag_builtin_plugins.notification_webhook:main",

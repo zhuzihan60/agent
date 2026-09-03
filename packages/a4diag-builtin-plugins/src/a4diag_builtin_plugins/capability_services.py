@@ -32,7 +32,7 @@ from a4diag_builtin_plugins.capability_common import (
     marker_from,
 )
 
-_VERSION = "0.4.1"
+_VERSION = "0.4.2"
 SYSTEMCTL_EXECUTABLE = "/usr/bin/systemctl"
 _UNIT_NAME = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,255}\.(service|socket|timer|target|mount|path)$"

@@ -1,7 +1,7 @@
 {
   "name": "model-openai-compatible",
   "plugin_type": "model",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "api_min": "1.0",
   "api_max": "1.0",
   "executable": "a4diag_builtin_plugins.model_openai:main",

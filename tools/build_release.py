@@ -1,4 +1,4 @@
-"""A4Diag 0.4.1 release assembly and static verification.
+"""A4Diag 0.4.2 release assembly and static verification.
 
 Commands:
 - ``stage-systemd``: stage the exact systemd unit inventory atomically.
@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from email.parser import BytesParser
 from pathlib import Path
 
-RELEASE_VERSION = "0.4.1"
+RELEASE_VERSION = "0.4.2"
 CORE_WHEEL = f"a4diag-{RELEASE_VERSION}-py3-none-any.whl"
 BUILTIN_WHEEL = f"a4diag_builtin_plugins-{RELEASE_VERSION}-py3-none-any.whl"
 TARGET_WHEEL = f"a4diag_target_runtime-{RELEASE_VERSION}-py3-none-any.whl"

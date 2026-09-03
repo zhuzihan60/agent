@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a4diag-builtin-plugins"
-version = "0.4.1"
+version = "0.4.2"
 description = "Isolated built-in plugins for A4Diag"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-  "a4diag==0.4.1",
+  "a4diag==0.4.2",
   "pydantic==2.13.4",
 ]
 
