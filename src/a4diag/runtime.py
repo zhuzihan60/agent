@@ -21,7 +21,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from a4diag.approval_cli import IdentityError, PlanDetail
 from a4diag.approvals import ApprovalStore
 from a4diag.audit import AuditError, AuditWriter
-from a4diag.domain import JsonValue, Operation, Plan, Risk, TargetConfig
+from a4diag.domain import JsonValue, Operation, Plan, Risk, TargetConfig, plan_digest
 from a4diag.plugin_api.ticket import TicketIssuer
 from a4diag.plugin_registry import PluginPin, PluginRegistry, PluginRegistryError
 from a4diag.policy_engine import PolicyEngine
@@ -334,7 +334,6 @@ class Runtime:
     def plan_detail(self, transaction_id: str) -> PlanDetail | None:
         """Reconstruct the approved plan snapshot from the graph checkpoint."""
         try:
-            self._deps.transactions.get(transaction_id)
             approval = self._deps.approvals.for_transaction(transaction_id)
         except Exception:
             return None
@@ -358,6 +357,13 @@ class Runtime:
         try:
             plan = Plan.model_validate(plan_value)
             risk = Risk(values.get("risk", Risk.LOW.value))
+            if (
+                plan_digest(plan) != digest
+                or plan.target_id != approval.target_id
+                or values.get("target_id") != plan.target_id
+                or values.get("target_fingerprint") != plan.target_fingerprint
+            ):
+                return None
         except (ValueError, TypeError):
             return None
         return PlanDetail(

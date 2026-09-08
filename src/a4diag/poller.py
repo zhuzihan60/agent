@@ -188,6 +188,10 @@ class RuntimePoller:
                         "request": {
                             "alertname": alert.name,
                             "severity": alert.severity,
+                            "fingerprint": alert.fingerprint,
+                            "starts_at": alert.starts_at,
+                            "labels": alert.labels,
+                            "annotations": alert.annotations,
                         },
                     }
                 )

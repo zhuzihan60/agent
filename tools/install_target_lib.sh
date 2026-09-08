@@ -35,6 +35,24 @@ validate_config() {
   python3.11 - "$config" <<'PY' || exit 65
 import ipaddress, json, pathlib, re, sys
 
+SAFE_MANAGED_ROOT = re.compile(r"/(?:[A-Za-z0-9._+@:-]+)(?:/[A-Za-z0-9._+@:-]+)*")
+SAFE_UNIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._-]{0,255}\.(?:service|socket|timer|target|mount|path)")
+PROTECTED_PATHS = (
+    "/boot", "/dev", "/proc", "/sys", "/root", "/home",
+    "/etc/ssh", "/etc/pam.d", "/etc/sudoers", "/etc/sudoers.d",
+    "/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow",
+    "/etc/NetworkManager", "/etc/sysconfig/network-scripts", "/etc/resolv.conf",
+    "/etc/hosts", "/etc/firewalld", "/etc/nftables.conf", "/etc/systemd",
+    "/usr/lib/systemd", "/usr/libexec/a4diag", "/opt/a4diag-target",
+    "/etc/a4diag-target", "/var/lib/a4diag-target", "/etc/cron.d",
+    "/var/spool/cron", "/etc/sysctl.conf", "/etc/selinux",
+    "/etc/libvirt", "/var/lib/libvirt", "/usr/bin/qemu", "/usr/libexec/qemu",
+)
+PROTECTED_UNITS = (
+    "ssh", "sshd", "network", "networkmanager", "firewalld", "nftables",
+    "libvirt", "cron", "crond", "a4diag-target",
+)
+
 def unique(pairs):
     result = {}
     for key, value in pairs:
@@ -45,6 +63,18 @@ def unique(pairs):
 def fail(message):
     print(f"a4diag target installer: {message}", file=sys.stderr)
     raise SystemExit(65)
+
+def at_or_below(path, root):
+    return path == root or path.startswith(root + "/")
+
+def validate_managed_root(resource):
+    if (
+        not SAFE_MANAGED_ROOT.fullmatch(resource)
+        or any(part in {".", ".."} for part in resource.split("/")[1:])
+    ):
+        fail("managed file root must be an unambiguous absolute path using systemd-safe characters")
+    if any(at_or_below(resource, path) or at_or_below(path, resource) for path in PROTECTED_PATHS):
+        fail("managed file root overlaps a protected path")
 
 try:
     raw = pathlib.Path(sys.argv[1]).read_bytes()
@@ -76,13 +106,53 @@ try:
         if network.prefixlen == 0: fail("source_cidr cannot allow the world")
     resources = value["managed_resources"]
     if type(resources) is not list: fail("managed_resources must be a list")
+    seen = set()
     for item in resources:
         if type(item) is not dict or set(item) != {"capability", "resource"}:
             fail("invalid managed resource")
         if item["capability"] not in {"files", "services", "packages"} or type(item["resource"]) is not str:
             fail("invalid managed resource")
+        entry = (item["capability"], item["resource"])
+        if entry in seen: fail("duplicate managed resource")
+        seen.add(entry)
+        if item["capability"] == "files":
+            validate_managed_root(item["resource"])
+        elif item["capability"] == "services":
+            unit = item["resource"]
+            if not SAFE_UNIT.fullmatch(unit) or unit.casefold().startswith(PROTECTED_UNITS):
+                fail("service unit is not grantable")
+        else:
+            fail("package grants are unsupported by the hardened target executor")
     if resources and value.get("confirm_managed_resources") != "ENABLE":
         fail("nonempty managed_resources requires literal ENABLE")
+except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+    fail(str(exc))
+PY
+}
+
+validate_managed_root_directories() {
+  local config="$1"
+  python3.11 - "$config" "$TARGET_ROOT" <<'PY' || exit 65
+import json, pathlib, sys
+
+def fail(message):
+    print(f"a4diag target installer: {message}", file=sys.stderr)
+    raise SystemExit(65)
+
+try:
+    filesystem_root = pathlib.Path(sys.argv[2]).resolve(strict=True)
+    source = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    for item in source["managed_resources"]:
+        if item["capability"] != "files":
+            continue
+        resource = item["resource"]
+        candidate = filesystem_root.joinpath(*pathlib.PurePosixPath(resource).parts[1:])
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            fail(f"managed file root must be a pre-existing directory: {resource}")
+        if resolved != candidate or not candidate.is_dir():
+            fail(f"managed file root must be a non-symlink directory: {resource}")
 except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
     fail(str(exc))
 PY
@@ -118,7 +188,7 @@ PY
 }
 
 write_configuration() {
-  local config="$1" runtime_python="$2" machine_id fingerprint
+  local config="$1" runtime_python="$2" machine_id fingerprint drop_in_dir
   machine_id="${A4DIAG_TARGET_MACHINE_ID:-$(cat /etc/machine-id)}"
   [ -n "$machine_id" ] || die "target identity unavailable"
   fingerprint="$($runtime_python - "$TARGET_ROOT" "$machine_id" <<'PY'
@@ -130,7 +200,9 @@ PY
 )"
   [ -n "$fingerprint" ] || die "target fingerprint unavailable"
   install -d -m 0755 "$TARGET_ETC"
-  python3.11 - "$config" "$TARGET_ETC/policy.json.tmp" "$fingerprint" <<'PY'
+  drop_in_dir="$TARGET_SYSTEMD/a4diag-target-executor.service.d"
+  install -d -m 0755 "$drop_in_dir"
+  python3.11 - "$config" "$TARGET_ETC/policy.json.tmp" "$drop_in_dir/managed-roots.conf.tmp" "$fingerprint" <<'PY'
 import json, pathlib, sys
 source = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 resources = source["managed_resources"]
@@ -142,13 +214,23 @@ for item in resources:
     elif capability == "services": units.append(resource)
     elif capability == "packages": packages.append(resource)
     else: raise ValueError("invalid managed resource capability")
-policy = {"target_id": source["target_id"], "target_fingerprint": sys.argv[3],
+policy = {"target_id": source["target_id"], "target_fingerprint": sys.argv[4],
           "controller_key_fingerprint": source["controller_key_fingerprint"],
           "managed_roots": roots, "allowed_units": units, "allowed_packages": packages}
 pathlib.Path(sys.argv[2]).write_text(json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+lines = [
+    "[Service]",
+    "ReadWritePaths=",
+    "ReadWritePaths=/run/a4diag-target /var/lib/a4diag-target/executor",
+]
+if roots:
+    lines.append("ReadWritePaths=" + " ".join(sorted(roots)))
+pathlib.Path(sys.argv[3]).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
   install -m 0600 "$TARGET_ETC/policy.json.tmp" "$TARGET_ETC/policy.json"
   rm -f "$TARGET_ETC/policy.json.tmp"
+  install -m 0644 "$drop_in_dir/managed-roots.conf.tmp" "$drop_in_dir/managed-roots.conf"
+  rm -f "$drop_in_dir/managed-roots.conf.tmp"
   python3.11 - "$config" "$TARGET_ETC/operation-public.pem" "$TARGET_STATE/.ssh/authorized_keys" <<'PY'
 import json, pathlib, sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -169,6 +251,7 @@ install_target() {
   done
   check_distro
   validate_config "$config"
+  validate_managed_root_directories "$config"
   verify_release "$release"
   version="$(cat "$release/VERSION")"
   destination="$TARGET_BASE/releases/$version"
@@ -197,6 +280,7 @@ install_target() {
     chown -R root:root "$TARGET_STATE/executor" "$TARGET_ETC"
     chown -R a4diag-target:a4diag-target "$TARGET_STATE/.ssh"
     systemctl daemon-reload
+    systemctl try-restart a4diag-target-executor.service
     systemctl enable --now a4diag-target-executor.socket
   fi
   log "installed restricted target runtime $version"

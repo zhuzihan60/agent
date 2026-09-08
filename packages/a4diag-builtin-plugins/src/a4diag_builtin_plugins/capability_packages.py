@@ -198,6 +198,26 @@ class PackagesPlugin(BaseCapabilityPlugin):
             return VerifyResult(ok=False, reason="still_installed")
         return VerifyResult(ok=True)
 
+    async def verify_restored(self, params: CapabilityVerifyParams) -> VerifyResult:
+        marker = self._marker(params)
+        self._require_action(marker.action)
+        try:
+            outcome = await self._run(self._query_argv(marker.name, marker.package_manager), params)
+        except CapabilityError:
+            return VerifyResult(ok=False, reason="state_unavailable")
+        if outcome.returncode not in {0, 1}:
+            return VerifyResult(ok=False, reason="state_unavailable")
+        if outcome.returncode == 1 and outcome.stderr.strip():
+            absent_message = f"dpkg-query: no packages found matching {marker.name}"
+            if marker.package_manager != "apt" or outcome.stderr.strip() != absent_message:
+                return VerifyResult(ok=False, reason="state_unavailable")
+        if marker.prior_installed:
+            restored = (outcome.returncode == 0 and bool(outcome.stdout.strip())
+                        and outcome.stdout.strip().splitlines()[-1] == marker.prior_version)
+        else:
+            restored = outcome.returncode == 1
+        return VerifyResult(ok=restored, reason=None if restored else "restored_state_mismatch")
+
     async def reconcile(self, params: CapabilityReconcileParams) -> ReconcileResult:
         marker = self._marker(params)
         self._require_action(marker.action)

@@ -81,6 +81,29 @@ def test_valid_request_verifies_once_and_replay_is_rejected() -> None:
         verifier.verify(envelope, expected_target="lab-node-1")
 
 
+def test_ordinary_request_preserves_existing_wire_format() -> None:
+    private = Ed25519PrivateKey.generate()
+    request = _request()
+    envelope = TargetSigner(private).sign(request)
+    assert 'verify_restored' not in json.loads(envelope.payload)
+    assert _verifier(private).verify(envelope, expected_target='lab-node-1') == request
+
+
+def test_restoration_flag_is_signed_and_only_valid_for_verify() -> None:
+    private = Ed25519PrivateKey.generate()
+    request = _request(lifecycle='verify', verify_restored=True)
+    envelope = TargetSigner(private).sign(request)
+    assert _verifier(private).verify(envelope, expected_target='lab-node-1').verify_restored
+    altered = json.loads(envelope.payload)
+    altered.pop('verify_restored')
+    with pytest.raises(TargetProtocolError, match='invalid_signature'):
+        _verifier(private).verify(envelope.model_copy(update={
+            'payload': canonical_json_bytes(altered).decode()
+        }), expected_target='lab-node-1')
+    with pytest.raises(ValueError, match='VERIFY'):
+        _request(lifecycle='apply', verify_restored=True)
+
+
 def test_wrong_key_and_wrong_expected_target_are_rejected() -> None:
     signer_key = Ed25519PrivateKey.generate()
     envelope = TargetSigner(signer_key).sign(_request())

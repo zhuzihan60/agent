@@ -132,7 +132,11 @@ sudo a4diag target bootstrap target-1 \
 - 将 SSH 私钥和操作签名私钥保存到控制端 `/etc/a4diag/secrets/targets/target-1/`。
 - 默认生成空的 `managed_resources`，因此没有任何可写资源。
 
-管理员必须审查 `target-install.json`。只有确实需要写入时，才添加精确资源，并把 `confirm_managed_resources` 从 `DISABLED` 改为字面量 `ENABLE`。禁止把 SSH、网络、防火墙、用户、密钥、内核、libvirt、虚拟机生命周期以及 A4Diag 自身路径加入授权范围。
+管理员必须审查 `target-install.json`。只有确实需要写入时，才添加精确资源，并把 `confirm_managed_resources` 从 `DISABLED` 改为字面量 `ENABLE`。文件能力的 `resource` 是目录根，例如 `/srv/app` 或 `/etc/example`；目录必须在安装前存在，且路径本身及其父目录不能是符号链接。安装器只接受由 ASCII 字母、数字、`._+@:-` 和路径分隔符组成的绝对路径，以免 systemd 对空白、`%` 等字符进行二次解释。
+
+文件根不能等于、位于或包含受保护路径。受保护范围包括 SSH、网络、防火墙、用户与认证、密钥、内核、systemd、定时任务、SELinux、libvirt、QEMU 以及 A4Diag 自身路径；`/`、`/etc`、`/usr`、`/var` 等包含这些路径的宽泛根也会被拒绝。安装器会从已验证的文件根生成 `a4diag-target-executor.service.d/managed-roots.conf`，重建精确的 `ReadWritePaths`，同时保留 `ProtectSystem=strict`、`ProtectHome=yes` 和执行器状态目录。
+
+当前加固后的目标执行器拒绝 `packages` 授权。RPM/DEB 包管理需要同时修改多个系统目录，在线仓库还需要 AF_INET/AF_INET6；把这些权限直接加入 root 执行器会破坏现有隔离边界。不要通过自定义 drop-in 关闭 `ProtectSystem` 或扩大 `RestrictAddressFamilies`。需要包变更时，应由管理员在执行器之外完成；将来如提供包能力，必须使用独立的最小权限 helper，并单独限制仓库和网络出口。
 
 ### 3.2 在目标服务器执行安装
 
@@ -172,10 +176,13 @@ sudo systemctl status a4diag-target-executor.socket --no-pager -l
 sudo test -x /usr/libexec/a4diag/a4diag-transport-helper
 sudo test -f /etc/a4diag-target/policy.json
 sudo test -f /etc/a4diag-target/operation-public.pem
+sudo systemctl cat a4diag-target-executor.service
+sudo systemctl show a4diag-target-executor.service \
+  -p ProtectSystem -p ProtectHome -p ReadWritePaths -p RestrictAddressFamilies
 sudo journalctl -u a4diag-target-executor.socket -n 50 --no-pager
 ```
 
-安装目标端不等于授权控制端写入。还必须在控制端 settings v3 中注册目标并完成 machine-id、OS、systemd 和 SSH host key 身份绑定。
+如果配置了文件根，`systemctl cat` 应显示安装器生成的 `managed-roots.conf`；`systemctl show` 应继续显示 `ProtectSystem=strict`、`ProtectHome=yes` 和 `RestrictAddressFamilies=AF_UNIX`，并只在 `ReadWritePaths` 中增加已审查的文件根。升级或策略变更会同步重启正在运行的执行器，使新策略和挂载命名空间立即生效；被中断的事务必须通过持久化状态进行核对后才能继续。安装目标端不等于授权控制端写入。还必须在控制端 settings v3 中注册目标并完成 machine-id、OS、systemd 和 SSH host key 身份绑定。
 
 ## 4. 启用受控处理能力
 

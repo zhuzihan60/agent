@@ -119,6 +119,8 @@ class TargetExecutor:
             "marker": request.marker,
         }
         if request.lifecycle is TargetLifecycle.VERIFY:
+            if request.verify_restored:
+                return await plugin.verify_restored(CapabilityVerifyParams(**read_base))
             return await plugin.verify(CapabilityVerifyParams(**read_base))
         if request.lifecycle is TargetLifecycle.RECONCILE:
             return await plugin.reconcile(CapabilityReconcileParams(**read_base))

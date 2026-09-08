@@ -8,23 +8,33 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from a4diag.approval_cli import ApprovalCli, Authorizer as ApprovalAuthorizer
 from a4diag.domain import Operation, Plan, Risk, canonical_json_bytes
-from a4diag.plugin_admin import Authorizer, PluginAdmin
+from a4diag.plugin_admin import Authorizer as PluginAuthorizer, PluginAdmin
 from a4diag.plugin_api.target_protocol import TargetLifecycle, TargetRequest, TargetSigner
 from a4diag.plugin_api.ticket import effect_payload_digest
 from a4diag.plugin_ports import build_rpc_plugin_ports
 from a4diag.plugin_registry import PluginPin, PluginRegistry
-from a4diag.runtime import RuntimeFailure, build_runtime
+from a4diag.runtime import (
+    Runtime,
+    RuntimeFailure,
+    RuntimeIdentityProbe,
+    RuntimeNotifier,
+    RuntimePlanSource,
+    build_runtime,
+)
 from a4diag.workflow import PluginPorts
 from a4diag_builtin_plugins.transport_common import identity_fingerprint
 from a4diag_target.policy import TargetPolicy
@@ -41,8 +51,10 @@ PLUGIN_CONFIG = Path(f"/etc/a4diag/plugins/{PLUGIN_INSTANCE}.yaml")
 TICKET_SECRET = Path("/etc/a4diag/secrets/e2e-ticket.key")
 OPERATION_SECRET = Path("/etc/a4diag/secrets/e2e-operation.pem")
 PLUGIN_SOCKET = Path(f"/run/a4diag/{PLUGIN_INSTANCE}.sock")
-TARGET_SOCKET_UNIT = "a4diag-target-e2e.socket"
-TARGET_SERVICE_UNIT = "a4diag-target-e2e.service"
+TARGET_SOCKET_UNIT = "a4diag-target-executor.socket"
+TARGET_SERVICE_UNIT = "a4diag-target-executor.service"
+TARGET_E2E = Path("/var/lib/a4diag-target/executor/e2e")
+MANAGED_E2E = Path("/srv/a4diag-e2e-managed")
 
 
 class _NoopServiceManager:
@@ -51,6 +63,24 @@ class _NoopServiceManager:
 
     def stop(self, _name: str) -> None:  # pragma: no cover
         raise AssertionError("plugin list attempted to stop a service")
+
+
+class _LoseFirstApplyResponse:
+    """Let the real target apply once, then simulate a lost controller response."""
+
+    def __init__(self, delegate: object) -> None:
+        self._delegate = delegate
+        self.response_lost = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
+
+    def apply(self, *args: object, **kwargs: object) -> object:
+        result = getattr(self._delegate, "apply")(*args, **kwargs)
+        if not self.response_lost:
+            self.response_lost = True
+            raise TimeoutError("e2e_lost_apply_response")
+        return result
 
 
 class HttpModel:
@@ -230,15 +260,37 @@ def start_plugin() -> subprocess.Popen[bytes]:
 def main() -> int:
     if os.name != "posix" or os.environ.get("CI") != "true" or os.geteuid() != 0:
         raise RuntimeError("production wiring harness requires a root GitHub Linux runner")
+    import grp
+
     E2E.mkdir(parents=True, exist_ok=True)
-    managed = E2E / "target-managed"
-    identity_root = E2E / "identity-root"
+    if TARGET_E2E.exists():
+        shutil.rmtree(TARGET_E2E)
+    managed = MANAGED_E2E.resolve()
+    if managed != MANAGED_E2E:
+        raise RuntimeError("managed E2E path resolved outside its fixed fixture path")
+    if managed.exists():
+        shutil.rmtree(managed)
+    identity_root = TARGET_E2E / "identity-root"
+    target_config = TARGET_E2E / "config"
+    target_state = TARGET_E2E / "state"
+    target_runtime = TARGET_E2E / "runtime"
     ssh_dir = E2E / "ssh"
-    for directory in (managed, identity_root / "etc/ssh", ssh_dir, Path("/run/a4diag"),
-                      Path("/run/a4diag-target"), Path("/run/sshd"), PLUGIN_CONFIG.parent, TICKET_SECRET.parent,
-                      HELPER.parent):
+    for directory in (
+        managed,
+        identity_root / "etc/ssh",
+        target_config,
+        target_state,
+        target_runtime,
+        ssh_dir,
+        Path("/run/a4diag"),
+        Path("/run/a4diag-target"),
+        Path("/run/sshd"),
+        PLUGIN_CONFIG.parent,
+        TICKET_SECRET.parent,
+        HELPER.parent,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
-    for name in ("low", "high", "replay"):
+    for name in ("recovery", "low", "high", "replay"):
         (managed / f"{name}.conf").write_bytes(b"before\n")
         os.chmod(managed / f"{name}.conf", 0o600)
     controller_sentinel = E2E / "controller-sentinel"
@@ -273,9 +325,9 @@ def main() -> int:
         target_id=TARGET_ID, target_fingerprint=fingerprint,
         controller_key_fingerprint=controller_fp, managed_roots=(str(managed),),
     )
-    policy_path = E2E / "target-policy.json"
-    public_path = E2E / "operation-public.pem"
-    replay_path = E2E / "target-replay.sqlite3"
+    policy_path = target_config / "target-policy.json"
+    public_path = target_config / "operation-public.pem"
+    replay_path = target_state / "target-replay.sqlite3"
     policy_path.write_text(policy.model_dump_json(), encoding="utf-8")
     public_path.write_bytes(public_pem)
 
@@ -301,22 +353,52 @@ def main() -> int:
 
     service_path = Path(f"/run/systemd/system/{TARGET_SERVICE_UNIT}")
     socket_path = Path(f"/run/systemd/system/{TARGET_SOCKET_UNIT}")
-    pythonpath = os.environ.get("PYTHONPATH", "")
-    service_path.write_text("\n".join([
-        "[Unit]", "Description=A4Diag E2E target executor", f"Requires={TARGET_SOCKET_UNIT}",
-        "[Service]", "Type=simple", "User=root",
-        f"Environment=A4DIAG_TARGET_POLICY={policy_path}",
-        f"Environment=A4DIAG_TARGET_PUBLIC_KEY={public_path}",
-        f"Environment=A4DIAG_TARGET_REPLAY={replay_path}",
-        f"Environment=A4DIAG_TARGET_IDENTITY_ROOT={identity_root}",
-        f"Environment=PYTHONPATH={pythonpath}",
-        f"ExecStart={sys.executable} {ROOT / 'tests/e2e/fixtures/target_service.py'}",
-    ]) + "\n", encoding="utf-8")
-    socket_path.write_text("\n".join([
-        "[Unit]", "Description=A4Diag E2E target socket", "[Socket]",
-        "ListenStream=/run/a4diag-target/executor.sock", "SocketMode=0600",
-        "RemoveOnStop=yes", "[Install]", "WantedBy=sockets.target",
-    ]) + "\n", encoding="utf-8")
+    service_override_dir = Path(f"{service_path}.d")
+    service_override_path = service_override_dir / "e2e.conf"
+    managed_roots_override_path = service_override_dir / "managed-roots.conf"
+    for source in (
+        ROOT / "src/a4diag",
+        ROOT / "packages/a4diag-builtin-plugins/src/a4diag_builtin_plugins",
+        ROOT / "packages/a4diag-target-runtime/src/a4diag_target",
+    ):
+        shutil.copytree(source, target_runtime / source.name, dirs_exist_ok=True)
+    target_service = target_runtime / "target_service.py"
+    shutil.copyfile(ROOT / "tests/e2e/fixtures/target_service.py", target_service)
+    run(
+        [
+            "/usr/bin/systemd-sysusers",
+            str(ROOT / "deploy/sysusers.d/a4diag-target.conf"),
+        ]
+    )
+    service_path.write_bytes((ROOT / "deploy/a4diag-target-executor.service").read_bytes())
+    socket_path.write_bytes((ROOT / "deploy/a4diag-target-executor.socket").read_bytes())
+    service_override_dir.mkdir(parents=True, exist_ok=True)
+    service_override_path.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                f'Environment="A4DIAG_TARGET_POLICY={policy_path}"',
+                f'Environment="A4DIAG_TARGET_PUBLIC_KEY={public_path}"',
+                f'Environment="A4DIAG_TARGET_REPLAY={replay_path}"',
+                f'Environment="A4DIAG_TARGET_IDENTITY_ROOT={identity_root}"',
+                f'Environment="PYTHONPATH={target_runtime}"',
+                'Environment="PYTHONDONTWRITEBYTECODE=1"',
+                "ExecStart=",
+                f"ExecStart={sys.executable} {target_service}",
+                "ReadOnlyPaths=",
+                f"ReadOnlyPaths={target_runtime} {target_config} {identity_root}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    managed_roots_override_path.write_text(
+        "[Service]\n"
+        "ReadWritePaths=\n"
+        "ReadWritePaths=/run/a4diag-target /var/lib/a4diag-target/executor\n"
+        f"ReadWritePaths={managed}\n",
+        encoding="utf-8",
+    )
 
     PLUGIN_CONFIG.write_text(yaml.safe_dump({
         "manifest": "transport-ssh", "socket": str(PLUGIN_SOCKET),
@@ -371,13 +453,165 @@ def main() -> int:
             return PluginPorts(model=model, collector=real.collector, executor=real.executor, notifier=notifier)
 
         paths = {name: E2E / name for name in ("audit.jsonl", "checkpoints.sqlite3", "transactions.sqlite3", "approvals.sqlite3")}
-        runtime = build_runtime(
-            settings_path, audit_path=paths["audit.jsonl"], checkpoints_path=paths["checkpoints.sqlite3"],
-            transactions_path=paths["transactions.sqlite3"], approvals_path=paths["approvals.sqlite3"],
-            registry_pins=pins, manifest_root=manifest_root, plugin_ports_factory=ports_factory,
-            ticket_key=TICKET_SECRET.read_bytes(), policy_key=b"e2e-policy-key-0123456789abcdef0123456789abcdef",
-        )
+        policy_key = b"e2e-policy-key-0123456789abcdef0123456789abcdef"
+
+        def build_e2e_runtime(factory: object) -> Runtime:
+            return build_runtime(
+                settings_path,
+                audit_path=paths["audit.jsonl"],
+                checkpoints_path=paths["checkpoints.sqlite3"],
+                transactions_path=paths["transactions.sqlite3"],
+                approvals_path=paths["approvals.sqlite3"],
+                registry_pins=pins,
+                manifest_root=manifest_root,
+                plugin_ports_factory=factory,  # type: ignore[arg-type]
+                ticket_key=TICKET_SECRET.read_bytes(),
+                policy_key=policy_key,
+            )
+
+        lost_response_executor: _LoseFirstApplyResponse | None = None
+
+        def uncertain_ports_factory(
+            settings: object, registry: PluginRegistry
+        ) -> PluginPorts:
+            nonlocal lost_response_executor
+            real = ports_factory(settings, registry)
+            lost_response_executor = _LoseFirstApplyResponse(real.executor)
+            return PluginPorts(
+                model=real.model,
+                collector=real.collector,
+                executor=lost_response_executor,  # type: ignore[arg-type]
+                notifier=real.notifier,
+            )
+
+        runtime = build_e2e_runtime(uncertain_ports_factory)
         identity_verified = runtime.probe_fingerprint(TARGET_ID) == fingerprint
+        runtime_directory = Path("/run/a4diag-target")
+        target_socket = runtime_directory / "executor.sock"
+        runtime_directory_stat = runtime_directory.stat()
+        target_socket_stat = target_socket.stat()
+        runtime_directory_group = grp.getgrgid(runtime_directory_stat.st_gid).gr_name
+        socket_group = grp.getgrgid(target_socket_stat.st_gid).gr_name
+        runuser_path = shutil.which("runuser")
+        if runuser_path is None:
+            raise RuntimeError("runuser is required to verify target relay access")
+        relay_connect = run(
+            [
+                runuser_path,
+                "-u",
+                "a4diag-target",
+                "--",
+                "/usr/bin/python3",
+                "-c",
+                (
+                    "import socket, struct; "
+                    "client = socket.socket(socket.AF_UNIX); "
+                    "client.settimeout(10); "
+                    "client.connect('/run/a4diag-target/executor.sock'); "
+                    "stream = client.makefile('rwb'); "
+                    "stream.write(struct.pack('!I', 2) + b'{}'); "
+                    "stream.flush(); "
+                    "header = stream.read(4); "
+                    "assert len(header) == 4; "
+                    "size = struct.unpack('!I', header)[0]; "
+                    "assert len(stream.read(size)) == size; "
+                    "stream.close(); client.close()"
+                ),
+            ],
+            check=False,
+        )
+        relay_user_socket_access = (
+            relay_connect.returncode == 0
+            and runtime_directory_group == "a4diag-target"
+            and socket_group == "a4diag-target"
+            and stat.S_IMODE(runtime_directory_stat.st_mode) == 0o750
+            and stat.S_IMODE(target_socket_stat.st_mode) == 0o660
+        )
+        if not relay_user_socket_access:
+            raise RuntimeError(
+                "a4diag-target cannot traverse/connect to target socket: "
+                f"runtime_group={runtime_directory_group!r}, "
+                f"runtime_mode={stat.S_IMODE(runtime_directory_stat.st_mode):#o}, "
+                f"socket_group={socket_group!r}, "
+                f"socket_mode={stat.S_IMODE(target_socket_stat.st_mode):#o}, "
+                f"runuser_stderr={relay_connect.stderr.decode(errors='replace')!r}"
+            )
+        service_properties = run(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                TARGET_SERVICE_UNIT,
+                "--property=NoNewPrivileges,PrivateTmp,PrivateDevices,ProtectSystem,"
+                "ProtectHome,RestrictAddressFamilies,ReadOnlyPaths,ReadWritePaths",
+            ]
+        ).stdout.decode("utf-8")
+        hardened = {
+            key: value
+            for key, _, value in (
+                line.partition("=") for line in service_properties.splitlines()
+            )
+        }
+        required_hardening = {
+            "NoNewPrivileges": "yes",
+            "PrivateTmp": "yes",
+            "PrivateDevices": "yes",
+            "ProtectSystem": "strict",
+            "ProtectHome": "yes",
+            "RestrictAddressFamilies": "AF_UNIX",
+        }
+        service_hardened = all(
+            hardened.get(key) == value for key, value in required_hardening.items()
+        ) and all(
+            expected in hardened.get(property_name, "")
+            for property_name, expected in (
+                ("ReadOnlyPaths", str(target_runtime)),
+                ("ReadOnlyPaths", str(target_config)),
+                ("ReadWritePaths", str(managed)),
+            )
+        )
+        managed_root_requires_drop_in = not managed.is_relative_to(
+            Path("/var/lib/a4diag-target/executor")
+        )
+        if not service_hardened or not managed_root_requires_drop_in:
+            raise RuntimeError(f"target service hardening missing: {hardened}")
+
+        model.mode = "recovery"
+        recovery_unknown = runtime.handle(
+            {
+                "event_id": "recovery-tx",
+                "target_id": TARGET_ID,
+                "request": {"fault": "lost-apply-response"},
+            }
+        )
+        recovery_effect_applied = (
+            managed / "recovery.conf"
+        ).read_bytes() == b"after-recovery\n"
+        recovery_inode = (managed / "recovery.conf").stat().st_ino
+        old_executor = runtime.executor
+        runtime.close()
+        runtime = None
+        plugin.terminate()
+        plugin.wait(timeout=5)
+        processes.remove(plugin)
+        plugin = start_plugin()
+        processes.append(plugin)
+        runtime = build_e2e_runtime(ports_factory)
+        executor_recreated = runtime.executor is not old_executor
+        recovery_discovered = "recovery-tx" in runtime.recoverable
+        recovered = runtime.resume("recovery-tx")
+        runtime_recovery_succeeded = (
+            recovery_unknown.status == "execution_unknown"
+            and lost_response_executor is not None
+            and lost_response_executor.response_lost
+            and recovery_effect_applied
+            and executor_recreated
+            and recovery_discovered
+            and recovered.status == "succeeded"
+            and (managed / "recovery.conf").read_bytes() == b"after-recovery\n"
+            and (managed / "recovery.conf").stat().st_ino == recovery_inode
+        )
+
+        model.mode = "low"
         low = runtime.handle({"event_id": "low-tx", "target_id": TARGET_ID, "request": {"fault": "low"}})
         low_applied = low.status == "succeeded" and (managed / "low.conf").read_bytes() == b"after-low\n"
 
@@ -401,14 +635,35 @@ def main() -> int:
 
         model.mode = "high"
         before_high = (managed / "high.conf").read_bytes()
-        runtime.handle({"event_id": "high-tx", "target_id": TARGET_ID, "request": {"fault": "high"}})
+        pending_high = runtime.handle(
+            {"event_id": "high-tx", "target_id": TARGET_ID, "request": {"fault": "high"}}
+        )
         approval = runtime.approvals.for_transaction("high-tx")
         if approval is None:
             raise RuntimeError("HIGH plan did not create an approval")
         before_effects = 0 if (managed / "high.conf").read_bytes() == before_high else 1
-        runtime.approvals.approve(approval.id, approved_digest=approval.plan_digest, actor="e2e-admin", now=int(time.time()))
+        approval_cli = ApprovalCli(
+            approvals=runtime.approvals,
+            plans=RuntimePlanSource(runtime),
+            notifier=RuntimeNotifier(runtime),
+            identity=RuntimeIdentityProbe(runtime),
+            authorizer=ApprovalAuthorizer(True),
+            clock=lambda: int(time.time()),
+            stdin_isatty=lambda: True,
+            actor_factory=lambda: "e2e-admin",
+            signing_key=policy_key,
+        )
+        shown = approval_cli.show("high-tx")
+        receipt = approval_cli.approve("high-tx", shown.plan.plan_digest)
         high_done = runtime.resume("high-tx")
         after_effects = 1 if high_done.status == "succeeded" and (managed / "high.conf").read_bytes() == b"after-high\n" else 0
+        approval_cli_path = (
+            pending_high.status == "pending_approval"
+            and shown.status == "pending"
+            and shown.notification_status == "delivered"
+            and shown.plan.plan_digest == approval.plan_digest
+            and receipt.status == "approved"
+        )
 
         model.mode = "protected"
         protected_before = Path("/etc/ssh/sshd_config").read_bytes()
@@ -450,7 +705,7 @@ def main() -> int:
         second_replay = ssh_call(client_key, known_hosts, envelope)
         replay_effects = 1 if first_replay.get("ok") is True and second_replay.get("reason") == "replay" and (managed / "replay.conf").read_bytes() == b"after-replay\n" else 0
 
-        admin = PluginAdmin(authorizer=Authorizer(True), service_manager=_NoopServiceManager(),
+        admin = PluginAdmin(authorizer=PluginAuthorizer(True), service_manager=_NoopServiceManager(),
                             plugin_root=manifest_root, registry_path=registry_path, signing_key=None)
         listed = admin.list()
 
@@ -458,12 +713,7 @@ def main() -> int:
         with paths["audit.jsonl"].open("ab") as handle:
             handle.write(b'{"tampered":true}\n')
         try:
-            build_runtime(
-                settings_path, audit_path=paths["audit.jsonl"], checkpoints_path=paths["checkpoints.sqlite3"],
-                transactions_path=paths["transactions.sqlite3"], approvals_path=paths["approvals.sqlite3"],
-                registry_pins=pins, manifest_root=manifest_root, plugin_ports_factory=ports_factory,
-                ticket_key=TICKET_SECRET.read_bytes(), policy_key=b"e2e-policy-key-0123456789abcdef0123456789abcdef",
-            )
+            build_e2e_runtime(ports_factory)
             audit_safe = False
         except RuntimeFailure as error:
             audit_safe = error.code == "audit_chain_broken"
@@ -472,20 +722,39 @@ def main() -> int:
             "execution_path": ["runtime", "plugin-rpc", "transport-ssh", "openssh",
                                "forced-command-helper", "systemd-socket", "target-executor"],
             "plugin_list": {"count": len(listed), "source": "installed-registry", "private_key_reads": 0},
-            "target": {"identity_verified": identity_verified},
+            "target": {
+                "identity_verified": identity_verified,
+                "released_service_hardening": service_hardened,
+                "configured_managed_root": str(managed),
+                "managed_root_requires_drop_in": managed_root_requires_drop_in,
+                "relay_user_socket_access": relay_user_socket_access,
+                "runtime_directory_group": runtime_directory_group,
+                "socket_group": socket_group,
+            },
             "low_change": {"applied_on_target": low_applied,
                            "controller_file_unchanged": controller_sentinel.read_bytes() == b"controller-before\n"},
             "rollback": {"exact": rollback_exact},
             "high_before_approval": {"effect_count": before_effects},
-            "high_after_resume": {"effect_count": after_effects, "source": "approval-store-resume"},
+            "high_after_resume": {
+                "effect_count": after_effects,
+                "source": "approval-store-resume",
+                "approval_path": "ApprovalCli/RuntimePlanSource",
+                "shown_and_approved": approval_cli_path,
+            },
             "protected_ssh_change": {"effect_count": protected_effects},
             "wrong_target": {"ssh_spawn_count": ssh_connections_after - ssh_connections_before if wrong.status == "policy_denied" else 1},
             "replay": {"effect_count": replay_effects},
             "faults": {
-                "transport_restart_reconciled": reconciled.get("state") == "applied",
+                "transport_restart_reconciled": runtime_recovery_succeeded,
+                "direct_target_reconcile": reconciled.get("state") == "applied",
                 "ssh_host_key_drift_zero_dispatch": host_drift_safe,
                 "machine_id_drift_zero_dispatch": machine_drift_safe,
                 "audit_corruption_read_only": audit_safe,
+            },
+            "recovery": {
+                "fresh_runtime": executor_recreated,
+                "durable_pending_discovered": recovery_discovered,
+                "effect_was_not_replayed": runtime_recovery_succeeded,
             },
             "model": {"http_calls": int(model_count.read_text())},
             "notification": {"http_calls": int(notification_count.read_text())},
@@ -501,9 +770,25 @@ def main() -> int:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill(); process.wait(timeout=5)
-        run(["/usr/bin/systemctl", "stop", TARGET_SOCKET_UNIT], check=False)
+        run(
+            [
+                "/usr/bin/systemctl",
+                "stop",
+                TARGET_SERVICE_UNIT,
+                TARGET_SOCKET_UNIT,
+            ],
+            check=False,
+        )
+        service_override_path.unlink(missing_ok=True)
+        managed_roots_override_path.unlink(missing_ok=True)
+        try:
+            service_override_dir.rmdir()
+        except OSError:
+            pass
         service_path.unlink(missing_ok=True); socket_path.unlink(missing_ok=True)
         run(["/usr/bin/systemctl", "daemon-reload"], check=False)
+        if managed == MANAGED_E2E and managed.exists():
+            shutil.rmtree(managed)
         PLUGIN_SOCKET.unlink(missing_ok=True)
         PLUGIN_CONFIG.unlink(missing_ok=True)
         TICKET_SECRET.unlink(missing_ok=True)

@@ -31,12 +31,20 @@ def test_signed_controller_to_target_production_path() -> None:
     assert evidence["plugin_list"]["source"] == "installed-registry"
     assert evidence["plugin_list"]["private_key_reads"] == 0
     assert evidence["target"]["identity_verified"] is True
+    assert evidence["target"]["released_service_hardening"] is True
+    assert evidence["target"]["configured_managed_root"] == "/srv/a4diag-e2e-managed"
+    assert evidence["target"]["managed_root_requires_drop_in"] is True
+    assert evidence["target"]["relay_user_socket_access"] is True
+    assert evidence["target"]["runtime_directory_group"] == "a4diag-target"
+    assert evidence["target"]["socket_group"] == "a4diag-target"
     assert evidence["low_change"]["applied_on_target"] is True
     assert evidence["low_change"]["controller_file_unchanged"] is True
     assert evidence["rollback"]["exact"] is True
     assert evidence["high_before_approval"]["effect_count"] == 0
     assert evidence["high_after_resume"]["effect_count"] == 1
     assert evidence["high_after_resume"]["source"] == "approval-store-resume"
+    assert evidence["high_after_resume"]["approval_path"] == "ApprovalCli/RuntimePlanSource"
+    assert evidence["high_after_resume"]["shown_and_approved"] is True
     assert evidence["protected_ssh_change"]["effect_count"] == 0
     assert evidence["wrong_target"]["ssh_spawn_count"] == 0
     assert evidence["replay"]["effect_count"] == 1
@@ -44,5 +52,8 @@ def test_signed_controller_to_target_production_path() -> None:
     assert evidence["faults"]["ssh_host_key_drift_zero_dispatch"] is True
     assert evidence["faults"]["machine_id_drift_zero_dispatch"] is True
     assert evidence["faults"]["audit_corruption_read_only"] is True
+    assert evidence["recovery"]["fresh_runtime"] is True
+    assert evidence["recovery"]["durable_pending_discovered"] is True
+    assert evidence["recovery"]["effect_was_not_replayed"] is True
     assert evidence["model"]["http_calls"] >= 3
     assert evidence["notification"]["http_calls"] >= 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -74,6 +75,50 @@ def test_target_configuration_accepts_explicit_managed_resource_confirmation(tmp
 
 
 @POSIX
+@pytest.mark.parametrize(
+    "resource",
+    (
+        "/",
+        "/etc",
+        "/etc/ssh",
+        "/opt/a4diag-target",
+        "/home/operator/app",
+        "/srv/app%N",
+        "/srv/app config",
+        "/srv/./app",
+        "/srv/app/../other",
+    ),
+)
+def test_target_configuration_rejects_unsafe_managed_file_roots(
+    tmp_path: Path, resource: str
+) -> None:
+    result = run_validate(
+        tmp_path,
+        configuration(
+            managed_resources=[{"capability": "files", "resource": resource}],
+            confirm_managed_resources="ENABLE",
+        ),
+    )
+    assert result.returncode != 0
+    assert "managed file root" in result.stderr.lower()
+
+
+@POSIX
+def test_target_configuration_rejects_package_grants_without_a_separate_helper(
+    tmp_path: Path,
+) -> None:
+    result = run_validate(
+        tmp_path,
+        configuration(
+            managed_resources=[{"capability": "packages", "resource": "lab-agent"}],
+            confirm_managed_resources="ENABLE",
+        ),
+    )
+    assert result.returncode != 0
+    assert "package grants are unsupported" in result.stderr.lower()
+
+
+@POSIX
 def test_target_install_is_restricted_idempotent_and_rolls_back(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -94,9 +139,15 @@ exit 0
         encoding="utf-8",
     )
     python.chmod(0o755)
+    command_log = tmp_path / "commands.log"
     for command in ("systemctl", "systemd-sysusers", "systemd-tmpfiles", "chown"):
         shim = fake_bin / command
-        shim.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        shim.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '%s %s\\n' \"${0##*/}\" \"$*\" >> \"$A4DIAG_TEST_COMMAND_LOG\"\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         shim.chmod(0o755)
 
     release = tmp_path / "release"
@@ -131,19 +182,34 @@ exit 0
         lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(release).as_posix()}")
     (release / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    target_root = tmp_path / "root"
+    (target_root / "srv" / "app").mkdir(parents=True)
+    (target_root / "etc" / "example").mkdir(parents=True)
     config = tmp_path / "target-install.json"
-    config.write_text(json.dumps(configuration()), encoding="utf-8")
+    config.write_text(
+        json.dumps(
+            configuration(
+                managed_resources=[
+                    {"capability": "files", "resource": "/srv/app"},
+                    {"capability": "files", "resource": "/etc/example"},
+                ],
+                confirm_managed_resources="ENABLE",
+            )
+        ),
+        encoding="utf-8",
+    )
     environment = os.environ.copy()
     environment.update(
         {
-            "A4DIAG_TARGET_ROOT": str(tmp_path / "root") + os.sep,
+            "A4DIAG_TARGET_ROOT": str(target_root) + os.sep,
             "A4DIAG_TARGET_SKIP_ROOT": "1",
-            "A4DIAG_TARGET_SKIP_SYSTEMD": "1",
+            "A4DIAG_TARGET_SKIP_SYSTEMD": "0",
             "A4DIAG_TARGET_ALLOW_UNSIGNED": "1",
             "A4DIAG_TARGET_TEST_REAL_PYTHON": sys.executable,
             "A4DIAG_TEST_REAL_PYTHON": sys.executable,
             "A4DIAG_TARGET_MACHINE_ID": "0123456789abcdef0123456789abcdef",
             "A4DIAG_TARGET_OS_RELEASE": str(tmp_path / "os-release"),
+            "A4DIAG_TEST_COMMAND_LOG": str(command_log),
             "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
         }
     )
@@ -154,7 +220,6 @@ exit 0
     second = subprocess.run(command, env=environment, check=False, capture_output=True, text=True)
     assert second.returncode == 0, second.stderr
 
-    target_root = tmp_path / "root"
     helper = target_root / "usr" / "libexec" / "a4diag" / "a4diag-transport-helper"
     public_key = target_root / "etc" / "a4diag-target" / "operation-public.pem"
     authorized_keys = target_root / "var" / "lib" / "a4diag-target" / ".ssh" / "authorized_keys"
@@ -163,6 +228,43 @@ exit 0
     assert not any(path.name.endswith("private.pem") for path in target_root.rglob("*"))
     assert 'restrict,command="/usr/libexec/a4diag/a4diag-transport-helper"' in authorized_keys.read_text("utf-8")
     assert (target_root / "var" / "lib" / "a4diag-target" / "executor").stat().st_mode & 0o777 == 0o700
+    policy = json.loads(
+        (target_root / "etc" / "a4diag-target" / "policy.json").read_text(encoding="utf-8")
+    )
+    assert policy["managed_roots"] == ["/srv/app", "/etc/example"]
+    drop_in = (
+        target_root
+        / "etc"
+        / "systemd"
+        / "system"
+        / "a4diag-target-executor.service.d"
+        / "managed-roots.conf"
+    )
+    assert drop_in.read_text(encoding="utf-8") == (
+        "[Service]\n"
+        "ReadWritePaths=\n"
+        "ReadWritePaths=/run/a4diag-target /var/lib/a4diag-target/executor\n"
+        "ReadWritePaths=/etc/example /srv/app\n"
+    )
+    commands = command_log.read_text(encoding="utf-8").splitlines()
+    assert commands.count(
+        "systemctl try-restart a4diag-target-executor.service"
+    ) == 2
+    assert commands.count(
+        "systemctl enable --now a4diag-target-executor.socket"
+    ) == 2
+
+    shutil.rmtree(target_root / "srv" / "app")
+    (target_root / "srv" / "app").symlink_to(
+        target_root / "etc" / "example", target_is_directory=True
+    )
+    symlinked = subprocess.run(
+        command, env=environment, check=False, capture_output=True, text=True
+    )
+    assert symlinked.returncode != 0
+    assert "non-symlink directory" in symlinked.stderr
+    (target_root / "srv" / "app").unlink()
+    (target_root / "srv" / "app").mkdir()
 
     before = os.readlink(target_root / "opt" / "a4diag-target" / "current")
     environment["A4DIAG_TARGET_INJECT_FAILURE"] = "before_switch"

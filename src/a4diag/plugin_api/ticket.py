@@ -247,6 +247,18 @@ class TicketIssuer:
         self._clock = clock or _system_clock
         self._ticket_id_factory = ticket_id_factory or (lambda: uuid.uuid4().hex)
 
+    def inspect_for_recovery(self, token: str) -> OperationTicket:
+        """Authenticate historical dispatch evidence for read-only recovery.
+
+        This does not renew a ticket, consume it, or authorize an effect. The
+        ordinary verifier still enforces expiry and replay protection for writes.
+        """
+        payload, signature = _decode_token(token)
+        expected = hmac.new(self._key, payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            raise TicketError("invalid_signature")
+        return _parse_canonical_claims(payload)
+
     def issue(
         self,
         request: OperationTicketRequest,

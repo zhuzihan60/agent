@@ -342,11 +342,40 @@ class LocalFileAdapter:
             raise CapabilityError("read_failed") from None
         try:
             with handle:
-                return handle.read(limit)
+                content = handle.read(limit + 1)
         except OSError:
             raise CapabilityError("read_failed") from None
+        if len(content) > limit:
+            raise CapabilityError("read_limit_exceeded")
+        return content
 
     async def write_file(self, path: str, content: bytes, mode: int | None) -> None:
+        try:
+            current = os.lstat(path)
+        except OSError:
+            current = None
+        if current is not None and not stat.S_ISREG(current.st_mode):
+            raise CapabilityError("write_failed")
+        await self.write_file_with_metadata(
+            path,
+            content,
+            mode
+            if mode is not None
+            else (current.st_mode if current is not None else 0o600),
+            current.st_uid if current is not None else None,
+            current.st_gid if current is not None else None,
+        )
+
+    async def write_file_with_metadata(
+        self,
+        path: str,
+        content: bytes,
+        mode: int,
+        uid: int | None,
+        gid: int | None,
+    ) -> None:
+        """Atomically replace a file after applying its final metadata."""
+
         directory = os.path.dirname(path)
         try:
             info = os.lstat(directory)
@@ -369,9 +398,11 @@ class LocalFileAdapter:
             with os.fdopen(temp_fd, "wb") as handle:
                 handle.write(content)
                 handle.flush()
-                os.fsync(handle.fileno())
-                if mode is not None and hasattr(os, "fchmod"):
+                if uid is not None and gid is not None and hasattr(os, "fchown"):
+                    os.fchown(handle.fileno(), uid, gid)
+                if hasattr(os, "fchmod"):
                     os.fchmod(handle.fileno(), mode)
+                os.fsync(handle.fileno())
             os.replace(temp_name, path)
         except OSError:
             try:
@@ -419,6 +450,7 @@ class LocalFileAdapter:
         try:
             process = await asyncio.create_subprocess_exec(
                 *values,
+                env={**os.environ, "LC_ALL": "C"},
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

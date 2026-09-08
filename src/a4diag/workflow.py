@@ -36,6 +36,7 @@ from a4diag.plugin_api.ticket import (
 from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import PolicyAuthorization, PolicyEngine
 from a4diag.settings import AgentSettings
+from a4diag.redaction import redact
 from a4diag.transaction_store import (
     DispatchStatus,
     EffectPhase,
@@ -455,10 +456,16 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             "audit_events": audit(state, "evidence_collected"),
         }
 
+    def model_evidence(state: AgentState) -> list[dict[str, JsonValue]]:
+        evidence = list(state.get("evidence", []))
+        if state.get("request") is not None:
+            evidence.append({"kind": "request", "content": redact(state["request"])})
+        return evidence
+
     def diagnose(state: AgentState) -> AgentState:
         try:
             diagnosis = deps.plugins.model.diagnose(
-                target_for(state), state.get("evidence", [])
+                target_for(state), model_evidence(state)
             )
         except Exception as error:
             return {
@@ -472,7 +479,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         try:
             candidate = deps.plugins.model.plan(
                 target_for(state),
-                state.get("evidence", []),
+                model_evidence(state),
                 state.get("diagnosis", {}),
             )
             frozen = Plan.model_validate(candidate.model_dump(mode="python"))
@@ -487,7 +494,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     def critic(state: AgentState) -> AgentState:
         try:
             risk = deps.plugins.model.critic(
-                target_for(state), state.get("evidence", []), plan_for(state)
+                target_for(state), model_evidence(state), plan_for(state)
             )
             risk = Risk(risk)
         except Exception as error:
@@ -987,26 +994,44 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             }
 
         if pending.phase is EffectPhase.UNDO:
-            if result == "not_applied":
+            prepared = deps.transactions.get_steps(state["transaction_id"])[index]
+            try:
+                restored = StepResult.model_validate(
+                    deps.plugins.executor.verify_restored(
+                        target_for(state),
+                        str(index),
+                        operation,
+                        marker,
+                        cast(dict[str, JsonValue], json.loads(prepared.pre_state_json)),
+                    )
+                )
+            except Exception:
+                restored = StepResult(ok=False, status="unknown")
+            if restored.ok:
                 deps.transactions.complete_result_dispatch(
                     pending.dispatch_id,
                     phase="undo",
                     status="succeeded",
-                    payload=reconciled.model_dump(mode="json"),
+                    payload=restored.model_dump(mode="json"),
                     now=now(),
                 )
                 deps.transactions.transition(
                     state["transaction_id"], TransactionStatus.ROLLBACK_RUNNING, now=now()
                 )
+                restored_steps = list(state.get("restored_steps", []))
+                if index not in restored_steps:
+                    restored_steps.append(index)
                 rollback_state = cast(
                     AgentState,
                     {
                         **state,
                         "status": "rollback_running",
                         "applied_steps": applied,
+                        "restored_steps": restored_steps,
                     },
                 )
                 update = next_or_undo(rollback_state)
+                update.setdefault("restored_steps", restored_steps)
                 update["reconcile_attempted"] = True
                 return update
             deps.transactions.complete_dispatch(pending.dispatch_id, now=now())
@@ -1698,9 +1723,10 @@ def run_event(
         config = {"configurable": {"thread_id": transaction_id}}
         pending = None
         recovery_action = None
+        recovery_error = None
         if dependencies is not None:
             try:
-                dependencies.transactions.get(transaction_id)
+                transaction = dependencies.transactions.get(transaction_id)
             except UnknownTransactionError:
                 pass
             else:
@@ -1708,7 +1734,62 @@ def run_event(
                     transaction_id, now=dependencies.clock()
                 )
                 pending = dependencies.transactions.pending_dispatch(transaction_id)
-        if pending is not None:
+                restore = getattr(dependencies.plugins.executor, "restore_read_context", None)
+                if callable(restore):
+                    try:
+                        values = graph.get_state(config).values
+                        plan = Plan.model_validate(values["plan"])
+                        if (
+                            plan_digest(plan) != transaction.plan_digest
+                            or values.get("digest") != transaction.plan_digest
+                            or plan.target_id != transaction.target_id
+                            or values.get("target_fingerprint") != plan.target_fingerprint
+                        ):
+                            raise ValueError("recovery_plan_mismatch")
+                        target = next(t for t in dependencies.settings.targets if t.id == plan.target_id)
+                        prepared_steps = {
+                            step.step_id: step
+                            for step in dependencies.transactions.get_steps(transaction_id)
+                        }
+                        for step_id, prepared in prepared_steps.items():
+                            index = int(step_id)
+                            if (
+                                index < 0
+                                or str(index) != step_id
+                                or Operation.model_validate_json(prepared.operation_json)
+                                != plan.operations[index]
+                            ):
+                                raise ValueError("recovery_operation_mismatch")
+                        claims = []
+                        for dispatch in dependencies.transactions.get_dispatches(transaction_id):
+                            claim = dependencies.tickets.inspect_for_recovery(dispatch.ticket)
+                            if (
+                                claim.transaction_id != transaction_id
+                                or claim.step_id != dispatch.step_id
+                                or claim.phase.value != dispatch.phase.value
+                                or claim.risk.value != values.get("risk")
+                                or claim.approval_id != values.get("approval_id")
+                            ):
+                                raise ValueError("recovery_dispatch_mismatch")
+                            effect_fields: dict[str, JsonValue] = {}
+                            if dispatch.phase is not EffectPhase.PREPARE:
+                                prepared = prepared_steps[dispatch.step_id]
+                                effect_fields["marker"] = json.loads(prepared.plugin_marker_json)
+                                if dispatch.phase is EffectPhase.UNDO:
+                                    effect_fields["undo"] = plan.operations[int(dispatch.step_id)].undo
+                            if claim.effect_payload_digest != effect_payload_digest(effect_fields):
+                                raise ValueError("recovery_effect_mismatch")
+                            claims.append(claim)
+                        restore(target, plan, tuple(claims))
+                    except Exception:
+                        recovery_error = "invalid_recovery_context"
+        if recovery_error is not None:
+            graph.update_state(config, {
+                "status": "execution_unknown", "error": recovery_error,
+                "reconcile_attempted": True,
+            }, as_node="report")
+            result = graph.invoke(None, config=config)
+        elif pending is not None:
             graph.update_state(
                 config,
                 {
@@ -1748,7 +1829,9 @@ def run_event(
             "event_id": event_id,
             "transaction_id": event_id,
             "target_id": cast(str, event.get("target_id", "")),
-            "request": cast(JsonValue, event.get("request", None)),
+            "request": redact(json.loads(canonical_json_bytes(
+                event.get("request", None), max_bytes=65_536
+            ))),
             "audit_events": [],
         }
         result = graph.invoke(

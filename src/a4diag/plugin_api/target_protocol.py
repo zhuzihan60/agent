@@ -53,6 +53,7 @@ class TargetRequest(BaseModel):
     transaction_id: str
     step_id: str
     lifecycle: TargetLifecycle
+    verify_restored: bool = False
     operation: Operation
     marker: dict[str, JsonValue] | None
     undo: dict[str, JsonValue] | None
@@ -117,6 +118,8 @@ class TargetRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_window_and_approval(self) -> TargetRequest:
+        if self.verify_restored and self.lifecycle is not TargetLifecycle.VERIFY:
+            raise ValueError("restoration verification requires VERIFY lifecycle")
         if self.expires_at <= self.issued_at:
             raise ValueError("expiry must follow issue time")
         if self.expires_at - self.issued_at > MAX_REQUEST_LIFETIME_SECONDS:
@@ -172,7 +175,8 @@ class TargetSigner:
         if not isinstance(request, TargetRequest):
             raise TypeError("TargetRequest required")
         payload = canonical_json_bytes(
-            request.model_dump(mode="json"), max_bytes=MAX_TARGET_REQUEST_BYTES
+            request.model_dump(mode="json", exclude={"verify_restored"} if not request.verify_restored else set()),
+            max_bytes=MAX_TARGET_REQUEST_BYTES,
         )
         return SignedTargetRequest(
             payload=payload.decode("utf-8"),
@@ -224,7 +228,8 @@ class TargetVerifier:
         except ValueError as exc:
             raise TargetProtocolError("request_invalid") from exc
         canonical = canonical_json_bytes(
-            request.model_dump(mode="json"), max_bytes=MAX_TARGET_REQUEST_BYTES
+            request.model_dump(mode="json", exclude={"verify_restored"} if "verify_restored" not in decoded else set()),
+            max_bytes=MAX_TARGET_REQUEST_BYTES,
         )
         if canonical != payload:
             raise TargetProtocolError("noncanonical_payload")

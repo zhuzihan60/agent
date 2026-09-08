@@ -99,7 +99,12 @@ class FilesPlugin(BaseCapabilityPlugin):
         prior = await self._transport.lstat(path)
         if not stat.S_ISREG(prior.mode):
             raise CapabilityError("not_regular_file")
-        prior_content = await self._transport.read_file(path, MAX_MANAGED_FILE_BYTES)
+        try:
+            prior_content = await self._transport.read_file(path, MAX_MANAGED_FILE_BYTES)
+        except CapabilityError as exc:
+            if exc.code == "read_limit_exceeded":
+                raise CapabilityError("managed_file_too_large") from None
+            raise
         if len(prior_content) > MAX_MANAGED_FILE_BYTES:
             raise CapabilityError("managed_file_too_large")
         marker = FileMarker(
@@ -124,7 +129,7 @@ class FilesPlugin(BaseCapabilityPlugin):
             raise CapabilityError("marker_action_mismatch")
         if marker.action == "replace_managed_file":
             content = self._new_content(params.operation.parameters)
-            await self._transport.write_file(marker.path, content, marker.new_mode)
+            await self._write_file(marker, content)
         else:
             assert marker.new_mode is not None
             await self._transport.set_mode(marker.path, marker.new_mode)
@@ -137,12 +142,11 @@ class FilesPlugin(BaseCapabilityPlugin):
         self._require_action(marker.action)
         if marker.action != params.operation.action:
             raise CapabilityError("marker_action_mismatch")
-        await self._transport.write_file(
-            marker.path, base64.b64decode(marker.prior_content_b64), marker.prior_mode
+        await self._write_file(
+            marker, base64.b64decode(marker.prior_content_b64), undo=True
         )
-        await self._transport.chown(marker.path, marker.prior_uid, marker.prior_gid)
         verified = await self._verify_restored(marker)
-        if not verified:
+        if not verified.ok:
             return EffectResult(ok=False, changed=False, reason="undo_verification_failed")
         return EffectResult(ok=True, changed=True, reason=None)
 
@@ -157,24 +161,52 @@ class FilesPlugin(BaseCapabilityPlugin):
         if marker.action == "replace_managed_file":
             if sha256(current) != marker.new_content_sha256:
                 return VerifyResult(ok=False, reason="content_mismatch")
-        if marker.new_mode is not None and stat.S_IMODE(info.mode) != stat.S_IMODE(marker.new_mode):
+        expected_mode = marker.new_mode if marker.new_mode is not None else marker.prior_mode
+        if stat.S_IMODE(info.mode) != stat.S_IMODE(expected_mode):
             return VerifyResult(ok=False, reason="mode_mismatch")
+        if info.uid != marker.prior_uid or info.gid != marker.prior_gid:
+            return VerifyResult(ok=False, reason="ownership_mismatch")
         return VerifyResult(ok=True)
+
+    async def verify_restored(self, params: CapabilityVerifyParams) -> VerifyResult:
+        marker = self._marker(params)
+        self._require_action(marker.action)
+        return await self._verify_restored(marker)
 
     async def reconcile(self, params: CapabilityReconcileParams) -> ReconcileResult:
         marker = self._marker(params)
         self._require_action(marker.action)
         try:
             current = await self._transport.read_file(marker.path, MAX_MANAGED_FILE_BYTES)
+            info = await self._transport.lstat(marker.path)
         except CapabilityError:
             return ReconcileResult(state=ReconcileState.UNKNOWN, reason="state_unavailable")
-        prior_hash = marker.prior_content_sha256
-        expected_hash = marker.new_content_sha256
-        current_hash = sha256(current)
-        if current_hash == prior_hash:
-            return ReconcileResult(state=ReconcileState.NOT_APPLIED)
-        if expected_hash is not None and current_hash == expected_hash:
+        prior_state = (
+            marker.prior_content_sha256,
+            stat.S_IMODE(marker.prior_mode),
+            marker.prior_uid,
+            marker.prior_gid,
+        )
+        expected_state = (
+            marker.new_content_sha256
+            if marker.action == "replace_managed_file"
+            else marker.prior_content_sha256,
+            stat.S_IMODE(
+                marker.new_mode if marker.new_mode is not None else marker.prior_mode
+            ),
+            marker.prior_uid,
+            marker.prior_gid,
+        )
+        current_state = (
+            sha256(current),
+            stat.S_IMODE(info.mode),
+            info.uid,
+            info.gid,
+        )
+        if current_state == expected_state:
             return ReconcileResult(state=ReconcileState.APPLIED)
+        if current_state == prior_state:
+            return ReconcileResult(state=ReconcileState.NOT_APPLIED)
         return ReconcileResult(state=ReconcileState.PARTIAL)
 
     # ------------------------------------------------------------------
@@ -241,19 +273,36 @@ class FilesPlugin(BaseCapabilityPlugin):
             if index < len(components) and not stat.S_ISDIR(info.mode):
                 raise CapabilityError("not_a_directory")
 
-    async def _verify_restored(self, marker: FileMarker) -> bool:
+    async def _write_file(
+        self, marker: FileMarker, content: bytes, *, undo: bool = False
+    ) -> None:
+        mode = marker.prior_mode if undo or marker.new_mode is None else marker.new_mode
+        metadata_writer = getattr(self._transport, "write_file_with_metadata", None)
+        if callable(metadata_writer):
+            await metadata_writer(
+                marker.path,
+                content,
+                mode,
+                marker.prior_uid,
+                marker.prior_gid,
+            )
+            return
+        await self._transport.write_file(marker.path, content, mode)
+        await self._transport.chown(marker.path, marker.prior_uid, marker.prior_gid)
+
+    async def _verify_restored(self, marker: FileMarker) -> VerifyResult:
         try:
             content = await self._transport.read_file(marker.path, MAX_MANAGED_FILE_BYTES)
             info = await self._transport.lstat(marker.path)
         except CapabilityError:
-            return False
+            return VerifyResult(ok=False, reason="state_unavailable")
         if sha256(content) != marker.prior_content_sha256:
-            return False
+            return VerifyResult(ok=False, reason="restored_state_mismatch")
         if stat.S_IMODE(info.mode) != stat.S_IMODE(marker.prior_mode):
-            return False
+            return VerifyResult(ok=False, reason="restored_state_mismatch")
         if info.uid != marker.prior_uid or info.gid != marker.prior_gid:
-            return False
-        return True
+            return VerifyResult(ok=False, reason="restored_state_mismatch")
+        return VerifyResult(ok=True)
 
 
 def sha256(content: bytes) -> str:

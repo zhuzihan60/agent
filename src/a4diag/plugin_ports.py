@@ -24,7 +24,7 @@ from pydantic import JsonValue
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from a4diag.domain import Operation, Plan, Risk, StepResult, TargetConfig, canonical_json_bytes
+from a4diag.domain import Operation, Plan, Risk, StepResult, TargetConfig, canonical_json_bytes, plan_digest
 from a4diag.plugin_api.manifest import PluginType
 from a4diag.plugin_client import PluginClient
 from a4diag.plugin_api.target_protocol import TargetLifecycle, TargetRequest, TargetSigner
@@ -75,6 +75,36 @@ class _RpcExecutorPort:
         if transaction_id is None:
             raise RuntimeFailure("transaction_context_missing")
         return transaction_id
+
+    def restore_read_context(
+        self, target: TargetConfig, plan: Plan, claims: tuple[OperationTicket, ...]
+    ) -> None:
+        """Bind authenticated durable dispatch claims without dispatching effects."""
+        restored = {}
+        for claim in claims:
+            try:
+                index = int(claim.step_id)
+                if index < 0 or str(index) != claim.step_id:
+                    raise ValueError("invalid step")
+                operation = plan.operations[index]
+            except (ValueError, IndexError) as error:
+                raise RuntimeFailure("ticket_context_mismatch") from error
+            if (
+                claim.transaction_id != self._transaction_id()
+                or claim.target_id != target.id
+                or plan.target_id != target.id
+                or claim.target_fingerprint != plan.target_fingerprint
+                or (target.identity_fingerprint is not None
+                    and claim.target_fingerprint != target.identity_fingerprint)
+                or claim.plan_digest != plan_digest(plan)
+                or claim.operation_digest != canonical_operation_digest(operation)
+            ):
+                raise RuntimeFailure("ticket_context_mismatch")
+            restored[(claim.transaction_id, claim.step_id)] = claim
+        for key in tuple(self._contexts):
+            if key[0] == self._transaction_id():
+                del self._contexts[key]
+        self._contexts.update(restored)
 
     def _client(self, target: TargetConfig) -> PluginClient:
         client = self.clients.get(target.id)
@@ -131,6 +161,7 @@ class _RpcExecutorPort:
         lifecycle: TargetLifecycle, marker: dict[str, object] | None,
         undo: dict[str, object] | None, claims: OperationTicket,
         effect_digest: str,
+        verify_restored: bool = False,
     ) -> dict[str, object]:
         issued = int(self.clock())
         request = TargetRequest(
@@ -138,6 +169,7 @@ class _RpcExecutorPort:
             target_fingerprint=claims.target_fingerprint,
             transaction_id=self._transaction_id(), step_id=claims.step_id,
             lifecycle=lifecycle, operation=operation, marker=marker, undo=undo,
+            verify_restored=verify_restored,
             plan_digest=claims.plan_digest, effect_payload_digest=effect_digest,
             risk=claims.risk, approval_id=claims.approval_id,
             issued_at=issued, expires_at=issued + 30, nonce=self.nonce_factory(),
@@ -223,7 +255,7 @@ class _RpcExecutorPort:
         operation: Operation,
         marker: dict[str, object],
     ) -> StepResult:
-        claims = self._context(step_id)
+        claims = self._context(target, step_id, operation)
         envelope = self._envelope(
             target=target, operation=operation, lifecycle=TargetLifecycle.VERIFY,
             marker=marker, undo=None, claims=claims,
@@ -271,7 +303,7 @@ class _RpcExecutorPort:
         marker: dict[str, object] | None,
     ) -> ReconcileEffect:
         del phase, dispatch_id
-        claims = self._context(step_id)
+        claims = self._context(target, step_id, operation)
         envelope = self._envelope(
             target=target, operation=operation, lifecycle=TargetLifecycle.RECONCILE,
             marker=marker, undo=None, claims=claims,
@@ -292,10 +324,12 @@ class _RpcExecutorPort:
         except ValueError as error:
             raise RuntimeFailure("plugin_result_invalid", "reconcile") from error
 
-    def _context(self, step_id: str) -> OperationTicket:
+    def _context(self, target: TargetConfig, step_id: str, operation: Operation) -> OperationTicket:
         claims = self._contexts.get((self._transaction_id(), step_id))
         if claims is None:
             raise RuntimeFailure("target_request_context_missing", step_id)
+        if claims.target_id != target.id or claims.operation_digest != canonical_operation_digest(operation):
+            raise RuntimeFailure("ticket_context_mismatch", step_id)
         return claims
 
     def verify_restored(
@@ -306,9 +340,25 @@ class _RpcExecutorPort:
         marker: dict[str, object],
         pre_state: dict[str, object],
     ) -> StepResult:
-        # Capability plugins prove restoration inside undo/verify; there is no
-        # separate RPC method, so a caller asking for it fails closed.
-        raise RuntimeFailure("method_not_supported", "verify_restored")
+        if marker != pre_state:
+            raise RuntimeFailure("restoration_marker_mismatch")
+        claims = self._context(target, step_id, operation)
+        envelope = self._envelope(
+            target=target, operation=operation, lifecycle=TargetLifecycle.VERIFY,
+            marker=marker, undo=None, claims=claims, verify_restored=True,
+            effect_digest=effect_payload_digest({"marker": marker}),
+        )
+        result = self._target_result(
+            _run(lambda: self._client(target).call("verify_typed", {
+                "transaction_id": self._transaction_id(), "step_id": step_id,
+                "operation": operation.model_dump(mode="json"), "marker": marker,
+                "envelope": envelope,
+            })), "verify_typed",
+        )
+        restored = self._step_result(result, "restored")
+        if not restored.ok and restored.status == "state_unavailable":
+            return restored.model_copy(update={"status": "unknown"})
+        return restored
 
 
 def _socket_client(instance: str) -> PluginClient:

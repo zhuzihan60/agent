@@ -5,7 +5,7 @@ Requires=a4diag-target-executor.socket
 [Service]
 Type=simple
 User=root
-Group=root
+Group=a4diag-target
 ExecStart=/opt/a4diag-target/current/venv/bin/a4diag-target-executor
 NoNewPrivileges=yes
 PrivateTmp=yes

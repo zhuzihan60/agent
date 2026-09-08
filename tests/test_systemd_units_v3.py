@@ -161,12 +161,15 @@ def test_target_executor_is_socket_only_and_hardened() -> None:
     assert socket["SocketGroup"] == "a4diag-target"
     service = units["a4diag-target-executor.service"]["Service"]
     assert service["User"] == "root"
+    assert service["Group"] == "a4diag-target"
     assert service["RestrictAddressFamilies"] == "AF_UNIX"
     assert service["ProtectSystem"] == "strict"
     assert service["ProtectHome"] == "yes"
     assert service["NoNewPrivileges"] == "yes"
     assert "/etc/a4diag-target" in service["ReadOnlyPaths"]
     assert "/var/lib/a4diag-target/executor" in service["ReadWritePaths"]
+    assert service["RuntimeDirectory"] == "a4diag-target"
+    assert service["RuntimeDirectoryMode"] == "0750"
 
 
 def test_units_execstart_match_installed_layout() -> None:

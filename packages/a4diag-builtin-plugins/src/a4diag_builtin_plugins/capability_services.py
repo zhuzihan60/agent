@@ -142,6 +142,16 @@ class ServicesPlugin(BaseCapabilityPlugin):
             return VerifyResult(ok=False, reason="state_mismatch")
         return VerifyResult(ok=True)
 
+    async def verify_restored(self, params: CapabilityVerifyParams) -> VerifyResult:
+        marker = self._marker(params)
+        self._require_action(marker.action)
+        current = await self._read_state_or_none(marker.unit, params)
+        if current is None:
+            return VerifyResult(ok=False, reason="state_unavailable")
+        if not self._same_runtime_state(current, marker.prior):
+            return VerifyResult(ok=False, reason="restored_state_mismatch")
+        return VerifyResult(ok=True)
+
     async def reconcile(self, params: CapabilityReconcileParams) -> ReconcileResult:
         marker = self._marker(params)
         self._require_action(marker.action)

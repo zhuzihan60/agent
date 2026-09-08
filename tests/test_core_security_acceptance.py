@@ -322,6 +322,8 @@ class FakeExecutor:
         pre_state: dict[str, object],
     ) -> StepResult:
         self.calls.append(f"restoration:{step_id}")
+        if self.undo_unknown == step_id:
+            return StepResult(ok=False, status="unknown")
         if self.undo_failure == step_id:
             return StepResult(ok=False, status="not_restored")
         return StepResult(ok=True, status="restored")
@@ -829,7 +831,7 @@ def test_rollback_failure_is_truthful_and_lock_safe(
         # Catches automatic replay of an ambiguous undo instead of one reconcile.
         assert [
             call for call in harness.executor.calls if call.startswith("restoration:")
-        ] == ["restoration:1"]
+        ] == ["restoration:1", "restoration:0"]
         assert [
             call for call in harness.executor.calls if call.startswith("reconcile:")
         ] == ["reconcile:undo:0"]

@@ -890,6 +890,7 @@ def test_malformed_undo_response_is_rollback_unknown_and_retains_lock(
     deps = deps_factory()
     deps.plugins.executor.verify_fail_step = "0"
     deps.plugins.executor.undo_result = {"unexpected": True}
+    deps.plugins.executor.restore_result = StepResult(ok=False, status="unknown")
 
     graph = build_graph(deps)
     first = run_event(graph, event_for())
@@ -1115,6 +1116,7 @@ def test_unknown_undo_is_reported_as_rollback_unknown(deps_factory) -> None:  # 
     deps.plugins.model.plan_result = make_plan(count=2)
     deps.plugins.executor.verify_fail_step = "1"
     deps.plugins.executor.undo_unknown_step = "0"
+    deps.plugins.executor.restore_result = StepResult(ok=False, status="unknown")
 
     first = run_event(build_graph(deps), event_for())
     state = run_event(build_graph(deps), resume_for(first["transaction_id"]))
