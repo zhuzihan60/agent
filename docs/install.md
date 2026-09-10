@@ -1,4 +1,4 @@
-# A4Diag v0.4.2 安装与升级指南
+# A4Diag v0.4.3 安装与升级指南
 
 A4Diag 由两个独立部分组成：
 
@@ -237,4 +237,4 @@ sudo rm -rf /opt/a4diag/releases /opt/a4diag/current
 - [v0.3 到 v0.4 迁移指南](migration/v0.3-to-v0.4.md)
 - [验收运行手册](testing/acceptance-runbook.md)
 - [发行版兼容矩阵](testing/distro-matrix.md)
-- [v0.4.2 发布说明](release/v0.4.2.md)
+- [v0.4.3 发布说明](release/v0.4.3.md)
