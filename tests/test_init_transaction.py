@@ -164,8 +164,7 @@ def transaction(
     )
 
 
-@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0,
-                    reason="real file ownership requires POSIX root")
+@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0, reason="real file ownership requires POSIX root")
 def test_failed_init_restores_exact_config_uid_gid_and_mode(tmp_path: Path) -> None:
     destination = tmp_path / "config.yaml"
     original = b"prior config must retain its owner and group\n"

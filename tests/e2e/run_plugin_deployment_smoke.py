@@ -28,13 +28,46 @@ SYSTEMD = Path("/run/systemd/system")
 INSTANCES = ("ci-smoke-model", "ci-smoke-local")
 HELPER = Path("/usr/libexec/a4diag/a4diag-transport-helper")
 TARGET_SOCKET = Path("/run/a4diag-target/executor.sock")
+_FIXTURE_SECRETS: list[str] = []
+
+
+def safe_diagnostic(value: object, limit: int = 16384) -> str:
+    from a4diag.redaction import redact
+
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    # Scrub before truncating, including secrets that straddle the output bound.
+    for secret in _FIXTURE_SECRETS:
+        text = text.replace(secret, "[REDACTED]")
+    return str(redact(text))[-limit:]
+
+
+def deployment_diagnostics(instance: str, last_error: object) -> None:
+    """Capture the failed live instance before activate() restores its state."""
+    if instance not in INSTANCES:
+        return
+    service = f"a4diag-plugin@{instance}.service"
+    socket_unit = f"a4diag-plugin@{instance}.socket"
+    diagnostics = {"instance": instance, "last_core_rpc_error": safe_diagnostic(last_error, 4096)}
+    probes = {
+        "systemd": ["/usr/bin/systemctl", "show", service, socket_unit,
+                    "--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,MainPID,User,Group,DynamicUser,FragmentPath,DropInPaths"],
+        "journal": ["/usr/bin/journalctl", "--unit", service, "--unit", socket_unit,
+                    "--no-pager", "--lines=80", "--output=short-iso"],
+    }
+    for label, argv in probes.items():
+        try:
+            result = subprocess.run(argv, capture_output=True, timeout=5, check=False)
+            diagnostics[label] = safe_diagnostic(result.stdout + b"\n" + result.stderr)
+        except Exception as error:
+            diagnostics[label] = safe_diagnostic(f"{type(error).__name__}: {error}", 2048)
+    print("plugin deployment diagnostics: " + json.dumps(diagnostics, sort_keys=True), file=sys.stderr, flush=True)
 
 
 def command(argv: list[str], *, check: bool = True, timeout: float = 20) -> subprocess.CompletedProcess:
     result = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
     if check and result.returncode:
-        # Never print provider headers, credentials, or unfiltered plugin logs.
-        raise RuntimeError(f"deployment smoke command failed: {Path(argv[0]).name}")
+        detail = safe_diagnostic(result.stderr or result.stdout, 4096)
+        raise RuntimeError(f"deployment smoke command failed: {Path(argv[0]).name} (exit {result.returncode}): {detail}")
     return result
 
 
@@ -81,13 +114,15 @@ class Systemd:
 
     def health(self, instance, _socket):
         deadline = time.monotonic() + 20
+        last_error = "health result was not ok"
         while time.monotonic() < deadline:
             try:
                 if rpc(instance, "health").get("ok") is True:
                     return True
-            except (RuntimeError, ValueError, subprocess.TimeoutExpired):
-                pass
+            except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+                last_error = f"{type(error).__name__}: {error}"
             time.sleep(0.2)
+        deployment_diagnostics(instance, last_error)
         return False
 
 
@@ -119,8 +154,12 @@ def main() -> int:
     secret_root = Path("/etc/a4diag/secrets/ci-plugin-smoke")
     config_root = Path("/etc/a4diag/plugins")
     exclusive_paths = [RUNTIME, secret_root, TARGET_SOCKET, *templates]
+    state_paths = []
     for instance in INSTANCES:
         exclusive_paths.extend([config_root / f"{instance}.yaml", SYSTEMD / f"a4diag-plugin@{instance}.service.d"])
+        state_paths.extend([Path(f"/var/lib/a4diag-plugin-{instance}"),
+                            Path(f"/var/lib/private/a4diag-plugin-{instance}")])
+    exclusive_paths.extend(state_paths)
     if any(path.exists() or path.is_symlink() for path in exclusive_paths):
         raise RuntimeError("deployment smoke paths already occupied")
     python = Path(sys.executable).resolve()
@@ -146,8 +185,10 @@ def main() -> int:
         config_root.mkdir(parents=True, exist_ok=True)
         secret_root.mkdir(parents=True, mode=0o700)
         api_key = secrets.token_hex(24)
+        ticket_key = secrets.token_hex(32)
+        _FIXTURE_SECRETS.extend((api_key, ticket_key))
         (secret_root / "model.key").write_text(api_key)
-        (secret_root / "ticket.key").write_text(secrets.token_hex(32))
+        (secret_root / "ticket.key").write_text(ticket_key)
         for path in secret_root.iterdir():
             path.chmod(0o600)
         RUNTIME.mkdir(mode=0o755)
@@ -317,6 +358,13 @@ def main() -> int:
             HELPER.chmod(helper_mode)
         shutil.rmtree(secret_root, ignore_errors=True)
         shutil.rmtree(RUNTIME, ignore_errors=True)
+        # These exact CI instance paths were checked absent before setup.
+        # Unlink systemd's public symlink before removing its private directory.
+        for path in state_paths:
+            if path.is_symlink():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
 
 
 if __name__ == "__main__":
