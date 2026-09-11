@@ -27,6 +27,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator, model_validator
 
 from a4diag.domain import CapabilityGrant, TargetConfig, TargetMode
+from a4diag.recovery import EvidenceSource, RecoveryCheck
 from a4diag.settings import (
     AgentSettings,
     ModelSettings,
@@ -167,6 +168,9 @@ class TargetInit(BaseModel):
     auto_execute_low: bool = False
     capabilities: tuple[CapabilityInit, ...] = ()
     notification_required: bool = False
+    evidence_sources: tuple[EvidenceSource, ...] = Field(default=(), max_length=8)
+    recovery_checks: tuple[RecoveryCheck, ...] = Field(default=(), max_length=8)
+    minimum_confidence: float = Field(default=0.7, ge=0.0, le=1.0, allow_inf_nan=False)
 
     @field_validator("id")
     @classmethod
@@ -350,9 +354,15 @@ class InitService:
         *,
         transport: TargetIdentityProbe,
         model: ModelProbe,
+        config_uid: int | None = None,
+        config_gid: int | None = None,
+        config_mode: int = 0o600,
     ) -> None:
         self.transport = transport
         self.model = model
+        self._config_uid = config_uid
+        self._config_gid = config_gid
+        self._config_mode = config_mode
 
     def validate(self, request: InitRequest) -> InitResult:
         if not isinstance(request, InitRequest):
@@ -398,6 +408,13 @@ class InitService:
             with os.fdopen(fd, "wb") as handle:
                 handle.write(result.config_bytes)
                 handle.flush()
+                if self._config_uid is not None or self._config_gid is not None:
+                    os.fchown(
+                        handle.fileno(),
+                        self._config_uid if self._config_uid is not None else -1,
+                        self._config_gid if self._config_gid is not None else -1,
+                    )
+                os.chmod(temp, self._config_mode)
                 os.fsync(handle.fileno())
             # Validate the staged content before it can replace the target.
             load_settings(temp)
@@ -478,6 +495,9 @@ class InitService:
                 auto_execute_low=target.auto_execute_low,
                 capabilities=capabilities,
                 notification_required=target.notification_required,
+                evidence_sources=target.evidence_sources,
+                recovery_checks=target.recovery_checks,
+                minimum_confidence=target.minimum_confidence,
             )
         except ValueError as error:
             raise InitError("invalid_request", str(error)) from error

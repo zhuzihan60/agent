@@ -129,9 +129,9 @@ set -euo pipefail
 if [ \"${1:-}\" = \"-\" ]; then exec \"$A4DIAG_TEST_REAL_PYTHON\" \"$@\"; fi
 if [ \"${1:-}\" = \"-m\" ] && [ \"${2:-}\" = \"venv\" ]; then
   mkdir -p \"$3/bin\"
-  printf '#!/usr/bin/env bash\\nexec \"$A4DIAG_TEST_REAL_PYTHON\" \"$@\"\\n' > \"$3/bin/python\"
+  printf '#!/usr/bin/env bash\\nif [ \"${1:-}\" = -m ] && [ \"${2:-}\" = pip ]; then exit 0; fi\\nexec \"$A4DIAG_TEST_REAL_PYTHON\" \"$@\"\\n' > \"$3/bin/python\"
   printf '#!/usr/bin/env bash\\nexit 0\\n' > \"$3/bin/a4diag-target-executor\"
-  printf '#!/usr/bin/env bash\\nexit 0\\n' > \"$3/bin/a4diag-transport-helper\"
+  printf '#!%s/bin/python\\nraise SystemExit(0)\\n' \"$3\" > \"$3/bin/a4diag-transport-helper\"
   chmod 755 \"$3/bin/\"*
 fi
 exit 0
@@ -140,7 +140,7 @@ exit 0
     )
     python.chmod(0o755)
     command_log = tmp_path / "commands.log"
-    for command in ("systemctl", "systemd-sysusers", "systemd-tmpfiles", "chown"):
+    for command in ("systemctl", "systemd-sysusers", "systemd-tmpfiles", "chown", "usermod"):
         shim = fake_bin / command
         shim.write_text(
             "#!/usr/bin/env bash\n"
@@ -224,6 +224,8 @@ exit 0
     public_key = target_root / "etc" / "a4diag-target" / "operation-public.pem"
     authorized_keys = target_root / "var" / "lib" / "a4diag-target" / ".ssh" / "authorized_keys"
     assert stat.S_IMODE(helper.stat().st_mode) == 0o755
+    invoked = subprocess.run([str(helper)], env=environment, check=False, capture_output=True, text=True)
+    assert invoked.returncode == 0, invoked.stderr
     assert stat.S_IMODE(public_key.stat().st_mode) == 0o644
     assert not any(path.name.endswith("private.pem") for path in target_root.rglob("*"))
     assert 'restrict,command="/usr/libexec/a4diag/a4diag-transport-helper"' in authorized_keys.read_text("utf-8")
@@ -247,6 +249,7 @@ exit 0
         "ReadWritePaths=/etc/example /srv/app\n"
     )
     commands = command_log.read_text(encoding="utf-8").splitlines()
+    assert commands.count("usermod --shell /bin/sh --password * a4diag-target") == 2
     assert commands.count(
         "systemctl try-restart a4diag-target-executor.service"
     ) == 2

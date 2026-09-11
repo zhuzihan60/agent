@@ -32,6 +32,8 @@ from a4diag.plugin_api.ticket import OperationPhase, OperationTicket, effect_pay
 from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import canonical_operation_digest
 from a4diag.runtime import RuntimeFailure
+from a4diag.recovery import check_http
+from a4diag.redaction import redact
 from a4diag.settings import AgentSettings
 from a4diag.workflow import (
     PluginPorts,
@@ -374,7 +376,17 @@ def _target_signer(target: TargetConfig) -> TargetSigner:
         key_ref = target.operation_signing_key_ref or (
             f"file:targets/{target.id}/operation-ed25519.pem"
         )
-        pem = SecretResolver().resolve(key_ref).value.encode("utf-8")
+        import os
+        if os.name == "posix" and os.getuid() == 0:
+            import pwd
+            try:
+                owner = pwd.getpwnam("a4diag").pw_uid
+            except KeyError:
+                owner = None
+            resolver = SecretResolver(trusted_owner_uid=owner)
+        else:
+            resolver = SecretResolver()
+        pem = resolver.resolve(key_ref).value.encode("utf-8")
         key = serialization.load_pem_private_key(pem, password=None)
     except (SecretError, ValueError, TypeError) as error:
         raise RuntimeFailure("target_signing_key_unavailable", target.id) from error
@@ -441,7 +453,46 @@ class _RpcCollectorPort:
                     "truncated": bool(data.get("truncated", False)),
                 }
             )
+        evidence.extend(self.collect_requested(target, read_view, [source.id for source in target.evidence_sources if source.initial]))
         return evidence
+
+    def collect_requested(
+        self, target: TargetConfig, read_view: str, source_ids: list[str]
+    ) -> list[dict[str, JsonValue]]:
+        if not source_ids:
+            return []
+        if self.verify_identity(target) != read_view:
+            raise RuntimeFailure("target_identity_mismatch", target.id)
+        catalog = {source.id: source for source in target.evidence_sources}
+        if len(source_ids) > 8 or any(source_id not in catalog for source_id in source_ids):
+            raise RuntimeFailure("evidence_source_not_authorized", target.id)
+        evidence = []
+        for source_id in dict.fromkeys(source_ids):
+            source = catalog[source_id]
+            params = {"kind": source.kind, "output_limit_bytes": source.max_bytes}
+            params["path" if source.kind == "file" else "unit"] = source.resource
+            row = {"kind": source.kind, "source_id": source.id, "resource": source.resource}
+            try:
+                result = _run(lambda: self._client(target).call("read", params))
+                if (not isinstance(result, dict) or result.get("ok") is not True
+                    or not isinstance(result.get("stdout"), str)
+                    or not isinstance(result.get("data"), dict)
+                    or type(result["data"].get("truncated")) is not bool
+                    or len(result["stdout"].encode("utf-8")) > source.max_bytes):
+                    raise ValueError("invalid evidence response")
+                row.update(content=redact(result["stdout"]), available=True,
+                           truncated=result["data"]["truncated"])
+            except Exception:
+                row.update(content="", available=False, truncated=False, error="evidence_unavailable")
+            evidence.append(row)
+        return evidence
+
+    def validate_recovery(self, target: TargetConfig) -> StepResult:
+        if not target.recovery_checks:
+            return StepResult(ok=False, status="recovery_checks_missing")
+        if not target.evidence_sources:
+            return StepResult(ok=False, status="evidence_sources_missing")
+        return StepResult(ok=True, status="recovery_checks_configured")
 
     def final_verify(
         self,
@@ -451,27 +502,69 @@ class _RpcCollectorPort:
     ) -> StepResult:
         del evidence
         current = self.verify_identity(target)
+        if current != read_view:
+            return StepResult(ok=False, status="identity_mismatch", data={"fingerprint": current})
+        if not target.recovery_checks:
+            return StepResult(ok=False, status="recovery_checks_missing")
+        results = []
+        for check in target.recovery_checks:
+            result = {"ok": False, "status": "check_unavailable"}
+            for attempt in range(1, check.attempts + 1):
+                if check.kind == "http":
+                    result = check_http(check)
+                else:
+                    try:
+                        response = _run(lambda: self._client(target).call("read", {
+                            "kind": "service_state", "unit": check.resource,
+                            "output_limit_bytes": 8192,
+                        }))
+                        if response.get("ok") is not True or response.get("data", {}).get("truncated") is not False:
+                            raise ValueError("service state unavailable")
+                        state = json.loads(response["stdout"])
+                        healthy = state.get("LoadState") == "loaded" and state.get("ActiveState") == "active"
+                        result = {"ok": healthy, "status": "service_active" if healthy else "service_unhealthy",
+                                  "active_state": state.get("ActiveState", "unknown")}
+                    except Exception:
+                        result = {"ok": False, "status": "service_unavailable"}
+                if result["ok"]:
+                    break
+                if attempt < check.attempts:
+                    time.sleep(1)
+            results.append({"id": check.id, "kind": check.kind, "attempts": attempt, **result})
+        identity_matches = self.verify_identity(target) == read_view
+        healthy = identity_matches and all(result["ok"] for result in results)
         return StepResult(
-            ok=current == read_view,
-            status="identity_verified" if current == read_view else "identity_mismatch",
-            data={"fingerprint": current},
+            ok=healthy,
+            status="business_recovered" if healthy else "business_recovery_failed",
+            data={"fingerprint": current, "identity_matches": identity_matches, "checks": results},
         )
 
 
 @dataclass(frozen=True, slots=True)
 class _RpcModelPort:
     client: PluginClient
+    registry: PluginRegistry | None = None
 
-    @staticmethod
     def _evidence(
+        self,
         target: TargetConfig,
         evidence: list[dict[str, JsonValue]],
         **extra: JsonValue,
     ) -> dict[str, JsonValue]:
+        contracts = []
+        if self.registry is not None:
+            for grant in target.capabilities:
+                for action in grant.actions:
+                    contract = self.registry.require_operation(grant.name, action)
+                    contracts.append(contract.model_dump(mode="json"))
         return {
             "target_id": target.id,
-            "target_fingerprint": target.identity_ref,
-            "observations": evidence,
+            "target_fingerprint": next((item.get("content", "") for item in evidence if item.get("kind") == "target_fingerprint"), ""),
+            "observations": redact(evidence),
+            "allowed_capabilities": [grant.model_dump(mode="json") for grant in target.capabilities],
+            "operation_contracts": contracts,
+            "evidence_sources": [source.model_dump(mode="json") for source in target.evidence_sources],
+            "recovery_checks": [check.model_dump(mode="json") for check in target.recovery_checks],
             **extra,
         }
 
@@ -484,6 +577,12 @@ class _RpcModelPort:
             )
         )
         if not isinstance(result, dict):
+            raise RuntimeFailure("model_result_invalid", "diagnose")
+        confidence = result.get("confidence")
+        missing = result.get("missing_evidence")
+        if (type(confidence) not in {int, float} or not 0 <= confidence <= 1
+            or not isinstance(missing, list) or len(missing) > 8
+            or any(not isinstance(item, str) for item in missing)):
             raise RuntimeFailure("model_result_invalid", "diagnose")
         return result
 
@@ -554,6 +653,8 @@ class _RpcModelPort:
         )
         if not isinstance(result, dict):
             raise RuntimeFailure("model_result_invalid", "critic")
+        if result.get("complete") is not True:
+            raise RuntimeFailure("model_plan_incomplete", "critic")
         try:
             return Risk(result.get("risk"))
         except ValueError as error:
@@ -637,7 +738,7 @@ def build_rpc_plugin_ports(
         model = _UnavailableModelPort()
     else:
         registry.require(settings.model.plugin, PluginType.MODEL)
-        model = _RpcModelPort(client_factory(settings.model.plugin))
+        model = _RpcModelPort(client_factory(settings.model.plugin), registry)
     notification_clients: list[PluginClient] = []
     for notification in settings.notifications:
         plugin_name = (

@@ -2,6 +2,8 @@ global_mode: read_only
 auto_execute_low: false
 max_write_targets: 2
 targets: []
+# 服务状态、日志和 HTTP 恢复检查的完整初始化示例：
+# docs/deployment/service-http-recovery.md
 plugins: []
 model: null
 notifications: []

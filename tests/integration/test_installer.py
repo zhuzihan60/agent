@@ -350,6 +350,13 @@ exit 0
         (self.bin / "systemctl").write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'systemd %s\\n' "${A4DIAG_TEST_SYSTEMD_VERSION:-252}"
+  exit 0
+fi
+if [ "${1:-}" = "restart" ] && [ -n "${A4DIAG_TEST_RESTART_LOG:-}" ]; then
+  printf '%s\\n' "$2" >> "$A4DIAG_TEST_RESTART_LOG"
+fi
 if [ "${1:-}" = "is-active" ]; then
   state="${A4DIAG_TEST_SERVICE_STATE:-active}"
   if [ "${2:-}" != "--quiet" ]; then
@@ -760,3 +767,29 @@ def test_signature_mismatch_rejects_release(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "signature mismatch" in result.stderr
     assert not sandbox.current.exists()
+
+
+@POSIX
+def test_installer_rejects_systemd_without_credentials_before_writing_release(tmp_path: Path) -> None:
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path)
+    environment = sandbox.env(skip_systemd=False)
+    environment["A4DIAG_TEST_SYSTEMD_VERSION"] = "239"
+    result = subprocess.run(["bash", str(INSTALL_SH), "--offline", str(release)],
+                            env=environment, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "systemd 247" in result.stderr
+    assert not sandbox.current.exists()
+
+
+@POSIX
+def test_installer_restarts_core_when_service_is_already_active(tmp_path: Path) -> None:
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path)
+    environment = sandbox.env(skip_systemd=False)
+    log = tmp_path / "restarts.log"
+    environment["A4DIAG_TEST_RESTART_LOG"] = str(log)
+    result = subprocess.run(["bash", str(INSTALL_SH), "--offline", str(release)],
+                            env=environment, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == ["a4diag-core.service"]

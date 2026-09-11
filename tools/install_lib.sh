@@ -74,7 +74,12 @@ a4diag_require_commands() {
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
   done
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
-    for command in systemctl systemd-sysusers systemd-tmpfiles; do
+    command -v systemctl >/dev/null 2>&1 || die "required command missing: systemctl"
+    local systemd_version
+    systemd_version="$(systemctl --version | head -n1 | cut -d' ' -f2)"
+    case "$systemd_version" in ''|*[!0-9]*) die "cannot determine systemd version" ;; esac
+    [ "$systemd_version" -ge 247 ] || die "systemd 247 or newer is required for isolated plugin credentials"
+    for command in systemd-sysusers systemd-tmpfiles; do
       command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
     done
   fi
@@ -396,7 +401,9 @@ a4diag_restart_services() {
     return 0
   fi
   systemctl daemon-reload || return 1
-  systemctl enable --now a4diag-core.service || return 1
+  systemctl try-restart 'a4diag-plugin@*.service' || return 1
+  systemctl enable a4diag-core.service || return 1
+  systemctl restart a4diag-core.service || return 1
   local attempts="${A4DIAG_SERVICE_START_ATTEMPTS:-60}"
   local interval="${A4DIAG_SERVICE_START_INTERVAL:-1}"
   case "$attempts:$interval" in

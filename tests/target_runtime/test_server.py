@@ -23,10 +23,11 @@ def test_target_systemd_version_uses_fixed_cross_distro_systemctl() -> None:
     )
 
 
-def test_target_identity_uses_machine_os_systemd_and_host_key(tmp_path: Path) -> None:
+def test_target_identity_uses_machine_os_systemd_and_host_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("a4diag_target.server._systemd_version", lambda: b"systemd 255\n")
     root = tmp_path / "root"
     (root / "etc/ssh").mkdir(parents=True)
-    (root / "etc/machine-id").write_text("machine-1\n", encoding="utf-8")
+    (root / "etc/machine-id").write_bytes(b"machine-1\n")
     (root / "etc/os-release").write_text(
         'ID="ubuntu"\nVERSION_ID="24.04"\n', encoding="utf-8"
     )
@@ -48,7 +49,7 @@ def test_target_identity_uses_machine_os_systemd_and_host_key(tmp_path: Path) ->
 def test_target_read_surface_is_fixed_to_identity_fields(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "etc").mkdir(parents=True)
-    (root / "etc/machine-id").write_text("machine-1\n", encoding="utf-8")
+    (root / "etc/machine-id").write_bytes(b"machine-1\n")
     (root / "etc/os-release").write_text(
         'ID="ubuntu"\nVERSION_ID="24.04"\n', encoding="utf-8"
     )

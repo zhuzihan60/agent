@@ -175,7 +175,7 @@ class FakeModel:
     ) -> dict[str, object]:
         if self.failure is not None:
             raise self.failure
-        return {"cause": "configuration drift", "confidence": 90}
+        return {"cause": "configuration drift", "confidence": 0.9}
 
     def plan(
         self,

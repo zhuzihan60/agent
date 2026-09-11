@@ -618,14 +618,12 @@ def test_ssh_verify_identity_probes_remotely() -> None:
 
 
 def test_local_read_bounds_output_and_flags_truncation() -> None:
-    calls: list[tuple[str, int]] = []
-
-    async def read_file(path: str, limit: int) -> tuple[str, bool]:
-        calls.append((path, limit))
-        content = "y" * 64
-        return content[:limit], len(content) > limit
-
-    transport = local_transport(read_file=read_file)
+    runner = FakeRunner()
+    runner.outcome = RunOutcome(
+        started=True, timed_out=False, returncode=0,
+        stdout=json.dumps({"content": "y" * 32, "truncated": True}),
+    )
+    transport = local_transport(runner=runner)
 
     result = asyncio.run(
         transport.read(
@@ -639,7 +637,9 @@ def test_local_read_bounds_output_and_flags_truncation() -> None:
     assert result.status is TransportStatus.READ_COMPLETED
     assert len(result.stdout) == 32
     assert result.data == {"kind": "file", "truncated": True}
-    assert calls == [("/etc/example.conf", 32)]
+    assert json.loads(runner.calls[0]["payload"]) == {
+        "method": "read", "kind": "file", "path": "/etc/example.conf", "limit": 32,
+    }
 
 
 def test_local_read_machine_id_uses_probed_identity() -> None:
@@ -675,10 +675,12 @@ def test_read_path_is_only_valid_for_file_kind() -> None:
 
 
 def test_read_failure_returns_typed_reason() -> None:
-    async def read_file(path: str, limit: int) -> tuple[str, bool]:
-        raise TransportReadError("not_regular_file")
-
-    transport = local_transport(read_file=read_file)
+    runner = FakeRunner()
+    runner.outcome = RunOutcome(
+        started=True, timed_out=False, returncode=0,
+        stdout=json.dumps({"ok": False, "reason": "not_regular_file"}),
+    )
+    transport = local_transport(runner=runner)
 
     result = asyncio.run(
         transport.read(ReadParams(kind=ReadKind.FILE, path="/etc/example.conf"))

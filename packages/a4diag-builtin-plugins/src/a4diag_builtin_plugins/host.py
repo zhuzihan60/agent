@@ -235,14 +235,16 @@ def serve_instance(instance_config: dict[str, object], *, instance_name: str | N
             )
     plugin = build_plugin(manifest_name, instance_config.get("config"))  # type: ignore[arg-type]
     bindings = build_bindings(manifest_name, plugin)
-    key = _resolve_ticket_key(str(instance_config["ticket_key_ref"]))
-    replay_name = instance_name or manifest_name
-    replay_store = TransactionStore(
-        f"{REPLAY_STORE_DIR}/replay-{replay_name}.sqlite3"
-    )
-    verifier = TicketVerifier(
-        key, replay_store=replay_store, clock=lambda: int(time.time())
-    )
+    verifier = None
+    if any(binding.kind.is_effect for binding in bindings.values()):
+        key = _resolve_ticket_key(str(instance_config["ticket_key_ref"]))
+        replay_name = instance_name or manifest_name
+        replay_store = TransactionStore(
+            str(Path(os.environ.get("STATE_DIRECTORY", REPLAY_STORE_DIR)) / f"replay-{replay_name}.sqlite3")
+        )
+        verifier = TicketVerifier(
+            key, replay_store=replay_store, clock=lambda: int(time.time())
+        )
     host = PluginHost(bindings, ticket_verifier=verifier)
     asyncio.run(_serve_forever(host, str(instance_config["socket"])))
     return 0

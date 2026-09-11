@@ -82,3 +82,35 @@ def test_instance_config_rejects_unknown_or_untyped_plugin_config(
 def test_local_capability_cannot_receive_hidden_instance_fields() -> None:
     with pytest.raises(RuntimeFailure, match="instance_config_invalid"):
         build_plugin("capability-files", {"target": "other-server"})
+
+
+def test_model_host_starts_without_controller_signing_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from a4diag_builtin_plugins import host
+
+    served = []
+
+    async def serve(plugin_host, socket):
+        served.append(socket)
+
+    monkeypatch.setattr(host, "_serve_forever", serve)
+    assert host.serve_instance({
+        "manifest": "model-openai-compatible",
+        "socket": "/run/a4diag/model-openai-compatible.sock",
+        "ticket_key_ref": "file:unavailable-ticket.key",
+        "config": {"base_url": "https://model.example/v1", "api_key_ref": "file:model.key", "model": "test"},
+    }) == 0
+    assert served == ["/run/a4diag/model-openai-compatible.sock"]
+
+
+def test_effectful_host_keeps_replay_database_in_systemd_state_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from a4diag_builtin_plugins import host
+
+    async def serve(plugin_host, socket):
+        pass
+
+    monkeypatch.setenv("STATE_DIRECTORY", str(tmp_path))
+    monkeypatch.setattr(host, "_resolve_ticket_key", lambda ref: b"t" * 32)
+    monkeypatch.setattr(host, "_serve_forever", serve)
+    host.serve_instance({"manifest": "transport-local", "socket": "/run/a4diag/transport-local.sock",
+                         "ticket_key_ref": "file:test.key", "config": {}}, instance_name="transport-local")
+    assert (tmp_path / "replay-transport-local.sqlite3").is_file()

@@ -14,6 +14,10 @@ _UNIT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,255}\.(service|socket|timer|t
 _FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 _PROTECTED_PATHS = (
+    "/boot", "/dev", "/proc", "/sys", "/root", "/home",
+    "/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow",
+    "/etc/systemd", "/usr/lib/systemd", "/etc/a4diag", "/var/lib/a4diag",
+    "/opt/a4diag", "/opt/a4diag-target",
     "/etc/ssh", "/root/.ssh", "/etc/pam.d", "/etc/sudoers", "/etc/sudoers.d",
     "/etc/NetworkManager", "/etc/sysconfig/network-scripts", "/etc/resolv.conf",
     "/etc/hosts", "/etc/firewalld", "/etc/nftables.conf", "/usr/libexec/a4diag",
@@ -108,15 +112,7 @@ class TargetPolicy(BaseModel):
 
     def authorize(self, operation: Operation) -> None:
         if operation.capability == "files":
-            path = operation.resource
-            if path.startswith("/home/") and "/.ssh" in path:
-                raise PolicyDenied("protected_resource")
-            if path.startswith(("/usr/bin/qemu", "/usr/libexec/qemu")) or any(
-                _at_or_below(path, protected) for protected in _PROTECTED_PATHS
-            ):
-                raise PolicyDenied("protected_resource")
-            if not any(_at_or_below(path, root) for root in self.managed_roots):
-                raise PolicyDenied("resource_not_granted")
+            self.authorize_file_read(operation.resource)
             return
         if operation.capability == "services":
             if operation.resource not in self.allowed_units:
@@ -135,6 +131,23 @@ class TargetPolicy(BaseModel):
                 raise PolicyDenied("package_repository_not_granted")
             return
         raise PolicyDenied("capability_not_granted")
+
+    def authorize_file_read(self, path: str) -> None:
+        normalized = normalize_resource(path, allow_descendant_pattern=False)
+        if normalized != path:
+            raise PolicyDenied("resource_not_canonical")
+        if path.startswith("/home/") and "/.ssh" in path:
+            raise PolicyDenied("protected_resource")
+        if path.startswith(("/usr/bin/qemu", "/usr/libexec/qemu")) or any(
+            _at_or_below(path, protected) for protected in _PROTECTED_PATHS
+        ):
+            raise PolicyDenied("protected_resource")
+        if not any(_at_or_below(path, root) for root in self.managed_roots):
+            raise PolicyDenied("resource_not_granted")
+
+    def authorize_service_read(self, unit: str) -> None:
+        if not _UNIT.fullmatch(unit) or unit not in self.allowed_units:
+            raise PolicyDenied("unit_not_granted")
 
 
 __all__ = ["PackageGrant", "PolicyDenied", "TargetPolicy"]

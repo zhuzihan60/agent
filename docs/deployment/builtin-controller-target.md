@@ -1,5 +1,7 @@
 # 内置控制端与目标端部署说明
 
+服务证据采集、模型约束和业务健康验证的配置见 [服务与 HTTP 恢复闭环](service-http-recovery.md)。本分支控制端要求 systemd 247+；旧配置缺少恢复检查时会拒绝自动写入。
+
 在控制服务器上安装已签名的控制端归档，并验证其签名和 `SHA256SUMS`。使用 `a4diag target bootstrap` 生成经过管理员审查的 `target-install.json`，然后把已签名的目标端归档传输到目标服务器并安装。目标端安装必须由管理员执行，Agent 永远不会自行安装目标端。
 
 文件授权只支持预先存在、无符号链接且名称可由 systemd 安全解析的绝对目录根，例如 `/srv/app` 和 `/etc/example`。安装器拒绝与 SSH、网络、用户、内核、systemd、虚拟化及 A4Diag 自身资源重叠的路径，也拒绝 `/etc` 这类包含受保护资源的宽泛根。通过验证后，安装器会生成 `a4diag-target-executor.service.d/managed-roots.conf`，在保持 `ProtectSystem=strict` 和 `ProtectHome=yes` 的同时，把这些精确目录加入 `ReadWritePaths`。

@@ -108,7 +108,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _cmd_target(args: argparse.Namespace) -> int:
-    from .target_bootstrap import TargetBootstrapRequest, build_target_bootstrap
+    from .target_bootstrap import (
+        DEFAULT_TARGET_SECRET_ROOT, TargetBootstrapRequest, build_target_bootstrap,
+    )
 
     if args.action != "bootstrap":
         return 64
@@ -118,11 +120,16 @@ def _cmd_target(args: argparse.Namespace) -> int:
     )
     secret_root = Path(
         os.environ.get(
-            "A4DIAG_TARGET_SECRET_ROOT", "/etc/a4diag/secrets/targets"
+            "A4DIAG_TARGET_SECRET_ROOT", str(DEFAULT_TARGET_SECRET_ROOT)
         )
     )
+    secret_owner = None
+    if secret_root == DEFAULT_TARGET_SECRET_ROOT:
+        import pwd
+        account = pwd.getpwnam("a4diag")
+        secret_owner = (account.pw_uid, account.pw_gid)
     receipt = build_target_bootstrap(
-        request, Path(args.output), secret_root=secret_root
+        request, Path(args.output), secret_root=secret_root, secret_owner=secret_owner
     )
     print(
         json.dumps(
@@ -154,9 +161,18 @@ def _signing_key() -> bytes:
     from .secrets import SecretError, SecretResolver
 
     try:
-        return SecretResolver().resolve("file:release-signing.key").value.encode("utf-8")
+        return SecretResolver(trusted_owner_uid=_service_secret_owner()).resolve("file:release-signing.key").value.encode("utf-8")
     except SecretError as error:
         raise RuntimeError(f"plugin signing key unavailable: {error}") from error
+
+
+def _service_secret_owner() -> int | None:
+    """Installed secrets belong to a4diag; offline fixtures retain caller ownership."""
+    import pwd
+    try:
+        return pwd.getpwnam("a4diag").pw_uid
+    except KeyError:
+        return None
 
 
 class SystemdServiceManager:
@@ -407,13 +423,17 @@ def _build_init_service() -> object:
     )
     from .plugin_instances import PluginInstanceManager
     import grp
+    import pwd
 
+    config_gid = grp.getgrnam("a4diag").gr_gid
     service = InitService(
         transport=ProductionTargetProbe(),
         model=ProductionModelProbe(),
+        config_uid=0,
+        config_gid=config_gid,
+        config_mode=0o640,
     )
     systemd = SystemdInitController()
-    config_gid = grp.getgrnam("a4diag").gr_gid
     return InitTransaction(
         service=service,
         instances=PluginInstanceManager(
@@ -422,6 +442,8 @@ def _build_init_service() -> object:
             secrets_root=Path("/etc/a4diag/secrets"),
             systemd=systemd,
             config_gid=config_gid,
+            systemd_root=Path("/etc/systemd/system"),
+            secret_owner_uid=pwd.getpwnam("a4diag").pw_uid,
         ),
         notification=ProductionNotificationProbe(),
         target_write=ProductionTargetWriteProbe(),
@@ -547,7 +569,7 @@ def _production_runtime() -> object:
 
     def key(ref: str) -> bytes:
         try:
-            return SecretResolver().resolve(ref).value.encode("utf-8")
+            return SecretResolver(trusted_owner_uid=_service_secret_owner()).resolve(ref).value.encode("utf-8")
         except SecretError as error:
             raise RuntimeError(f"secret unavailable ({ref}): {error}") from error
 

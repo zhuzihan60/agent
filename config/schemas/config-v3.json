@@ -15,7 +15,10 @@
   "properties": {
     "global_mode": {
       "type": "string",
-      "enum": ["read_only", "read_write"]
+      "enum": [
+        "read_only",
+        "read_write"
+      ]
     },
     "targets": {
       "type": "array",
@@ -39,28 +42,80 @@
           },
           "mode": {
             "type": "string",
-            "enum": ["local", "ssh"]
+            "enum": [
+              "local",
+              "ssh"
+            ]
           },
           "identity_ref": {
             "type": "string",
             "pattern": "^target/[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
           },
           "identity_fingerprint": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "^sha256:[0-9a-f]{64}$"
           },
-          "write_enabled": {"type": "boolean"},
-          "auto_execute_low": {"type": "boolean"},
-          "notification_required": {"type": "boolean"},
-          "transport": {"type": ["string", "null"]},
-          "host": {"type": ["string", "null"]},
-          "port": {"type": ["integer", "null"], "minimum": 1, "maximum": 65535},
-          "user": {"type": ["string", "null"]},
-          "identity_file_ref": {"type": ["string", "null"]},
-          "known_hosts_ref": {"type": ["string", "null"]},
-          "operation_signing_key_ref": {"type": ["string", "null"]},
+          "write_enabled": {
+            "type": "boolean"
+          },
+          "auto_execute_low": {
+            "type": "boolean"
+          },
+          "notification_required": {
+            "type": "boolean"
+          },
+          "transport": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity_file_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "known_hosts_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation_signing_key_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "host_key_sha256": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "^[0-9a-f]{64}$"
           },
           "capabilities": {
@@ -69,7 +124,11 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["name", "actions", "resources"],
+              "required": [
+                "name",
+                "actions",
+                "resources"
+              ],
               "properties": {
                 "name": {
                   "type": "string",
@@ -84,10 +143,136 @@
                 },
                 "resources": {
                   "type": "array",
-                  "items": {"type": "string"}
+                  "items": {
+                    "type": "string"
+                  }
                 }
               }
             }
+          },
+          "evidence_sources": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                  "title": "Id",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "service_state",
+                    "service_logs",
+                    "file"
+                  ],
+                  "title": "Kind",
+                  "type": "string"
+                },
+                "resource": {
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "title": "Resource",
+                  "type": "string"
+                },
+                "initial": {
+                  "default": true,
+                  "title": "Initial",
+                  "type": "boolean"
+                },
+                "max_bytes": {
+                  "default": 8192,
+                  "maximum": 16384,
+                  "minimum": 256,
+                  "title": "Max Bytes",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "resource"
+              ],
+              "title": "EvidenceSource",
+              "type": "object"
+            }
+          },
+          "recovery_checks": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                  "title": "Id",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "service_active",
+                    "http"
+                  ],
+                  "title": "Kind",
+                  "type": "string"
+                },
+                "resource": {
+                  "maxLength": 2048,
+                  "minLength": 1,
+                  "title": "Resource",
+                  "type": "string"
+                },
+                "expected_status": {
+                  "default": 200,
+                  "maximum": 299,
+                  "minimum": 200,
+                  "title": "Expected Status",
+                  "type": "integer"
+                },
+                "body_contains": {
+                  "anyOf": [
+                    {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null,
+                  "title": "Body Contains"
+                },
+                "attempts": {
+                  "default": 3,
+                  "maximum": 3,
+                  "minimum": 1,
+                  "title": "Attempts",
+                  "type": "integer"
+                },
+                "timeout_seconds": {
+                  "default": 3,
+                  "maximum": 5,
+                  "minimum": 1,
+                  "title": "Timeout Seconds",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "resource"
+              ],
+              "title": "RecoveryCheck",
+              "type": "object"
+            }
+          },
+          "minimum_confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.7
           }
         }
       }
@@ -95,24 +280,51 @@
     "plugins": {
       "type": "array",
       "uniqueItems": true,
-      "items": {"type": "string"}
+      "items": {
+        "type": "string"
+      }
     },
-    "auto_execute_low": {"type": "boolean"},
+    "auto_execute_low": {
+      "type": "boolean"
+    },
     "max_write_targets": {
       "type": "integer",
       "minimum": 1,
       "maximum": 32
     },
-    "model": {"type": ["object", "null"]},
-    "notifications": {"type": "array"},
-    "alertmanager": {"type": ["object", "null"]},
+    "model": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "notifications": {
+      "type": "array"
+    },
+    "alertmanager": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "retention": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["normal_days", "abnormal_days"],
+      "required": [
+        "normal_days",
+        "abnormal_days"
+      ],
       "properties": {
-        "normal_days": {"type": "integer", "minimum": 1, "maximum": 3650},
-        "abnormal_days": {"type": "integer", "minimum": 1, "maximum": 3650}
+        "normal_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "abnormal_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        }
       }
     }
   }

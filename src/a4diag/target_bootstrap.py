@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 from a4diag.domain import canonical_json_bytes
 
 _SAFE_TARGET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+DEFAULT_TARGET_SECRET_ROOT = Path("/etc/a4diag/secrets/targets")
 
 
 class TargetBootstrapRequest(BaseModel):
@@ -69,12 +70,18 @@ def build_target_bootstrap(
     request: TargetBootstrapRequest,
     output_dir: Path,
     *,
-    secret_root: Path = Path("/etc/a4diag/secrets/targets"),
+    secret_root: Path = DEFAULT_TARGET_SECRET_ROOT,
+    secret_owner: tuple[int, int] | None = None,
 ) -> TargetBootstrapReceipt:
     if not isinstance(request, TargetBootstrapRequest):
         raise TypeError("TargetBootstrapRequest required")
     output_dir = Path(output_dir)
     secret_root = Path(secret_root)
+    if secret_owner is not None:
+        if secret_root != DEFAULT_TARGET_SECRET_ROOT or secret_root.resolve() != secret_root:
+            raise ValueError("ownership changes require the exact production secret root")
+        if any(type(value) is not int or value < 0 for value in secret_owner) or len(secret_owner) != 2:
+            raise ValueError("secret owner must be a uid/gid pair")
     target_secret_dir = secret_root / request.target_id
     if output_dir.exists() or output_dir.is_symlink():
         raise FileExistsError(output_dir)
@@ -105,6 +112,11 @@ def build_target_bootstrap(
             serialization.NoEncryption(),
         ),
     )
+    if secret_owner is not None:
+        # Keep the directory private to the creating administrator until both
+        # keys are ready, then hand only these newly created paths to the core.
+        for path in (ssh_private_path, operation_private_path, target_secret_dir):
+            os.chown(path, *secret_owner, follow_symlinks=False)
     ssh_public = ssh_private.public_key().public_bytes(
         serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
     ).decode("ascii")

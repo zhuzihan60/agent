@@ -45,6 +45,8 @@ class _PriorFile:
     existed: bool
     content: bytes
     mode: int
+    uid: int | None = None
+    gid: int | None = None
 
 
 class InitTransaction:
@@ -131,7 +133,11 @@ class InitTransaction:
         info = path.lstat()
         if path.is_symlink() or not stat.S_ISREG(info.st_mode):
             raise InitTransactionError("config_not_regular")
-        return _PriorFile(True, path.read_bytes(), stat.S_IMODE(info.st_mode))
+        return _PriorFile(
+            True, path.read_bytes(), stat.S_IMODE(info.st_mode),
+            info.st_uid if hasattr(os, "fchown") else None,
+            info.st_gid if hasattr(os, "fchown") else None,
+        )
 
     @staticmethod
     def _restore_file(path: Path, prior: _PriorFile) -> None:
@@ -146,9 +152,11 @@ class InitTransaction:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(prior.content)
             handle.flush()
+            if prior.uid is not None and prior.gid is not None:
+                os.fchown(handle.fileno(), prior.uid, prior.gid)
+            os.chmod(temporary, prior.mode)
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        os.chmod(path, prior.mode)
 
 
 def build_builtin_instance_specs(
@@ -233,7 +241,7 @@ def _secret_path(reference: str, root: Path) -> str:
     parts = relative.split("/")
     if not relative or any(part in {"", ".", ".."} for part in parts):
         raise InitTransactionError("unsafe_secret_reference")
-    return str(Path(root).joinpath(*parts))
+    return Path(root).joinpath(*parts).as_posix()
 
 
 class SystemdInitController:
@@ -270,6 +278,16 @@ class SystemdInitController:
     def stop(self, unit: str) -> None:
         self._run("stop", unit)
 
+    def daemon_reload(self) -> None:
+        subprocess.run(["/usr/bin/systemctl", "daemon-reload"], check=True,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30)
+
+    def require_group(self, name: str) -> None:
+        import grp
+
+        grp.getgrnam(name)
+
     def health(self, instance: str, socket: str) -> bool:
         from a4diag.plugin_client import PluginClient
 
@@ -288,7 +306,7 @@ class SystemdInitController:
 
     def restore(self, enabled: bool, active: bool) -> None:
         if active:
-            self._run("start", self.CORE_UNIT)
+            self._run("restart", self.CORE_UNIT)
         else:
             self._run("stop", self.CORE_UNIT)
         if enabled:

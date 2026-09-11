@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any, Callable
 
@@ -143,6 +144,45 @@ def model_request() -> InitRequest:
 def write_json(path: Path, value: object) -> Path:
     path.write_text(json.dumps(value), encoding="utf-8")
     return path
+
+
+def test_config_owner_is_applied_before_atomic_publication(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "config.yaml"
+    owners = []
+    def assign_owner(fd, uid, gid):
+        assert not destination.exists()
+        owners.append((uid, gid))
+    monkeypatch.setattr(os, "fchown", assign_owner, raising=False)
+    configured = InitService(
+        transport=FakeTransport(), model=FakeModel(), config_uid=0,
+        config_gid=1234, config_mode=0o640,
+    )
+    configured.write_atomic(empty_request(), destination)
+    assert owners == [(0, 1234)]
+    assert load_settings(destination).targets == ()
+
+
+def test_default_config_write_does_not_change_owner(tmp_path: Path, monkeypatch) -> None:
+    def unexpected_owner_change(*args):
+        raise AssertionError("default library writer must not change ownership")
+    monkeypatch.setattr(os, "fchown", unexpected_owner_change, raising=False)
+    destination = tmp_path / "config.yaml"
+    service().write_atomic(empty_request(), destination)
+    if os.name == "posix":
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0,
+                    reason="real file ownership requires POSIX root")
+def test_production_config_is_root_owned_and_readable_only_by_core_group(tmp_path: Path) -> None:
+    destination = tmp_path / "config.yaml"
+    configured = InitService(
+        transport=FakeTransport(), model=FakeModel(), config_uid=0,
+        config_gid=65534, config_mode=0o640,
+    )
+    configured.write_atomic(empty_request(), destination)
+    info = destination.stat()
+    assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0, 65534, 0o640)
 
 
 # ---------------------------------------------------------------------------
