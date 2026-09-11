@@ -172,8 +172,7 @@ def test_default_config_write_does_not_change_owner(tmp_path: Path, monkeypatch)
         assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
-@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0,
-                    reason="real file ownership requires POSIX root")
+@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0, reason="real file ownership requires POSIX root")
 def test_production_config_is_root_owned_and_readable_only_by_core_group(tmp_path: Path) -> None:
     destination = tmp_path / "config.yaml"
     configured = InitService(
