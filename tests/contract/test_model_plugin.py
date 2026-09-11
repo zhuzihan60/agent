@@ -188,6 +188,27 @@ def test_probe_success_enables_write() -> None:
     assert result.reason is None
 
 
+@pytest.mark.parametrize("unavailable", [None, "", "error"])
+def test_probe_missing_credentials_returns_failure_without_provider_call(unavailable):
+    class MissingSecrets:
+        def resolve(self, ref):
+            if unavailable == "error":
+                raise ValueError("sensitive resolver detail")
+            return unavailable
+
+    http = FakeHttp()
+    plugin = ModelPlugin(http=http, secrets=MissingSecrets(), config=default_config())
+    result = plugin.capability_probe()
+    assert result.write_capable is False
+    assert result.reason == "secret_unavailable"
+    assert not http.requests
+
+
+def test_probe_schema_explains_the_required_capability_token():
+    schema = ProbeResponse.model_json_schema()
+    assert '"structured"' in schema["properties"]["capabilities"]["description"]
+
+
 @pytest.mark.parametrize(
     "response",
     [
