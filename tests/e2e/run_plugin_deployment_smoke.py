@@ -91,6 +91,10 @@ def rpc(instance: str, method: str, params: dict | None = None) -> dict:
 
 
 class Systemd:
+    def require_group(self, name):
+        import grp
+        grp.getgrnam(name)
+
     def is_enabled(self, unit):
         return systemctl("is-enabled", unit, check=False).returncode == 0
 
