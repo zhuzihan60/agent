@@ -228,6 +228,10 @@ class AgentState(TypedDict, total=False):
     read_view: str
     evidence: list[dict[str, JsonValue]]
     diagnosis: dict[str, JsonValue]
+    missing_evidence: list[str]
+    evidence_rounds: int
+    recovery_result: dict[str, JsonValue]
+    recovery_evidence: list[dict[str, JsonValue]]
     plan: dict[str, JsonValue]
     digest: str
     risk: str
@@ -354,6 +358,10 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         phase: OperationPhase,
         effect_fields: dict[str, JsonValue] | None = None,
     ) -> tuple[TargetConfig, str]:
+        if phase in {OperationPhase.PREPARE, OperationPhase.APPLY}:
+            ready = decision_readiness(state)
+            if not ready.ok:
+                raise PermissionError(ready.status)
         target, authorization = write_authorization(state, operation)
         request = OperationTicketRequest(
             transaction_id=state["transaction_id"],
@@ -452,7 +460,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 "audit_events": audit(state, "collection_failed"),
             }
         return {
-            "evidence": evidence,
+            "evidence": cast(list[dict[str, JsonValue]], redact(evidence)),
             "audit_events": audit(state, "evidence_collected"),
         }
 
@@ -473,7 +481,37 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 "error": f"model_diagnose_failed:{type(error).__name__}",
                 "audit_events": audit(state, "model_failed", node="diagnose"),
             }
-        return {"diagnosis": diagnosis}
+        missing = diagnosis.get("missing_evidence", [])
+        target = target_for(state)
+        catalog = {source.id for source in target.evidence_sources}
+        unavailable = any(row.get("available") is False for row in state.get("evidence", []))
+        if (not isinstance(missing, list) or any(not isinstance(item, str) or item not in catalog for item in missing)
+            or len(missing) > 8 or unavailable
+            or (missing and state.get("evidence_rounds", 0) >= 2)):
+            return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "evidence_unavailable_or_unresolved"}
+        if missing:
+            return {"diagnosis": diagnosis, "missing_evidence": missing, "status": "collecting_evidence"}
+        confidence = diagnosis.get("confidence")
+        if type(confidence) not in {int, float} or not target.minimum_confidence <= confidence <= 1:
+            return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "diagnostic_confidence_too_low"}
+        return {"diagnosis": diagnosis, "missing_evidence": [], "status": "diagnosed"}
+
+    def collect_missing(state: AgentState) -> AgentState:
+        try:
+            collect_requested = getattr(deps.plugins.collector, "collect_requested")
+            requested = state["missing_evidence"]
+            extra = collect_requested(target_for(state), state["read_view"], requested)
+            if (not isinstance(extra, list) or {row.get("source_id") for row in extra} != set(requested)
+                or any(row.get("available") is not True for row in extra)):
+                raise ValueError("requested evidence not available")
+            # Replace prior snapshots for requested IDs; keep total evidence
+            # bounded instead of accumulating duplicate log payloads on retries.
+            combined = [row for row in state.get("evidence", []) if row.get("source_id") not in requested] + extra
+            return {"evidence": cast(list[dict[str, JsonValue]], redact(combined)),
+                    "evidence_rounds": state.get("evidence_rounds", 0) + 1,
+                    "audit_events": audit(state, "supplementary_evidence_collected", source_ids=requested)}
+        except Exception:
+            return {"status": "insufficient_evidence", "error": "supplementary_collection_failed"}
 
     def plan_node(state: AgentState) -> AgentState:
         try:
@@ -505,8 +543,36 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             }
         return {"critic_risk": risk.value}
 
+    def decision_readiness(state: AgentState) -> StepResult:
+        target = target_for(state)
+        confidence = state.get("diagnosis", {}).get("confidence")
+        if type(confidence) not in {int, float} or not target.minimum_confidence <= confidence <= 1:
+            return StepResult(ok=False, status="diagnostic_confidence_too_low")
+        if state.get("diagnosis", {}).get("missing_evidence"):
+            return StepResult(ok=False, status="diagnostic_evidence_missing")
+        validate_recovery = getattr(deps.plugins.collector, "validate_recovery", None)
+        if plan_for(state).operations and callable(validate_recovery):
+            try:
+                ready = StepResult.model_validate(validate_recovery(target))
+            except Exception:
+                ready = StepResult(ok=False, status="recovery_configuration_invalid")
+            if not ready.ok:
+                return ready
+            catalog = {source.id: source for source in target.evidence_sources}
+            snapshots = [row for row in state.get("evidence", []) if row.get("source_id") in catalog]
+            required = {source.id for source in target.evidence_sources if source.initial}
+            if not snapshots or not required.issubset({row.get("source_id") for row in snapshots}) or any(row.get("available") is not True
+                                    or row.get("resource") != catalog[row["source_id"]].resource
+                                    or row.get("kind") != catalog[row["source_id"]].kind for row in snapshots):
+                return StepResult(ok=False, status="diagnostic_evidence_missing")
+        return StepResult(ok=True, status="decision_ready")
+
     def policy_gate(state: AgentState) -> AgentState:
         candidate = plan_for(state)
+        ready = decision_readiness(state)
+        if not ready.ok:
+            return {"status": "policy_denied", "error": ready.status, "policy_reason": ready.status,
+                    "audit_events": audit(state, "recovery_configuration_denied")}
         if (
             candidate.target_id != state["target_id"]
             or candidate.target_fingerprint != state["target_fingerprint"]
@@ -663,6 +729,11 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 "status": "notification_blocked",
                 "error": "mandatory_notification_failed",
             }
+
+        ready = decision_readiness(state)
+        if not ready.ok:
+            return {"status": "policy_denied", "error": ready.status,
+                    "audit_events": audit(state, "decision_revalidation_denied")}
 
         approval = deps.approvals.valid_approval(
             state["transaction_id"],
@@ -1511,16 +1582,21 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 data={"error": type(error).__name__},
             )
         if not result.ok:
-            return begin_rollback(
+            update = begin_rollback(
                 state, list(state.get("applied_steps", [])), reason="final_verify_failed"
             )
+            update["recovery_result"] = result.model_dump(mode="json")
+            if "fresh_evidence" in locals():
+                update["recovery_evidence"] = cast(list[dict[str, JsonValue]], redact(fresh_evidence))
+            return update
         deps.transactions.transition(
             state["transaction_id"], TransactionStatus.SUCCEEDED, now=now()
         )
         return {
             "status": "succeeded",
             "read_view": fresh_view,
-            "evidence": fresh_evidence,
+            "recovery_evidence": cast(list[dict[str, JsonValue]], redact(fresh_evidence)),
+            "recovery_result": result.model_dump(mode="json"),
             "audit_events": audit(state, "final_verification_succeeded"),
         }
 
@@ -1544,6 +1620,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 "transaction_id": state.get("transaction_id", ""),
                 "digest": state.get("digest", ""),
                 "error": state.get("error", ""),
+                "recovery_result": state.get("recovery_result", {}),
             }
         }
 
@@ -1569,6 +1646,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     graph.add_node("acquire_read_view", acquire_read_view)
     graph.add_node("collect", collect)
     graph.add_node("diagnose", diagnose)
+    graph.add_node("collect_missing", collect_missing)
     graph.add_node("plan", plan_node)
     graph.add_node("critic", critic)
     graph.add_node("policy_gate", policy_gate)
@@ -1604,9 +1682,10 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     graph.add_conditional_edges(
         "diagnose",
         lambda state: "report"
-        if state.get("status") == "read_only_no_model"
-        else "plan",
+        if state.get("status") in {"read_only_no_model", "insufficient_evidence"}
+        else "collect_missing" if state.get("missing_evidence") else "plan",
     )
+    graph.add_conditional_edges("collect_missing", lambda state: "report" if state.get("status") == "insufficient_evidence" else "diagnose")
     graph.add_conditional_edges(
         "plan",
         lambda state: "report"

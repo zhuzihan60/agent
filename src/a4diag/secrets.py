@@ -11,6 +11,7 @@ is logged or echoed.
 from __future__ import annotations
 
 import os
+import hashlib
 import re
 import stat
 from collections.abc import Mapping
@@ -22,6 +23,11 @@ DEFAULT_SECRET_ROOT = "/etc/a4diag/secrets"
 MAX_SECRET_BYTES = 4096
 MAX_RELATIVE_PATH_LENGTH = 256
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def credential_name(reference: str) -> str:
+    """Stable systemd-safe identifier, including nested secret references."""
+    return "a4diag-" + hashlib.sha256(reference.encode("utf-8")).hexdigest()
 
 
 class SecretError(ValueError):
@@ -48,9 +54,14 @@ class SecretResolver:
         secret_root: Path | None = None,
         *,
         env: Mapping[str, str] | None = None,
+        trusted_owner_uid: int | None = None,
     ) -> None:
         self._root = Path(secret_root) if secret_root is not None else Path(DEFAULT_SECRET_ROOT)
         self._env = dict(env) if env is not None else dict(os.environ)
+        self._credentials = secret_root is None and bool(self._env.get("CREDENTIALS_DIRECTORY"))
+        if self._credentials:
+            self._root = Path(self._env["CREDENTIALS_DIRECTORY"])
+        self._trusted_owner_uid = trusted_owner_uid
 
     def resolve(self, ref: str) -> ResolvedSecret:
         if not isinstance(ref, str) or ref.count(":") != 1:
@@ -68,6 +79,8 @@ class SecretResolver:
 
     def _resolve_file(self, relative_name: str) -> ResolvedSecret:
         relative = self._validate_relative(relative_name)
+        if self._credentials:
+            relative = PurePosixPath(credential_name("file:" + relative_name))
         candidate = self._root.joinpath(*relative.parts)
         self._reject_symlinks(candidate)
         try:
@@ -77,15 +90,14 @@ class SecretResolver:
         if not stat.S_ISREG(info.st_mode):
             raise SecretError("not_regular_file", str(relative))
         if os.name == "posix":
-            if (info.st_mode & 0o777) != 0o600:
+            allowed_modes = {0o400, 0o600} if self._credentials else {0o600}
+            if (info.st_mode & 0o777) not in allowed_modes:
                 raise SecretError("mode_0600_required", str(relative))
-            if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            owner = self._trusted_owner_uid if self._trusted_owner_uid is not None else os.getuid()
+            if info.st_uid != owner:
                 raise SecretError("owner_mismatch", str(relative))
-        fd = os.open(
-            str(candidate),
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        )
         try:
+            fd = os.open(str(candidate), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "rb") as handle:
                 content = handle.read(MAX_SECRET_BYTES + 1)
         except OSError:
@@ -148,4 +160,5 @@ __all__ = [
     "ResolvedSecret",
     "SecretError",
     "SecretResolver",
+    "credential_name",
 ]

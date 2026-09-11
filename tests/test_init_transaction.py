@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -160,6 +162,39 @@ def transaction(
         self_check=self_check,
         instance_specs=specs,
     )
+
+
+@pytest.mark.skipif(os.name != "posix" or getattr(os, "geteuid", lambda: -1)() != 0,
+                    reason="real file ownership requires POSIX root")
+def test_failed_init_restores_exact_config_uid_gid_and_mode(tmp_path: Path) -> None:
+    destination = tmp_path / "config.yaml"
+    original = b"prior config must retain its owner and group\n"
+    destination.write_bytes(original)
+    os.chown(destination, 12345, 23456)
+    destination.chmod(0o640)
+    with pytest.raises(InitTransactionError):
+        transaction(self_check=lambda _: False).execute(request(), destination)
+    info = destination.stat()
+    assert destination.read_bytes() == original
+    assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (12345, 23456, 0o640)
+
+
+def test_failed_init_restores_owner_before_replacing_config(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "config.yaml"
+    original = b"prior config\n"
+    destination.write_bytes(original)
+    prior = destination.stat()
+    owners = []
+    def assign_owner(fd, uid, gid):
+        # The visible file is still the new configuration while the private
+        # rollback file receives the original credentials before publication.
+        assert destination.read_bytes() != original
+        owners.append((uid, gid))
+    monkeypatch.setattr(os, "fchown", assign_owner, raising=False)
+    with pytest.raises(InitTransactionError):
+        transaction(self_check=lambda _: False).execute(request(), destination)
+    assert owners == [(prior.st_uid, prior.st_gid)]
+    assert destination.read_bytes() == original
 
 
 def test_noninteractive_global_write_requires_literal_enable() -> None:

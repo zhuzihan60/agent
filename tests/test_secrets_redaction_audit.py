@@ -42,6 +42,40 @@ def tamper_first_line(path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_systemd_credentials_resolve_only_delivered_refs(tmp_path: Path) -> None:
+    from a4diag.secrets import credential_name
+
+    credential = tmp_path / credential_name("file:providers/model.key")
+    credential.write_text("delivered-secret", encoding="utf-8")
+    credential.chmod(0o400)
+    resolver = SecretResolver(env={"CREDENTIALS_DIRECTORY": str(tmp_path)})
+    assert resolver.resolve("file:providers/model.key").value == "delivered-secret"
+    with pytest.raises(SecretError, match="file_missing"):
+        resolver.resolve("file:core-policy.key")
+
+
+def test_explicit_secret_root_ignores_service_credentials(tmp_path: Path) -> None:
+    secret = tmp_path / "model.key"
+    secret.write_text("source-secret", encoding="utf-8")
+    secret.chmod(0o600)
+    resolver = SecretResolver(tmp_path, env={"CREDENTIALS_DIRECTORY": str(tmp_path / "absent")})
+    assert resolver.resolve("file:model.key").value == "source-secret"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ownership enforcement")
+def test_admin_validation_accepts_only_explicit_secret_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = tmp_path / "key"
+    secret.write_text("private-value", encoding="utf-8")
+    secret.chmod(0o600)
+    actual_owner = secret.stat().st_uid
+    monkeypatch.setattr(os, "getuid", lambda: actual_owner + 1)
+    with pytest.raises(SecretError, match="owner_mismatch"):
+        SecretResolver(tmp_path).resolve("file:key")
+    assert SecretResolver(tmp_path, trusted_owner_uid=actual_owner).resolve("file:key").value == "private-value"
+    with pytest.raises(SecretError, match="owner_mismatch"):
+        SecretResolver(tmp_path, trusted_owner_uid=actual_owner + 2).resolve("file:key")
+
+
 def test_resolve_file_relative_returns_value(tmp_path: Path) -> None:
     secret = tmp_path / "model.key"
     secret.write_text("file-secret-value\n", encoding="utf-8")

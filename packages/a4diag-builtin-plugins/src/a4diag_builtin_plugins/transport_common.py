@@ -43,11 +43,13 @@ TRANSPORT_HELPER_EXECUTABLE = "/usr/libexec/a4diag/a4diag-transport-helper"
 API_VERSION = "1.0"
 PLUGIN_TYPE = "transport"
 DEFAULT_OUTPUT_LIMIT_BYTES = 262_144
+MAX_DIAGNOSTIC_BODY_BYTES = 65_536
 IDENTITY_PROBE_TIMEOUT_SECONDS = 15.0
 TRANSPORT_READ_TIMEOUT_SECONDS = 20.0
 MAX_ABS_PATH_LENGTH = 4096
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+_SYSTEMD_UNIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._-]*\.(?:service|socket|timer|target|mount|path)")
 _SHELL_METACHARACTERS = frozenset(";|&$`<>(){}[]*?'\"")
 
 
@@ -196,6 +198,14 @@ class ReadKind(StrEnum):
     OS_RELEASE = "os_release"
     SYSTEMD_VERSION = "systemd_version"
     FILE = "file"
+    SERVICE_STATE = "service_state"
+    SERVICE_LOGS = "service_logs"
+
+
+def validate_systemd_unit(value: str) -> str:
+    if not isinstance(value, str) or len(value) > 256 or not _SYSTEMD_UNIT.fullmatch(value):
+        raise ValueError("unit must be an exact safe systemd unit name")
+    return value
 
 
 class ReadParams(BaseModel):
@@ -203,6 +213,7 @@ class ReadParams(BaseModel):
 
     kind: ReadKind
     path: str | None = None
+    unit: str | None = None
     output_limit_bytes: int = Field(
         default=DEFAULT_OUTPUT_LIMIT_BYTES,
         ge=1,
@@ -216,12 +227,22 @@ class ReadParams(BaseModel):
             return None
         return validate_absolute_path(value, "read path")
 
+    @field_validator("unit")
+    @classmethod
+    def validate_unit(cls, value: str | None) -> str | None:
+        return None if value is None else validate_systemd_unit(value)
+
     @model_validator(mode="after")
     def validate_kind_path(self) -> ReadParams:
         if self.kind is ReadKind.FILE and self.path is None:
             raise ValueError("path is required for file reads")
         if self.kind is not ReadKind.FILE and self.path is not None:
             raise ValueError("path is only valid for file reads")
+        service_read = self.kind in (ReadKind.SERVICE_STATE, ReadKind.SERVICE_LOGS)
+        if service_read and self.unit is None:
+            raise ValueError("unit is required for service reads")
+        if not service_read and self.unit is not None:
+            raise ValueError("unit is only valid for service reads")
         return self
 
 
@@ -315,7 +336,7 @@ class IdentityProbe(Protocol):
 
 
 async def _read_bounded(stream: asyncio.StreamReader, limit: int) -> tuple[str, bool]:
-    """Read at most ``limit`` bytes from a stream without ever draining more."""
+    """Retain at most ``limit`` bytes and drain excess so pipes cannot deadlock."""
     chunks: list[bytes] = []
     total = 0
     truncated = False
@@ -326,9 +347,10 @@ async def _read_bounded(stream: asyncio.StreamReader, limit: int) -> tuple[str, 
                 break
             if total + len(chunk) > limit:
                 truncated = True
-                chunks.append(chunk[: limit - total])
+                if total < limit:
+                    chunks.append(chunk[: limit - total])
                 total = limit
-                break
+                continue
             chunks.append(chunk)
             total += len(chunk)
     except (OSError, ValueError):
@@ -472,12 +494,47 @@ class BaseTransport:
             return TransportResult(
                 ok=False, status=TransportStatus.FAILED, reason=error.code
             )
+        raw = content.encode("utf-8")
+        truncated = truncated or len(raw) > params.output_limit_bytes
+        content = raw[:params.output_limit_bytes].decode("utf-8", errors="ignore")
         return TransportResult(
             ok=True,
             status=TransportStatus.READ_COMPLETED,
             stdout=content,
             data={"kind": params.kind.value, "truncated": truncated},
         )
+
+    async def _read_via_helper(self, params: ReadParams) -> tuple[str, bool]:
+        body_limit = min(params.output_limit_bytes, MAX_DIAGNOSTIC_BODY_BYTES)
+        request: dict[str, Any] = {
+            "method": "read", "kind": params.kind.value,
+            "path": params.path, "limit": body_limit,
+        }
+        if params.unit is not None:
+            request["unit"] = params.unit
+        outcome = await self._run_helper(
+            self._build_helper_argv(), request,
+            timeout_seconds=TRANSPORT_READ_TIMEOUT_SECONDS,
+            # JSON escaping can expand every content byte sixfold. The limit
+            # on the diagnostic body is separate from its response envelope.
+            output_limit_bytes=body_limit * 6 + 4096,
+        )
+        if outcome.timed_out or not outcome.started or outcome.returncode != 0 or outcome.stdout_truncated:
+            raise TransportReadError("read_failed")
+        try:
+            response = json.loads(outcome.stdout)
+            if type(response) is not dict:
+                raise ValueError("read response must be object")
+            if response.get("ok") is False:
+                reason = response.get("reason")
+                raise TransportReadError(reason if isinstance(reason, str) else "read_failed")
+            content, truncated = response["content"], response.get("truncated", False)
+            if not isinstance(content, str) or type(truncated) is not bool:
+                raise ValueError("invalid read response")
+            raw = content.encode("utf-8")
+            return raw[:params.output_limit_bytes].decode("utf-8", errors="ignore"), truncated or len(raw) > params.output_limit_bytes
+        except (ValueError, KeyError, TypeError) as error:
+            raise TransportReadError("read_failed") from error
 
     async def execute_typed(
         self, params: ExecuteTypedParams, invocation: object

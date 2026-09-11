@@ -19,7 +19,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, JsonValue, field_validator, model_validator
 
 from a4diag.plugin_api.manifest import PluginManifest
-from a4diag.secrets import SecretError, SecretResolver
+from a4diag.secrets import SecretError, SecretResolver, credential_name
 
 _SAFE_INSTANCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _FORBIDDEN_EXECUTION_KEYS = frozenset(
@@ -42,6 +42,8 @@ class SystemdController(Protocol):
     def disable(self, unit: str) -> None: ...
     def start(self, unit: str) -> None: ...
     def stop(self, unit: str) -> None: ...
+    def daemon_reload(self) -> None: ...
+    def require_group(self, name: str) -> None: ...
     def health(self, instance: str, socket: str) -> bool: ...
 
 
@@ -97,6 +99,10 @@ class StagedInstance:
     prior_mode: int | None
     prior_enabled: bool
     prior_active: bool
+    prior_service_active: bool = False
+    credential_path: Path | None = None
+    prior_credentials: bytes | None = None
+    credentials: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +113,9 @@ class ActivationReceipt:
     prior_mode: int | None
     prior_enabled: bool
     prior_active: bool
+    prior_service_active: bool = False
+    credential_path: Path | None = None
+    prior_credentials: bytes | None = None
 
 
 class PluginInstanceManager:
@@ -118,16 +127,24 @@ class PluginInstanceManager:
         secrets_root: Path,
         systemd: SystemdController,
         config_gid: int | None = None,
+        systemd_root: Path | None = None,
+        secret_owner_uid: int | None = None,
     ) -> None:
         self._config_root = Path(config_root)
         self._manifest_root = Path(manifest_root)
         self._secrets_root = Path(secrets_root)
         self._systemd = systemd
         self._config_gid = config_gid
+        self._systemd_root = systemd_root
+        self._secret_owner_uid = secret_owner_uid
 
     def stage(self, spec: PluginInstanceSpec) -> StagedInstance:
-        self._validate_manifest(spec)
+        manifest = self._validate_manifest(spec)
         self._validate_ticket_key(spec)
+        payload_config = spec.model_dump(mode="json", exclude={"instance"})
+        credential_path, prior_credentials, credentials = self._credential_config(
+            spec, payload_config, network=bool(set(manifest.network_access) - {"none"})
+        )
 
         self._config_root.mkdir(parents=True, exist_ok=True)
         final_path = self._config_root / f"{spec.instance}.yaml"
@@ -145,9 +162,10 @@ class PluginInstanceManager:
         unit = self._socket_unit(spec.instance)
         prior_enabled = self._systemd.is_enabled(unit)
         prior_active = self._systemd.is_active(unit)
+        prior_service_active = self._systemd.is_active(f"a4diag-plugin@{spec.instance}.service")
         staged_path = self._config_root / f".{spec.instance}.yaml.stage.{os.getpid()}"
         payload = yaml.safe_dump(
-            spec.model_dump(mode="json", exclude={"instance"}),
+            payload_config,
             allow_unicode=False,
             sort_keys=True,
         ).encode("utf-8")
@@ -172,6 +190,10 @@ class PluginInstanceManager:
             prior_mode=prior_mode,
             prior_enabled=prior_enabled,
             prior_active=prior_active,
+            prior_service_active=prior_service_active,
+            credential_path=credential_path,
+            prior_credentials=prior_credentials,
+            credentials=credentials,
         )
 
     def activate(self, staged: StagedInstance) -> ActivationReceipt:
@@ -184,18 +206,31 @@ class PluginInstanceManager:
             prior_mode=staged.prior_mode,
             prior_enabled=staged.prior_enabled,
             prior_active=staged.prior_active,
+            prior_service_active=staged.prior_service_active,
+            credential_path=staged.credential_path,
+            prior_credentials=staged.prior_credentials,
         )
         unit = self._socket_unit(staged.spec.instance)
         try:
+            service = f"a4diag-plugin@{staged.spec.instance}.service"
+            if self._systemd.is_active(unit):
+                self._systemd.stop(unit)
+            if self._systemd.is_active(service):
+                self._systemd.stop(service)
             os.replace(staged.staged_path, staged.final_path)
             os.chmod(staged.final_path, 0o640)
             if self._config_gid is not None:
                 os.chown(staged.final_path, -1, self._config_gid)
             self._fsync_directory(self._config_root)
+            if staged.credential_path is not None:
+                self._write_credentials(staged.credential_path, staged.credentials)
+                self._systemd.daemon_reload()
             if not self._systemd.is_enabled(unit):
                 self._systemd.enable(unit)
             if not self._systemd.is_active(unit):
                 self._systemd.start(unit)
+            if staged.prior_service_active:
+                self._systemd.start(service)
             if not self._systemd.health(staged.spec.instance, staged.spec.socket):
                 raise InstanceActivationError("plugin_health_failed")
             return receipt
@@ -208,7 +243,7 @@ class PluginInstanceManager:
     def rollback(self, receipt: ActivationReceipt) -> None:
         self._restore(receipt)
 
-    def _validate_manifest(self, spec: PluginInstanceSpec) -> None:
+    def _validate_manifest(self, spec: PluginInstanceSpec) -> PluginManifest:
         path = self._manifest_root / f"{spec.manifest}.json"
         if path.is_symlink() or not path.is_file():
             raise InstanceValidationError("manifest_not_installed")
@@ -218,14 +253,23 @@ class PluginInstanceManager:
             raise InstanceValidationError("manifest_invalid") from exc
         if manifest.name != spec.manifest:
             raise InstanceValidationError("manifest_identity_mismatch")
+        return manifest
 
     def _validate_ticket_key(self, spec: PluginInstanceSpec) -> None:
+        if spec.manifest.startswith(("model-", "notification-")):
+            return
         try:
-            SecretResolver(self._secrets_root, env={}).resolve(spec.ticket_key_ref)
+            SecretResolver(self._secrets_root, env={}, trusted_owner_uid=self._secret_owner_uid).resolve(spec.ticket_key_ref)
         except SecretError as exc:
             raise InstanceValidationError("ticket_key_invalid") from exc
 
     def _restore(self, receipt: ActivationReceipt) -> None:
+        service = f"a4diag-plugin@{receipt.instance}.service"
+        socket_unit = self._socket_unit(receipt.instance)
+        if self._systemd.is_active(socket_unit):
+            self._systemd.stop(socket_unit)
+        if self._systemd.is_active(service):
+            self._systemd.stop(service)
         if receipt.prior_content is None:
             receipt.final_path.unlink(missing_ok=True)
         else:
@@ -246,11 +290,88 @@ class PluginInstanceManager:
             if self._config_gid is not None:
                 os.chown(receipt.final_path, -1, self._config_gid)
         self._fsync_directory(receipt.final_path.parent)
+        if receipt.credential_path is not None:
+            self._write_credentials(receipt.credential_path, receipt.prior_credentials)
+            self._systemd.daemon_reload()
         self._restore_systemd(
             self._socket_unit(receipt.instance),
             enabled=receipt.prior_enabled,
             active=receipt.prior_active,
         )
+        if receipt.prior_service_active:
+            self._systemd.start(service)
+
+    def _credential_config(self, spec: PluginInstanceSpec, payload: dict, *, network: bool) -> tuple[Path | None, bytes | None, bytes | None]:
+        if self._systemd_root is None:
+            return None, None, None
+        if spec.manifest == "transport-local":
+            try:
+                self._systemd.require_group("a4diag-target")
+            except KeyError as error:
+                raise InstanceValidationError("target_runtime_group_missing") from error
+        references: set[str] = set()
+        if not spec.manifest.startswith(("model-", "notification-")):
+            references.add(spec.ticket_key_ref)
+
+        def collect(value: object) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key.endswith("_ref") and isinstance(item, str) and item.startswith("file:"):
+                        references.add(item)
+                    else:
+                        collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(spec.config)
+        if spec.manifest == "transport-ssh":
+            for field in ("identity_file", "known_hosts"):
+                if field not in spec.config:
+                    continue
+                try:
+                    relative = Path(str(spec.config[field])).relative_to(self._secrets_root).as_posix()
+                except ValueError as error:
+                    raise InstanceValidationError("ssh_secret_outside_root") from error
+                reference = "file:" + relative
+                references.add(reference)
+                payload["config"][field] = f"/run/credentials/a4diag-plugin@{spec.instance}.service/{credential_name(reference)}"
+        lines = ["[Service]", "LoadCredential="]
+        if spec.manifest == "transport-local":
+            lines.append("SupplementaryGroups=a4diag-target")
+        if network:
+            lines.append("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6")
+        resolver = SecretResolver(self._secrets_root, env={}, trusted_owner_uid=self._secret_owner_uid)
+        for reference in sorted(references):
+            try:
+                resolver.resolve(reference)
+            except SecretError as error:
+                raise InstanceValidationError("instance_secret_invalid") from error
+            source = str(self._secrets_root / reference[5:])
+            source = source.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+            if any(ord(char) < 32 for char in source):
+                raise InstanceValidationError("unsafe_secret_path")
+            lines.append(f'LoadCredential="{credential_name(reference)}:{source}"')
+        path = self._systemd_root / f"a4diag-plugin@{spec.instance}.service.d" / "credentials.conf"
+        if path.is_symlink() or path.parent.is_symlink():
+            raise InstanceValidationError("credential_config_symlink")
+        prior = path.read_bytes() if path.exists() else None
+        return path, prior, ("\n".join(lines) + "\n").encode("utf-8")
+
+    @staticmethod
+    def _write_credentials(path: Path, content: bytes | None) -> None:
+        if content is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".credentials.{os.getpid()}")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        PluginInstanceManager._fsync_directory(path.parent)
 
     def _restore_systemd(self, unit: str, *, enabled: bool, active: bool) -> None:
         if not active and self._systemd.is_active(unit):

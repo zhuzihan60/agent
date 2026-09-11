@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -23,10 +22,8 @@ from a4diag_builtin_plugins.transport_common import (
     ReadParams,
     SubprocessRunner,
     TRANSPORT_HELPER_EXECUTABLE,
-    TRANSPORT_READ_TIMEOUT_SECONDS,
     TargetIdentity,
     TransportIdentityError,
-    TransportReadError,
     validate_absolute_path,
     validate_sha256_digest,
 )
@@ -152,27 +149,7 @@ class SshTransport(BaseTransport):
         return build_ssh_argv(self._config)
 
     async def _perform_read(self, params: ReadParams) -> tuple[str, bool]:
-        request: dict[str, Any] = {
-            "method": "read",
-            "kind": params.kind.value,
-            "path": params.path,
-            "limit": int(params.output_limit_bytes),
-        }
-        outcome = await self._run_helper(
-            build_ssh_argv(self._config),
-            request,
-            timeout_seconds=TRANSPORT_READ_TIMEOUT_SECONDS,
-            output_limit_bytes=int(params.output_limit_bytes),
-        )
-        if outcome.timed_out or not outcome.started or outcome.returncode != 0:
-            raise TransportReadError("read_failed")
-        try:
-            payload = json.loads(outcome.stdout)
-            if type(payload) is not dict:
-                raise ValueError("read response must be an object")
-            return str(payload["content"]), bool(payload.get("truncated", False))
-        except (ValueError, KeyError, TypeError) as error:
-            raise TransportReadError("read_failed") from error
+        return await self._read_via_helper(params)
 
 
 def main() -> None:

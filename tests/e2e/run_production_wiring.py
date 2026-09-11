@@ -11,8 +11,10 @@ import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ from a4diag.domain import Operation, Plan, Risk, canonical_json_bytes
 from a4diag.plugin_admin import Authorizer as PluginAuthorizer, PluginAdmin
 from a4diag.plugin_api.target_protocol import TargetLifecycle, TargetRequest, TargetSigner
 from a4diag.plugin_api.ticket import effect_payload_digest
-from a4diag.plugin_ports import build_rpc_plugin_ports
+from a4diag.plugin_ports import _RpcModelPort, build_rpc_plugin_ports
 from a4diag.plugin_registry import PluginPin, PluginRegistry
 from a4diag.runtime import (
     Runtime,
@@ -36,6 +38,9 @@ from a4diag.runtime import (
     build_runtime,
 )
 from a4diag.workflow import PluginPorts
+from a4diag_builtin_plugins.model_openai import (
+    HttpResult, ModelConfig, ModelCriticParams, ModelEvidenceParams, ModelPlugin,
+)
 from a4diag_builtin_plugins.transport_common import identity_fingerprint
 from a4diag_target.policy import TargetPolicy
 from a4diag_target.server import probe_identity
@@ -83,33 +88,127 @@ class _LoseFirstApplyResponse:
         return result
 
 
-class HttpModel:
-    """Deterministic model test double whose three calls cross real HTTP."""
+class _ModelHttpTransport:
+    def post(self, url: str, headers: dict[str, str], body: bytes,
+             *, timeout_seconds: float) -> HttpResult:
+        request = urllib.request.Request(
+            url, data=body, headers=headers, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return HttpResult(response.status, response.read().decode("utf-8"))
 
-    def __init__(self, url: str, fingerprint: str, managed: Path) -> None:
-        self.url = url
-        self.fingerprint = fingerprint
+
+class _NoModelSecrets:
+    def resolve(self, _ref: str) -> str:
+        raise AssertionError("offline model fixture must not resolve provider credentials")
+
+
+class _ModelPluginClient:
+    """Use the production port adapter with the actual typed plugin in process."""
+
+    def __init__(self, plugin: ModelPlugin) -> None:
+        self.plugin = plugin
+
+    async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        params_type = ModelCriticParams if method == "critic" else ModelEvidenceParams
+        result = getattr(self.plugin, method)(params_type.model_validate(params))
+        return result.model_dump(mode="json")
+
+
+class ModelHttpFixture:
+    """Offline Ollama fixture plus business HTTP health tied to real file state.
+
+    The fixture supplies deterministic responses; the real ModelPlugin builds
+    requests and validates every response. This does not evaluate live models.
+    """
+
+    def __init__(self, managed: Path, port: int = 0) -> None:
         self.managed = managed
         self.mode = "low"
+        self.requests: list[dict[str, Any]] = []
+        self.health_results: list[bool] = []
+        fixture = self
 
-    def _post(self, phase: str) -> None:
-        request = urllib.request.Request(
-            self.url,
-            data=canonical_json_bytes({"phase": phase, "mode": self.mode}),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *args: object) -> None:
+                pass
+
+            def _respond(self, status: int, body: bytes) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:
+                try:
+                    if self.path != "/api/chat":
+                        raise ValueError("unexpected model endpoint")
+                    payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    messages = payload["messages"]
+                    schema = json.loads(messages[0]["content"].split("JSON Schema:\n", 1)[1])
+                    if messages[0]["role"] != "system" or payload["format"] != "json":
+                        raise ValueError("missing structured request")
+                    if schema.get("additionalProperties") is not False:
+                        raise ValueError("missing strict schema")
+                    envelope = json.loads(messages[1]["content"])
+                    fixture.requests.append(payload)
+                    response = fixture._response(envelope)
+                    self._respond(200, canonical_json_bytes({
+                        "message": {"role": "assistant", "content": json.dumps(response)},
+                        "done": True,
+                    }))
+                except (KeyError, ValueError, IndexError, TypeError):
+                    self._respond(400, b'{"error":"invalid fixture request"}')
+
+            def do_GET(self) -> None:
+                resource = fixture.managed / f"{fixture.mode}.conf"
+                healthy = (
+                    self.path == "/health" and fixture.mode != "unhealthy"
+                    and resource.is_file()
+                    and resource.read_bytes() == f"after-{fixture.mode}\n".encode()
+                )
+                fixture.health_results.append(healthy)
+                self._respond(200 if healthy else 503,
+                              b'{"state":"recovered"}' if healthy else b'{"state":"unhealthy"}')
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        self.plugin = ModelPlugin(
+            http=_ModelHttpTransport(), secrets=_NoModelSecrets(),
+            config=ModelConfig(base_url=self.url, model="offline-e2e", api_style="ollama"),
         )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            if response.status != 200:
-                raise RuntimeError("model_fixture_failed")
-            response.read()
 
-    def diagnose(self, _target: object, _evidence: object) -> dict[str, object]:
-        self._post("diagnose")
-        return {"cause": "e2e managed file drift"}
+    def __enter__(self) -> ModelHttpFixture:
+        self.thread.start()
+        return self
 
-    def plan(self, target: object, _evidence: object, _diagnosis: object) -> Plan:
-        self._post("plan")
+    def __exit__(self, *_args: object) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def _response(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        if envelope.get("probe"):
+            return {"ok": True, "capabilities": ["structured"]}
+        task = envelope["task"]
+        if task == "diagnose":
+            source_id = f"{self.mode}-file"
+            observed = any(
+                row.get("source_id") == source_id and row.get("available") is True
+                for row in envelope["evidence"]["observations"]
+            )
+            # The protected-path scenario reaches the existing policy guard;
+            # it never tries to register or read protected target files.
+            missing = [] if observed or self.mode == "protected" else [source_id]
+            return {"cause": "e2e managed file drift", "confidence": 0.95,
+                    "missing_evidence": missing, "recommended_actions": ["files.replace_managed_file"]}
+        if task == "critic":
+            return {"risk": "high" if self.mode == "high" else "low", "complete": True,
+                    "issues": [], "verify_suggestions": [], "undo_suggestions": []}
+        if task != "plan":
+            raise ValueError("unknown fixture task")
         resource = self.managed / f"{self.mode}.conf"
         if self.mode == "protected":
             resource = Path("/etc/ssh/sshd_config")
@@ -118,21 +217,13 @@ class HttpModel:
         operation = Operation(
             capability="files",
             action="replace_managed_file",
-            resource=str(resource),
+            resource=resource.as_posix(),
             parameters={"content": base64.b64encode(content).decode(), "mode": 0o640},
             model_risk=risk,
             verify={"content_sha256": hashlib.sha256(content).hexdigest()},
             undo={"restore": True},
         )
-        return Plan(
-            target_id=getattr(target, "id"),
-            target_fingerprint=self.fingerprint,
-            operations=(operation,),
-        )
-
-    def critic(self, _target: object, _evidence: object, _plan: Plan) -> Risk:
-        self._post("critic")
-        return Risk.HIGH if self.mode == "high" else Risk.LOW
+        return {"reasoning": "restore the managed file", "operations": [operation.model_dump(mode="json")]}
 
 
 class HttpNotifier:
@@ -290,7 +381,7 @@ def main() -> int:
         HELPER.parent,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    for name in ("recovery", "low", "high", "replay"):
+    for name in ("recovery", "low", "high", "replay", "unhealthy"):
         (managed / f"{name}.conf").write_bytes(b"before\n")
         os.chmod(managed / f"{name}.conf", 0o600)
     controller_sentinel = E2E / "controller-sentinel"
@@ -420,16 +511,25 @@ def main() -> int:
             "identity_file_ref": "file:e2e-ssh-unused", "known_hosts_ref": "file:e2e-known-unused",
             "operation_signing_key_ref": "file:e2e-operation.pem", "host_key_sha256": host_digest,
             "write_enabled": True, "auto_execute_low": True, "notification_required": True,
+            "evidence_sources": [
+                {"id": f"{name}-file", "kind": "file", "resource": str(managed / f"{name}.conf"),
+                 "initial": False, "max_bytes": 1024}
+                for name in ("recovery", "low", "high", "unhealthy")
+            ],
+            "recovery_checks": [{
+                "id": "business-http", "kind": "http", "resource": "http://127.0.0.1:18081/health",
+                "expected_status": 200, "body_contains": "recovered", "attempts": 1,
+            }],
             "capabilities": [{"name": "files", "actions": ["replace_managed_file"],
                               "resources": [f"{managed}/**"]}],
         }],
         "plugins": [pin.name for pin in pins], "model": None, "notifications": [],
     }, sort_keys=False), encoding="utf-8")
 
-    model_count = E2E / "model.count"
     notification_count = E2E / "notification.count"
     processes: list[subprocess.Popen[bytes]] = []
     runtime = None
+    model_fixture = None
     try:
         run(["/usr/bin/systemctl", "daemon-reload"])
         run(["/usr/bin/systemctl", "start", TARGET_SOCKET_UNIT])
@@ -440,16 +540,19 @@ def main() -> int:
         time.sleep(0.25)
         if sshd.poll() is not None:
             raise RuntimeError(sshd.stderr.read().decode(errors="replace"))
-        processes.append(start_fixture("model_server.py", 18081, model_count))
+        model_fixture = ModelHttpFixture(managed, port=18081)
+        model_fixture.__enter__()
+        if model_fixture.plugin.capability_probe().write_capable is not True:
+            raise RuntimeError("actual model plugin failed structured-output probe")
         processes.append(start_fixture("notification_server.py", 18082, notification_count))
         plugin = start_plugin()
         processes.append(plugin)
 
-        model = HttpModel("http://127.0.0.1:18081", fingerprint, managed)
         notifier = HttpNotifier("http://127.0.0.1:18082")
 
         def ports_factory(settings: object, registry: PluginRegistry) -> PluginPorts:
             real = build_rpc_plugin_ports(settings, registry)  # type: ignore[arg-type]
+            model = _RpcModelPort(_ModelPluginClient(model_fixture.plugin), registry)  # type: ignore[arg-type]
             return PluginPorts(model=model, collector=real.collector, executor=real.executor, notifier=notifier)
 
         paths = {name: E2E / name for name in ("audit.jsonl", "checkpoints.sqlite3", "transactions.sqlite3", "approvals.sqlite3")}
@@ -575,7 +678,7 @@ def main() -> int:
         if not service_hardened or not managed_root_requires_drop_in:
             raise RuntimeError(f"target service hardening missing: {hardened}")
 
-        model.mode = "recovery"
+        model_fixture.mode = "recovery"
         recovery_unknown = runtime.handle(
             {
                 "event_id": "recovery-tx",
@@ -611,9 +714,16 @@ def main() -> int:
             and (managed / "recovery.conf").stat().st_ino == recovery_inode
         )
 
-        model.mode = "low"
+        model_fixture.mode = "low"
         low = runtime.handle({"event_id": "low-tx", "target_id": TARGET_ID, "request": {"fault": "low"}})
         low_applied = low.status == "succeeded" and (managed / "low.conf").read_bytes() == b"after-low\n"
+        evidence_loop_complete = (
+            any(row.get("source_id") == "low-file" and row.get("available") is True
+                for row in low.report.get("evidence", []))
+            and low.report.get("recovery_result", {}).get("ok") is True
+        )
+        if not evidence_loop_complete:
+            raise RuntimeError(f"evidence/HTTP recovery loop failed: {low.report}")
 
         plugin.terminate(); plugin.wait(timeout=5); processes.remove(plugin)
         plugin = start_plugin(); processes.append(plugin)
@@ -633,7 +743,7 @@ def main() -> int:
         ))
         rollback_exact = undone.get("ok") is True and (managed / "low.conf").read_bytes() == b"before\n" and (managed / "low.conf").stat().st_mode & 0o777 == 0o600
 
-        model.mode = "high"
+        model_fixture.mode = "high"
         before_high = (managed / "high.conf").read_bytes()
         pending_high = runtime.handle(
             {"event_id": "high-tx", "target_id": TARGET_ID, "request": {"fault": "high"}}
@@ -665,7 +775,21 @@ def main() -> int:
             and receipt.status == "approved"
         )
 
-        model.mode = "protected"
+        model_fixture.mode = "unhealthy"
+        unhealthy = runtime.handle({
+            "event_id": "unhealthy-tx", "target_id": TARGET_ID,
+            "request": {"fault": "business HTTP remains unhealthy"},
+        })
+        unhealthy_rolled_back = (
+            unhealthy.status == "rollback_succeeded"
+            and (managed / "unhealthy.conf").read_bytes() == b"before\n"
+            and stat.S_IMODE((managed / "unhealthy.conf").stat().st_mode) == 0o600
+            and unhealthy.report.get("recovery_result", {}).get("ok") is False
+        )
+        if not unhealthy_rolled_back:
+            raise RuntimeError(f"unhealthy business check did not restore target: {unhealthy.report}")
+
+        model_fixture.mode = "protected"
         protected_before = Path("/etc/ssh/sshd_config").read_bytes()
         protected_result = runtime.handle({"event_id": "protected-tx", "target_id": TARGET_ID, "request": {"fault": "protected"}})
         protected_effects = 0 if protected_result.status == "policy_denied" and Path("/etc/ssh/sshd_config").read_bytes() == protected_before else 1
@@ -755,14 +879,21 @@ def main() -> int:
                 "fresh_runtime": executor_recreated,
                 "durable_pending_discovered": recovery_discovered,
                 "effect_was_not_replayed": runtime_recovery_succeeded,
+                "registered_evidence_collected": evidence_loop_complete,
+                "http_failure_restored_file": unhealthy_rolled_back,
+                "http_failure_report": unhealthy.report.get("recovery_result"),
             },
-            "model": {"http_calls": int(model_count.read_text())},
+            "model": {"http_calls": len(model_fixture.requests), "actual_plugin": True,
+                      "provider": "offline Ollama fixture", "paid_live_model_tested": False,
+                      "http_health_checks": len(model_fixture.health_results)},
             "notification": {"http_calls": int(notification_count.read_text())},
         }
         (E2E / "evidence.json").write_text(json.dumps(evidence, sort_keys=True, indent=2), encoding="utf-8")
     finally:
         if runtime is not None:
             runtime.close()
+        if model_fixture is not None:
+            model_fixture.__exit__()
         for process in reversed(processes):
             if process.poll() is None:
                 process.terminate()
