@@ -279,7 +279,8 @@ def test_ssh_instance_receives_only_its_own_credentials(tmp_path: Path) -> None:
     assert config["config"]["identity_file"] == "/run/credentials/a4diag-plugin@transport-lab-node-1.service/" + credential_name("file:id_ed25519")
     assert config["config"]["known_hosts"] == "/run/credentials/a4diag-plugin@transport-lab-node-1.service/" + credential_name("file:known_hosts")
     dropin = receipt.credential_path.read_text(encoding="utf-8")
-    assert dropin.count('LoadCredential="') == 3
+    assert sum(line.startswith("LoadCredential=") and line != "LoadCredential="
+               for line in dropin.splitlines()) == 3
     assert "core-policy.key" not in dropin
 
 
@@ -303,3 +304,27 @@ def test_only_local_transport_gets_executor_socket_group(tmp_path: Path) -> None
     systemd.available_groups.clear()
     with pytest.raises(InstanceValidationError, match="target_runtime_group_missing"):
         manager.stage(spec)
+
+
+def test_loadcredential_parser_receives_literal_id_and_source(tmp_path: Path) -> None:
+    from a4diag.secrets import credential_name
+
+    systemd = FakeSystemd()
+    _manager(tmp_path, systemd)
+    secrets = tmp_path / "secrets with %i"
+    secrets.mkdir()
+    source = secrets / "target.key"
+    source.write_text("parser-boundary-secret", encoding="utf-8")
+    source.chmod(0o600)
+    manager = PluginInstanceManager(config_root=tmp_path / "configs", manifest_root=tmp_path / "manifests",
+        secrets_root=secrets, systemd=systemd, systemd_root=tmp_path / "units")
+    staged = manager.stage(_spec())
+    directive = next(line for line in staged.credentials.decode().splitlines()
+                     if line.startswith("LoadCredential=") and line != "LoadCredential=")
+    # systemd v255 config_parse_load_credential splits on ':' without
+    # EXTRACT_UNQUOTE, then expands unit specifiers in the literal source path.
+    # https://github.com/systemd/systemd/blob/v255/src/core/load-fragment.c#L4511-L4541
+    identifier, raw_source = directive.removeprefix("LoadCredential=").split(":", 1)
+    assert identifier == credential_name("file:target.key")
+    assert raw_source.replace("%%", "%") == str(source)
+    assert Path(raw_source.replace("%%", "%")).read_text(encoding="utf-8") == "parser-boundary-secret"

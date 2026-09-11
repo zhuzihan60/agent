@@ -348,10 +348,12 @@ class PluginInstanceManager:
             except SecretError as error:
                 raise InstanceValidationError("instance_secret_invalid") from error
             source = str(self._secrets_root / reference[5:])
-            source = source.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
-            if any(ord(char) < 32 for char in source):
+            if any(ord(char) < 32 or ord(char) == 127 for char in source):
                 raise InstanceValidationError("unsafe_secret_path")
-            lines.append(f'LoadCredential="{credential_name(reference)}:{source}"')
+            # LoadCredential's colon parser does not unquote the value or
+            # unescape the source path; only unit specifiers need escaping.
+            source = source.replace("%", "%%")
+            lines.append(f"LoadCredential={credential_name(reference)}:{source}")
         path = self._systemd_root / f"a4diag-plugin@{spec.instance}.service.d" / "credentials.conf"
         if path.is_symlink() or path.parent.is_symlink():
             raise InstanceValidationError("credential_config_symlink")
