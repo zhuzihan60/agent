@@ -219,9 +219,12 @@ def _reject_execution_keys(value: object, path: str = "parameters") -> None:
 def _auth_headers(config: ModelConfig, secrets: SecretResolver) -> dict[str, str]:
     if config.api_key_ref is None:
         return {}
-    key = secrets.resolve(config.api_key_ref)
-    if not key:
-        return {}
+    try:
+        key = secrets.resolve(config.api_key_ref)
+    except Exception:
+        raise ModelProtocolError("secret_unavailable") from None
+    if not isinstance(key, str) or not key:
+        raise ModelProtocolError("secret_unavailable")
     if config.api_style == "azure":
         return {"api-key": key}
     return {"Authorization": f"Bearer {key}"}
@@ -268,7 +271,11 @@ class ProbeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     ok: bool = Field(strict=True)
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description='Include the exact token "structured" when this JSON '
+        'structured-output probe succeeds; otherwise return ok=false.',
+    )
 
 
 class DiagnosisResult(BaseModel):

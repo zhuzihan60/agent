@@ -11,6 +11,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+import struct
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -52,6 +55,108 @@ def test_systemd_credentials_resolve_only_delivered_refs(tmp_path: Path) -> None
     assert resolver.resolve("file:providers/model.key").value == "delivered-secret"
     with pytest.raises(SecretError, match="file_missing"):
         resolver.resolve("file:core-policy.key")
+
+
+def _systemd_acl(uid: int = 61123) -> bytes:
+    # Linux POSIX ACL xattr v2: owner:r, named user:r, group:---,
+    # mask:r, other:---. The group mode bits represent the ACL mask.
+    return struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in (
+        (1, 4, 0xFFFFFFFF), (2, 4, uid), (4, 0, 0xFFFFFFFF),
+        (16, 4, 0xFFFFFFFF), (32, 0, 0xFFFFFFFF),
+    ))
+
+
+def _credential_with_acl_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, acl: bytes | None):
+    from a4diag import secrets
+
+    candidate = tmp_path / secrets.credential_name("file:ticket.key")
+    candidate.write_text("acl-delivered-value", encoding="utf-8")
+    original_lstat = Path.lstat
+
+    def credential_stat(info: os.stat_result) -> os.stat_result:
+        values = list(info)
+        values[0] = stat.S_IFREG | 0o440
+        values[4] = 0
+        return os.stat_result(values)
+
+    def lstat(path: Path):
+        info = original_lstat(path)
+        return credential_stat(info) if path == candidate else info
+
+    class KernelMetadata:
+        name = "posix"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        def getuid(self):
+            return 61123
+
+        def fstat(self, fd):
+            return credential_stat(os.fstat(fd))
+
+        def getxattr(self, fd, name):
+            assert isinstance(fd, int), "ACL must be checked on the opened file"
+            assert name == "system.posix_acl_access"
+            if acl is None:
+                raise OSError("ACL unavailable")
+            return acl
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(secrets, "os", KernelMetadata())
+    return SecretResolver(env={"CREDENTIALS_DIRECTORY": str(tmp_path)}), candidate
+
+
+def test_systemd_root_owned_0440_credential_requires_only_service_uid_read_acl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver, _candidate = _credential_with_acl_metadata(tmp_path, monkeypatch, _systemd_acl())
+    assert resolver.resolve("file:ticket.key").value == "acl-delivered-value"
+
+
+@pytest.mark.parametrize("acl", [
+    None, b"", b"\x03\x00\x00\x00" + _systemd_acl()[4:], _systemd_acl()[:-1],
+    _systemd_acl(61124),
+    _systemd_acl() + struct.pack("<HHI", 2, 4, 61124),
+    _systemd_acl().replace(struct.pack("<HHI", 4, 0, 0xFFFFFFFF), struct.pack("<HHI", 4, 4, 0xFFFFFFFF)),
+    _systemd_acl().replace(struct.pack("<HHI", 32, 0, 0xFFFFFFFF), struct.pack("<HHI", 32, 4, 0xFFFFFFFF)),
+    _systemd_acl().replace(struct.pack("<HHI", 2, 4, 61123), struct.pack("<HHI", 2, 6, 61123)),
+])
+def test_systemd_credential_rejects_missing_malformed_or_broader_acl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, acl: bytes | None) -> None:
+    resolver, _candidate = _credential_with_acl_metadata(tmp_path, monkeypatch, acl)
+    with pytest.raises(SecretError, match="credential_acl_invalid"):
+        resolver.resolve("file:ticket.key")
+
+
+def test_ordinary_file_does_not_accept_systemd_acl_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _resolver, candidate = _credential_with_acl_metadata(tmp_path, monkeypatch, _systemd_acl())
+    with pytest.raises(SecretError, match="mode_0600_required"):
+        SecretResolver(tmp_path, trusted_owner_uid=0).resolve("file:" + candidate.name)
+
+
+@pytest.mark.skipif(os.name != "posix" or not hasattr(os, "getxattr") or os.getuid() != 0, reason="native Linux ACL test requires root")
+def test_native_systemd_acl_can_be_resolved_by_unprivileged_service_uid() -> None:
+    from a4diag.secrets import credential_name
+
+    with tempfile.TemporaryDirectory(prefix="a4diag-credential-acl-", dir="/tmp") as directory:
+        root = Path(directory)
+        root.chmod(0o711)
+        credential = root / credential_name("file:ticket.key")
+        credential.write_text("native-acl-test-value", encoding="utf-8")
+        credential.chmod(0o400)
+        os.setxattr(credential, "system.posix_acl_access", _systemd_acl())
+        assert credential.stat().st_uid == 0
+        assert stat.S_IMODE(credential.stat().st_mode) == 0o440
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.setgroups([])
+                os.setgid(61123)
+                os.setuid(61123)
+                value = SecretResolver(env={"CREDENTIALS_DIRECTORY": directory}).resolve("file:ticket.key").value
+                os._exit(0 if value == "native-acl-test-value" else 1)
+            except BaseException:
+                os._exit(2)
+        _pid, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
 
 
 def test_explicit_secret_root_ignores_service_credentials(tmp_path: Path) -> None:

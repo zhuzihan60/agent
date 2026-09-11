@@ -6,6 +6,10 @@ A secret reference is ``file:<relative-name>`` beneath the secret root
 must be regular files owned by the current user with mode 0600, and no path
 component may be a symlink. Only the resolved value is ever returned; nothing
 is logged or echoed.
+
+Systemd credentials additionally support its root-owned, read-only ACL form:
+only the service UID may have named read access; the owning group and others
+have none. ACLs are verified on the opened descriptor before reading content.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import os
 import hashlib
 import re
 import stat
+import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -87,18 +92,14 @@ class SecretResolver:
             info = candidate.lstat()
         except OSError:
             raise SecretError("file_missing", str(relative)) from None
-        if not stat.S_ISREG(info.st_mode):
-            raise SecretError("not_regular_file", str(relative))
-        if os.name == "posix":
-            allowed_modes = {0o400, 0o600} if self._credentials else {0o600}
-            if (info.st_mode & 0o777) not in allowed_modes:
-                raise SecretError("mode_0600_required", str(relative))
-            owner = self._trusted_owner_uid if self._trusted_owner_uid is not None else os.getuid()
-            if info.st_uid != owner:
-                raise SecretError("owner_mismatch", str(relative))
+        self._check_file_access(info, str(relative))
         try:
-            fd = os.open(str(candidate), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            fd = os.open(
+                str(candidate), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
             with os.fdopen(fd, "rb") as handle:
+                self._check_file_access(os.fstat(fd), str(relative), descriptor=fd)
                 content = handle.read(MAX_SECRET_BYTES + 1)
         except OSError:
             raise SecretError("read_failed", str(relative)) from None
@@ -113,6 +114,45 @@ class SecretResolver:
             source="file",
             deprecated=False,
         )
+
+    def _check_file_access(
+        self, info: os.stat_result, relative: str, *, descriptor: int | None = None,
+    ) -> None:
+        if not stat.S_ISREG(info.st_mode):
+            raise SecretError("not_regular_file", relative)
+        if os.name != "posix":
+            return
+        mode = stat.S_IMODE(info.st_mode)
+        if self._credentials and info.st_uid == 0 and mode == 0o440:
+            # systemd write_credential() retains root ownership and adds a
+            # named-user ACL. The apparent group-read bit is its ACL mask.
+            # Defer ACL lookup until the same file descriptor will be read.
+            if descriptor is not None:
+                self._check_credential_acl(descriptor, relative)
+            return
+        allowed_modes = {0o400, 0o600} if self._credentials else {0o600}
+        if mode not in allowed_modes:
+            raise SecretError("mode_0600_required", relative)
+        owner = self._trusted_owner_uid if self._trusted_owner_uid is not None else os.getuid()
+        if info.st_uid != owner:
+            raise SecretError("owner_mismatch", relative)
+
+    @staticmethod
+    def _check_credential_acl(descriptor: int, relative: str) -> None:
+        try:
+            acl = os.getxattr(descriptor, "system.posix_acl_access")
+        except (AttributeError, OSError):
+            raise SecretError("credential_acl_invalid", relative) from None
+        # Linux POSIX ACL xattr v2: a 32-bit version followed by five entries
+        # (16-bit tag, 16-bit permissions, 32-bit qualifier), little-endian.
+        # Accept exactly systemd's root:r, service:r, group:0, mask:r, other:0.
+        expected = {
+            (1, 4, 0xFFFFFFFF), (2, 4, os.getuid()), (4, 0, 0xFFFFFFFF),
+            (16, 4, 0xFFFFFFFF), (32, 0, 0xFFFFFFFF),
+        }
+        if (len(acl) != 44 or acl[:4] != struct.pack("<I", 2)
+                or set(struct.iter_unpack("<HHI", acl[4:])) != expected):
+            raise SecretError("credential_acl_invalid", relative)
 
     def _resolve_env(self, name: str) -> ResolvedSecret:
         if not isinstance(name, str) or not _ENV_NAME.fullmatch(name):
