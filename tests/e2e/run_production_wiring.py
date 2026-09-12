@@ -302,7 +302,7 @@ def signed_request(*, signer: TargetSigner, fingerprint: str, operation: Operati
 def make_registry() -> tuple[Path, tuple[PluginPin, ...], Path]:
     manifest_root = E2E / "installed-plugins"
     manifest_root.mkdir(parents=True)
-    artifact = manifest_root / "a4diag_builtin_plugins-0.4.3.whl"
+    artifact = manifest_root / "a4diag_builtin_plugins-0.5.0.whl"
     artifact.write_bytes(b"e2e installed built-in wheel")
     artifact_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     pins: list[PluginPin] = []

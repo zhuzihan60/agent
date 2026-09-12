@@ -1,4 +1,6 @@
-# A4Diag v0.4.3 安装与升级指南
+# A4Diag v0.5.0 安装与升级指南
+
+v0.5.0 正在本分支准备发布。正式发布前，`releases/latest` 仍指向已发布的旧版本。升级前请阅读 [v0.5.0 发布说明](release/v0.5.0.md)，先升级目标端，再升级控制端并重新初始化插件配置。
 
 A4Diag 由两个独立部分组成：
 
@@ -14,15 +16,14 @@ A4Diag 由两个独立部分组成：
 - `curl`、`openssl`、`sha256sum`、`tar`
 - root 权限
 
-本分支新增的服务/HTTP 恢复闭环要求控制端使用 **systemd 247+**，以支持插件独立凭据。下面发行版列表是 v0.4.3 的历史验证范围；Rocky/AlmaLinux 8 等自带较旧 systemd 的环境，当前控制端安装器会明确拒绝，CI 只验证拒绝行为。目标端的兼容范围单独验证。闭环配置与模型接入见 [服务与 HTTP 恢复闭环](deployment/service-http-recovery.md)。
+服务/HTTP 恢复闭环要求控制端使用 **systemd 247+**，以支持插件独立凭据。Alibaba Cloud Linux 3、Rocky/AlmaLinux 8 的旧版 systemd 不满足要求，控制端安装器会明确拒绝，CI 只验证拒绝行为。目标端单独验证 Alibaba Cloud Linux 3、Rocky Linux 9、Ubuntu 24.04 和 Debian 12。闭环配置与模型接入见 [服务与 HTTP 恢复闭环](deployment/service-http-recovery.md)。
 
-GitHub Actions 已验证：
+控制端安装验证范围：
 
 | 发行版 | 版本 |
 | --- | --- |
-| Alibaba Cloud Linux | 3 |
-| Rocky Linux | 8、9 |
-| AlmaLinux | 8、9 |
+| Rocky Linux | 9 |
+| AlmaLinux | 9 |
 | Ubuntu | 22.04、24.04 |
 | Debian | 12 |
 
@@ -239,4 +240,4 @@ sudo rm -rf /opt/a4diag/releases /opt/a4diag/current
 - [v0.3 到 v0.4 迁移指南](migration/v0.3-to-v0.4.md)
 - [验收运行手册](testing/acceptance-runbook.md)
 - [发行版兼容矩阵](testing/distro-matrix.md)
-- [v0.4.3 发布说明](release/v0.4.3.md)
+- [v0.5.0 发布说明](release/v0.5.0.md)

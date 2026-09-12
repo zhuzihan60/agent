@@ -77,7 +77,7 @@ def _manager(tmp_path: Path, systemd: FakeSystemd) -> PluginInstanceManager:
             {
                 "name": "transport-ssh",
                 "plugin_type": "transport",
-                "version": "0.4.3",
+                "version": "0.5.0",
                 "api_min": "1.0",
                 "api_max": "1.0",
                 "executable": "a4diag_builtin_plugins.transport_ssh:main",
