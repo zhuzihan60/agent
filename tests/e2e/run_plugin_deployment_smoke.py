@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = Path("/opt/a4diag-ci-plugin-smoke")
 SYSTEMD = Path("/run/systemd/system")
-INSTANCES = ("ci-smoke-model", "ci-smoke-local")
+INSTANCES = ("model-openai-compatible", "ci-smoke-local")
 HELPER = Path("/usr/libexec/a4diag/a4diag-transport-helper")
 TARGET_SOCKET = Path("/run/a4diag-target/executor.sock")
 _FIXTURE_SECRETS: list[str] = []

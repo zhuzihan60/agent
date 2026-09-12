@@ -328,3 +328,25 @@ def test_loadcredential_parser_receives_literal_id_and_source(tmp_path: Path) ->
     assert identifier == credential_name("file:target.key")
     assert raw_source.replace("%%", "%") == str(source)
     assert Path(raw_source.replace("%%", "%")).read_text(encoding="utf-8") == "parser-boundary-secret"
+
+
+def test_dynamic_accounts_fit_linux_limit_and_remain_instance_specific(tmp_path: Path) -> None:
+    systemd = FakeSystemd()
+    _manager(tmp_path, systemd)
+    manager = PluginInstanceManager(config_root=tmp_path / "configs", manifest_root=tmp_path / "manifests",
+        secrets_root=tmp_path / "secrets", systemd=systemd, systemd_root=tmp_path / "units")
+    accounts = []
+    for instance in ("model-openai-compatible", "transport-ssh-target-1", "x" * 63 + "a", "x" * 63 + "b"):
+        spec = _spec().model_copy(update={"instance": instance, "socket": f"/run/a4diag/{instance}.sock"})
+        staged = manager.stage(spec)
+        lines = staged.credentials.decode().splitlines()
+        user = next(line.removeprefix("User=") for line in lines if line.startswith("User="))
+        assert 1 <= len(user) <= 31
+        assert user.startswith("a4diag-") and user.isascii()
+        assert f"Group={user}" in lines
+        accounts.append(user)
+        staged.staged_path.unlink()
+        again = manager.stage(spec)
+        assert again.credentials == staged.credentials
+        again.staged_path.unlink()
+    assert len(set(accounts)) == len(accounts)

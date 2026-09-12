@@ -9,6 +9,7 @@ and the previous socket state if the health check fails.
 from __future__ import annotations
 
 import os
+import hashlib
 import re
 import stat
 from dataclasses import dataclass
@@ -336,7 +337,10 @@ class PluginInstanceManager:
                 reference = "file:" + relative
                 references.add(reference)
                 payload["config"][field] = f"/run/credentials/a4diag-plugin@{spec.instance}.service/{credential_name(reference)}"
-        lines = ["[Service]", "LoadCredential="]
+        # Instance IDs can be 64 characters, while Linux account names must
+        # remain short. Hash the entire ID so long/common prefixes stay distinct.
+        account = "a4diag-p-" + hashlib.sha256(spec.instance.encode("ascii")).hexdigest()[:20]
+        lines = ["[Service]", f"User={account}", f"Group={account}", "LoadCredential="]
         if spec.manifest == "transport-local":
             lines.append("SupplementaryGroups=a4diag-target")
         if network:
