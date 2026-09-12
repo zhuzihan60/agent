@@ -317,7 +317,10 @@ def main() -> int:
         original = credential_path.read_bytes()
         for fault in ("credentials", "network"):
             if fault == "credentials":
-                text = "[Service]\nLoadCredential=\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n"
+                text = "\n".join(
+                    line for line in original.decode().splitlines()
+                    if not line.startswith("LoadCredential=")
+                ) + "\nLoadCredential=\n"
             else:
                 text = original.decode().replace("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6", "RestrictAddressFamilies=\nRestrictAddressFamilies=AF_UNIX")
             credential_path.write_text(text)
