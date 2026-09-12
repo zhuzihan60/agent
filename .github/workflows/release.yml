@@ -328,6 +328,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: docs/release/${{ github.ref_name }}.md
+          draft: false
+          prerelease: false
+          make_latest: "true"
           files: |
             ${{ runner.temp }}/release-assets/a4diag.tar.gz
             ${{ runner.temp }}/release-assets/a4diag.tar.gz.sig
