@@ -26,6 +26,8 @@ from a4diag.plugin_api.protocol import (
     TicketedEffectParams,
     decode_request_frame,
     decode_response_frame,
+    encode_response,
+    RpcResponse,
     effect_fields_digest,
     read_bounded_frame,
 )
@@ -1090,6 +1092,21 @@ def test_client_validates_response_id_and_exclusive_payload(tmp_path: Path) -> N
             await server.wait_closed()
 
     asyncio.run(scenario())
+
+
+def test_model_confidence_round_trips_response_and_followup_request() -> None:
+    response = decode_response_frame(encode_response(RpcResponse(id="x", result={"confidence": 0.85})))
+    assert response.result == {"confidence": 0.85}
+    frame = json.dumps({"jsonrpc": "2.0", "api_version": "1.0", "id": "x",
+                        "method": "plan", "params": {"diagnosis": response.result}}).encode() + b"\n"
+    assert decode_request_frame(frame).params["diagnosis"] == {"confidence": 0.85}
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
+@pytest.mark.parametrize("decoder", [decode_request_frame, decode_response_frame])
+def test_rpc_rejects_nonfinite_numbers(decoder, number: str) -> None:
+    with pytest.raises(RpcClientError, match="invalid_json"):
+        decoder(('{"x":' + number + '}\n').encode())
 
 
 def test_response_schema_rejects_wrong_version_and_nonexclusive_payload() -> None:
