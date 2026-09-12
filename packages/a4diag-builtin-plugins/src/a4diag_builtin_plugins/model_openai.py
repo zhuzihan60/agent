@@ -65,7 +65,16 @@ SYSTEM_PROMPT = (
     "registered sources; if no suitable source is registered, explain the gap "
     "in cause. For planning, use only supplied authorized capabilities and "
     "resources supported by collected evidence. Recovery criteria come only "
-    "from recovery_checks. For critic review, set complete=false when evidence, "
+    "from recovery_checks. Each operation must include non-empty verify metadata "
+    "describing verification intent. For a reversible operation, include non-null "
+    "undo metadata describing intent to invoke that operation's registered undo "
+    "lifecycle, for example {\"restore_prepared_state\":true}. The executor captures "
+    "the authoritative prepare marker and implements undo; undo is not a new "
+    "forward action and does not require inventing an inverse allowed capability. "
+    "For services operations, undo restores the prepared runtime or enablement "
+    "state. Do not fabricate a prepare marker or claim that undo removes every "
+    "business side effect. Rely on operation_contracts for lifecycle support. "
+    "For critic review, set complete=false when evidence, "
     "verification, or undo requirements remain unresolved. "
     "For the structured-output probe, return ok=true and capabilities containing "
     "'structured' only if you can comply with the supplied JSON schema."
@@ -357,7 +366,7 @@ class ModelEvidenceParams(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     evidence: dict[str, JsonValue]
-    max_tokens: int = Field(default=1024, ge=64, le=16384)
+    max_tokens: int = Field(default=4096, ge=64, le=16384)
 
     @field_validator("evidence")
     @classmethod
@@ -370,7 +379,7 @@ class ModelCriticParams(BaseModel):
 
     plan: dict[str, JsonValue]
     evidence: dict[str, JsonValue] = Field(default_factory=dict)
-    max_tokens: int = Field(default=1024, ge=64, le=16384)
+    max_tokens: int = Field(default=4096, ge=64, le=16384)
 
     @field_validator("plan", "evidence")
     @classmethod

@@ -137,7 +137,8 @@ class SshTransport(BaseTransport):
                 raise ValueError("identity response must be an object")
             return TargetIdentity(
                 machine_id=str(payload["machine_id"]),
-                host_key_sha256=self._config.host_key_sha256,
+                host_key_sha256=(self._config.host_key_sha256
+                                 or payload.get("host_key_sha256")),
                 os_id=str(payload["os_id"]),
                 os_version_id=str(payload["os_version_id"]),
                 systemd_version=str(payload["systemd_version"]),
