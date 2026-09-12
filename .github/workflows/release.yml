@@ -61,10 +61,14 @@ jobs:
         run: |
           release_version="$(python -c 'from tools.build_release import RELEASE_VERSION; print(RELEASE_VERSION)')"
           test "$GITHUB_REF_NAME" = "v${release_version}"
+          test -s "docs/release/${GITHUB_REF_NAME}.md"
       - name: Write the private signing key from repository secret material
+        env:
+          RELEASE_SIGNING_MATERIAL: ${{ secrets.A4DIAG_RELEASE_PRIVATE_KEY }}
         run: |
-          printf '%s' "${{ secrets.A4DIAG_RELEASE_PRIVATE_KEY }}" > /tmp/a4diag-release-private.pem
-          chmod 0600 /tmp/a4diag-release-private.pem
+          umask 077
+          test -n "$RELEASE_SIGNING_MATERIAL"
+          printf '%s' "$RELEASE_SIGNING_MATERIAL" > /tmp/a4diag-release-private.pem
       - name: Assemble and sign the release
         run: |
           release_version="$(python -c 'from tools.build_release import RELEASE_VERSION; print(RELEASE_VERSION)')"
@@ -114,6 +118,7 @@ jobs:
           cp install-a4diag-target.sh /tmp/a4diag-public-assets/install-a4diag-target.sh
           rm -rf /tmp/a4diag-public-assets/target-archive-root
       - name: Remove the private signing key
+        if: always()
         run: rm -f /tmp/a4diag-release-private.pem
       - name: Upload signed release
         uses: actions/upload-artifact@v4
@@ -305,6 +310,7 @@ jobs:
     needs: [verify, assemble-and-sign, distro-smoke, target-distro-smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: a4diag-public-assets
@@ -321,6 +327,7 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: docs/release/${{ github.ref_name }}.md
           files: |
             ${{ runner.temp }}/release-assets/a4diag.tar.gz
             ${{ runner.temp }}/release-assets/a4diag.tar.gz.sig
