@@ -545,6 +545,16 @@ def test_ssh_execute_typed_dispatches_through_pinned_ssh() -> None:
     }
 
 
+def test_ssh_default_config_preserves_target_host_key_in_fingerprint() -> None:
+    runner = FakeRunner()
+    identity = ssh_identity()
+    runner.outcome = RunOutcome(started=True, timed_out=False, returncode=0,
+                                stdout=json.dumps(identity.model_dump(mode="json")), stderr="")
+    transport = ssh_transport(config=ssh_config(host_key_sha256=None), runner=runner)
+    observed = asyncio.run(transport._probe_identity())
+    assert identity_fingerprint(observed) == identity_fingerprint(identity)
+
+
 def test_ssh_machine_id_change_blocks_write_with_zero_dispatch() -> None:
     runner = FakeRunner()
     registered = ssh_identity()
