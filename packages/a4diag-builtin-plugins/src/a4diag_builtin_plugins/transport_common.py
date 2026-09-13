@@ -31,6 +31,7 @@ from pydantic import (
 )
 
 from a4diag.domain import Operation, Risk, canonical_json_bytes
+from a4diag.linux_probes import validate_probe_id
 from a4diag.plugin_api.target_protocol import SignedTargetRequest, TargetLifecycle, TargetRequest
 from a4diag.plugin_api.protocol import (
     EmptyParams,
@@ -200,6 +201,7 @@ class ReadKind(StrEnum):
     FILE = "file"
     SERVICE_STATE = "service_state"
     SERVICE_LOGS = "service_logs"
+    PROBE = "probe"
 
 
 def validate_systemd_unit(value: str) -> str:
@@ -214,10 +216,12 @@ class ReadParams(BaseModel):
     kind: ReadKind
     path: str | None = None
     unit: str | None = None
+    probe_id: str | None = Field(default=None, strict=True)
     output_limit_bytes: int = Field(
         default=DEFAULT_OUTPUT_LIMIT_BYTES,
         ge=1,
         le=DEFAULT_OUTPUT_LIMIT_BYTES,
+        strict=True,
     )
 
     @field_validator("path")
@@ -232,6 +236,11 @@ class ReadParams(BaseModel):
     def validate_unit(cls, value: str | None) -> str | None:
         return None if value is None else validate_systemd_unit(value)
 
+    @field_validator("probe_id")
+    @classmethod
+    def validate_probe_id(cls, value: str | None) -> str | None:
+        return None if value is None else validate_probe_id(value)
+
     @model_validator(mode="after")
     def validate_kind_path(self) -> ReadParams:
         if self.kind is ReadKind.FILE and self.path is None:
@@ -243,6 +252,10 @@ class ReadParams(BaseModel):
             raise ValueError("unit is required for service reads")
         if not service_read and self.unit is not None:
             raise ValueError("unit is only valid for service reads")
+        if self.kind is ReadKind.PROBE and self.probe_id is None:
+            raise ValueError("probe_id is required for probe reads")
+        if self.kind is not ReadKind.PROBE and self.probe_id is not None:
+            raise ValueError("probe_id is only valid for probe reads")
         return self
 
 
@@ -512,6 +525,9 @@ class BaseTransport:
         }
         if params.unit is not None:
             request["unit"] = params.unit
+        if params.probe_id is not None:
+            request.pop("path")
+            request["probe_id"] = params.probe_id
         outcome = await self._run_helper(
             self._build_helper_argv(), request,
             timeout_seconds=TRANSPORT_READ_TIMEOUT_SECONDS,
@@ -532,6 +548,8 @@ class BaseTransport:
             if not isinstance(content, str) or type(truncated) is not bool:
                 raise ValueError("invalid read response")
             raw = content.encode("utf-8")
+            if params.kind is ReadKind.PROBE and (truncated or len(raw) > body_limit):
+                raise TransportReadError("read_failed")
             return raw[:params.output_limit_bytes].decode("utf-8", errors="ignore"), truncated or len(raw) > params.output_limit_bytes
         except (ValueError, KeyError, TypeError) as error:
             raise TransportReadError("read_failed") from error

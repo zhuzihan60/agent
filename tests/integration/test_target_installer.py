@@ -119,7 +119,8 @@ def test_target_configuration_rejects_package_grants_without_a_separate_helper(
 
 
 @POSIX
-def test_target_install_is_restricted_idempotent_and_rolls_back(tmp_path: Path) -> None:
+@pytest.mark.parametrize("network_probe", [False, True])
+def test_target_install_is_restricted_idempotent_and_rolls_back(tmp_path: Path, network_probe: bool) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     python = fake_bin / "python3.11"
@@ -194,6 +195,7 @@ exit 0
                     {"capability": "files", "resource": "/etc/example"},
                 ],
                 confirm_managed_resources="ENABLE",
+                **({"diagnostic_probes": [{"id": "app-tcp", "kind": "tcp", "resource": "tcp://127.0.0.1:8080"}]} if network_probe else {}),
             )
         ),
         encoding="utf-8",
@@ -234,6 +236,7 @@ exit 0
         (target_root / "etc" / "a4diag-target" / "policy.json").read_text(encoding="utf-8")
     )
     assert policy["managed_roots"] == ["/srv/app", "/etc/example"]
+    assert len(policy["diagnostic_probes"]) == int(network_probe)
     drop_in = (
         target_root
         / "etc"
@@ -247,6 +250,7 @@ exit 0
         "ReadWritePaths=\n"
         "ReadWritePaths=/run/a4diag-target /var/lib/a4diag-target/executor\n"
         "ReadWritePaths=/etc/example /srv/app\n"
+        + ("RestrictAddressFamilies=\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n" if network_probe else "")
     )
     commands = command_log.read_text(encoding="utf-8").splitlines()
     assert commands.count("usermod --shell /bin/sh --password * a4diag-target") == 2

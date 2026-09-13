@@ -7,6 +7,7 @@ import re
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from a4diag.domain import Operation, normalize_resource
+from a4diag.linux_probes import LinuxProbe
 
 _SAFE_TARGET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
@@ -70,6 +71,16 @@ class TargetPolicy(BaseModel):
     managed_roots: tuple[str, ...] = ()
     allowed_units: tuple[str, ...] = ()
     allowed_packages: tuple[PackageGrant, ...] = ()
+    diagnostic_probes: tuple[LinuxProbe, ...] = ()
+
+    @field_validator("diagnostic_probes")
+    @classmethod
+    def probes(cls, values: tuple[LinuxProbe, ...]) -> tuple[LinuxProbe, ...]:
+        if len(values) > 8:
+            raise ValueError("at most 8 diagnostic probes are allowed")
+        if len({probe.id for probe in values}) != len(values):
+            raise ValueError("duplicate diagnostic probe id")
+        return values
 
     @field_validator("target_id")
     @classmethod
@@ -108,7 +119,18 @@ class TargetPolicy(BaseModel):
         names = [grant.name for grant in self.allowed_packages]
         if len(names) != len(set(names)):
             raise ValueError("duplicate package grant")
+        for probe in self.diagnostic_probes:
+            if probe.kind == "file":
+                self.authorize_file_read(probe.resource)
         return self
+
+    def authorize_probe(self, probe_id: str) -> LinuxProbe:
+        probe = next((item for item in self.diagnostic_probes if item.id == probe_id), None)
+        if probe is None:
+            raise PolicyDenied("probe_not_granted")
+        if probe.kind == "file":
+            self.authorize_file_read(probe.resource)
+        return probe
 
     def authorize(self, operation: Operation) -> None:
         if operation.capability == "files":

@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from a4diag.linux_probes import ProbeCondition, validate_probe_id
+
 _UNIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,239}\.service")
 _HTTP_SLOTS = threading.BoundedSemaphore(8)
 
@@ -26,7 +28,7 @@ class EvidenceSource(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-    kind: Literal["service_state", "service_logs", "file"]
+    kind: Literal["service_state", "service_logs", "file", "probe"]
     resource: str = Field(min_length=1, max_length=1024)
     initial: bool = True
     max_bytes: int = Field(default=8192, ge=256, le=16384)
@@ -39,6 +41,8 @@ class EvidenceSource(BaseModel):
                 or any(ord(c) < 32 or ord(c) == 127 for c in self.resource)
                 or any(c in self.resource for c in "*?[]")):
                 raise ValueError("file evidence requires an exact absolute POSIX path")
+        elif self.kind == "probe":
+            validate_probe_id(self.resource)
         else:
             _service(self.resource)
         return self
@@ -48,15 +52,25 @@ class RecoveryCheck(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-    kind: Literal["service_active", "http"]
+    kind: Literal["service_active", "http", "probe"]
     resource: str = Field(min_length=1, max_length=2048)
     expected_status: int = Field(default=200, ge=200, le=299)
     body_contains: str | None = Field(default=None, min_length=1, max_length=256)
     attempts: int = Field(default=3, ge=1, le=3)
     timeout_seconds: int = Field(default=3, ge=1, le=5)
+    conditions: tuple[ProbeCondition, ...] = Field(default=(), max_length=16, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def validate_resource(self) -> RecoveryCheck:
+        if self.kind != "probe" and "conditions" in self.model_fields_set:
+            raise ValueError("conditions only apply to probe checks")
+        if self.kind == "probe":
+            validate_probe_id(self.resource)
+            if not self.conditions:
+                raise ValueError("probe checks require an exact probe id and nonempty conditions")
+            if self.body_contains is not None or self.expected_status != 200:
+                raise ValueError("HTTP expectations only apply to http checks")
+            return self
         if self.kind == "service_active":
             _service(self.resource)
             if self.body_contains is not None or self.expected_status != 200:

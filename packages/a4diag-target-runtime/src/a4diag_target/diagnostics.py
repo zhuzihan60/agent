@@ -10,6 +10,8 @@ from pathlib import Path
 
 from a4diag_builtin_plugins.transport_common import MAX_DIAGNOSTIC_BODY_BYTES, ReadKind, ReadParams, SubprocessRunner
 from a4diag_target.policy import TargetPolicy
+from a4diag_target.linux_probes import run_probe
+from a4diag.linux_probes import validate_probe_output
 
 DIAGNOSTIC_TIMEOUT_SECONDS = 10.0
 _STATE_PROPERTIES = ("ActiveState", "SubState", "LoadState", "Result", "ExecMainStatus", "MainPID", "UnitFileState")
@@ -46,16 +48,31 @@ def _read_regular_file(root: Path, path: str, limit: int) -> bytes:
 
 
 async def read_diagnostic(root: Path, request: dict[str, object], policy: TargetPolicy) -> dict[str, object]:
-    if set(request) - {"method", "kind", "limit", "path", "unit"} or request.get("method") != "read":
+    if set(request) - {"method", "kind", "limit", "path", "unit", "probe_id"} or request.get("method") != "read":
         return {"ok": False, "reason": "read_request_invalid"}
     limit = request.get("limit")
     if type(limit) is not int or not 1 <= limit <= MAX_DIAGNOSTIC_BODY_BYTES:
         return {"ok": False, "reason": "read_limit_invalid"}
     try:
         params = ReadParams(kind=request.get("kind"), path=request.get("path"),
-                            unit=request.get("unit"), output_limit_bytes=limit)
+                            unit=request.get("unit"), probe_id=request.get("probe_id"), output_limit_bytes=limit)
     except ValueError:
         return {"ok": False, "reason": "read_request_invalid"}
+    if params.kind is ReadKind.PROBE:
+        if set(request) != {"method", "kind", "limit", "probe_id"}:
+            return {"ok": False, "reason": "read_request_invalid"}
+        assert params.probe_id is not None
+        probe = policy.authorize_probe(params.probe_id)
+        try:
+            result = validate_probe_output(probe, await run_probe(root, probe))
+            raw = json.dumps(result, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            if len(raw) > limit:
+                return {"ok": False, "reason": "read_failed"}
+            return _bounded_response(raw, limit)
+        except asyncio.TimeoutError:
+            return {"ok": False, "reason": "read_timeout"}
+        except (ValueError, OSError):
+            return {"ok": False, "reason": "read_failed"}
     if params.kind is ReadKind.FILE:
         assert params.path is not None
         policy.authorize_file_read(params.path)
