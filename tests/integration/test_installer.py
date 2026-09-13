@@ -264,7 +264,7 @@ def test_self_check_reports_read_only_defaults(tmp_path: Path, monkeypatch: pyte
     assert code == 0
     payload = json.loads(output)
     assert payload["ok"] is True
-    assert payload["version"] == "0.4.3"
+    assert payload["version"] == "0.5.1"
     assert payload["global_mode"] == "read_only"
     assert payload["targets"] == []
     assert payload["offline"] is True
@@ -320,7 +320,7 @@ if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
   mkdir -p "$3/bin"
   cat > "$3/bin/a4diag" <<'A4DIAG_SHIM'
 #!/usr/bin/env bash
-echo '{"ok": true, "version": "0.4.3", "global_mode": "read_only", "targets": [], "offline": true}'
+echo '{"ok": true, "version": "0.5.1", "global_mode": "read_only", "targets": [], "offline": true}'
 exit 0
 A4DIAG_SHIM
   chmod +x "$3/bin/a4diag"
@@ -350,6 +350,13 @@ exit 0
         (self.bin / "systemctl").write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'systemd %s\\n' "${A4DIAG_TEST_SYSTEMD_VERSION:-252}"
+  exit 0
+fi
+if [ "${1:-}" = "restart" ] && [ -n "${A4DIAG_TEST_RESTART_LOG:-}" ]; then
+  printf '%s\\n' "$2" >> "$A4DIAG_TEST_RESTART_LOG"
+fi
 if [ "${1:-}" = "is-active" ]; then
   state="${A4DIAG_TEST_SERVICE_STATE:-active}"
   if [ "${2:-}" != "--quiet" ]; then
@@ -374,7 +381,7 @@ exit 0
         self,
         root: Path,
         *,
-        version: str = "0.4.3",
+        version: str = "0.5.1",
         signing_key: Path | None = None,
     ) -> Path:
         release = root / f"release-{version}"
@@ -508,7 +515,7 @@ exit 0
     def env(
         self,
         *,
-        version: str = "0.4.3",
+        version: str = "0.5.1",
         skip_systemd: bool = True,
         service_state: str = "active",
     ) -> dict[str, str]:
@@ -536,7 +543,7 @@ exit 0
         self,
         release_dir: Path,
         *,
-        version: str = "0.4.3",
+        version: str = "0.5.1",
         inject_failure: str | None = None,
         skip_systemd: bool = True,
         service_state: str = "active",
@@ -606,7 +613,7 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     result = sandbox.install(release)
 
     assert result.returncode == 0, result.stderr
-    installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.4.3"
+    installed = sandbox.root / "opt" / "a4diag" / "releases" / "0.5.1"
     assert stat.S_IMODE(installed.stat().st_mode) == 0o755
     registry = sandbox.root / "etc" / "a4diag" / "plugin-registry.json"
     registry_payload = json.loads(registry.read_text(encoding="utf-8"))
@@ -620,7 +627,7 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     assert plugin_root.is_dir()
     plugin_current = plugin_root / "current"
     assert plugin_current.is_symlink()
-    assert plugin_current.resolve() == plugin_root / "releases" / "0.4.3"
+    assert plugin_current.resolve() == plugin_root / "releases" / "0.5.1"
     assert (plugin_current / "venv" / "bin" / "a4diag-plugin").is_file()
     assert (plugin_current / "venv").resolve() != (installed / "venv").resolve()
     runtime_dirs = (
@@ -653,17 +660,17 @@ def test_offline_install_invokes_pip_without_index(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "--no-index" in sandbox.pip_argv
     assert "--find-links" in sandbox.pip_argv
-    assert "a4diag-0.4.3-py3-none-any.whl" in sandbox.pip_argv
+    assert "a4diag-0.5.1-py3-none-any.whl" in sandbox.pip_argv
     calls = sandbox.pip_argv.splitlines()
     assert len(calls) == 4
     assert "-r" in calls[0]
-    assert "a4diag-0.4.3-py3-none-any.whl" not in calls[0]
+    assert "a4diag-0.5.1-py3-none-any.whl" not in calls[0]
     assert "--no-deps" in calls[1]
     assert "-r" not in calls[1].split()
-    assert "a4diag_builtin_plugins-0.4.3-py3-none-any.whl" in calls[1]
+    assert "a4diag_builtin_plugins-0.5.1-py3-none-any.whl" in calls[1]
     assert "-r" in calls[2]
     assert "--no-deps" in calls[3]
-    assert "a4diag_builtin_plugins-0.4.3-py3-none-any.whl" in calls[3]
+    assert "a4diag_builtin_plugins-0.5.1-py3-none-any.whl" in calls[3]
 
 
 @pytest.mark.parametrize(
@@ -760,3 +767,29 @@ def test_signature_mismatch_rejects_release(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "signature mismatch" in result.stderr
     assert not sandbox.current.exists()
+
+
+@POSIX
+def test_installer_rejects_systemd_without_credentials_before_writing_release(tmp_path: Path) -> None:
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path)
+    environment = sandbox.env(skip_systemd=False)
+    environment["A4DIAG_TEST_SYSTEMD_VERSION"] = "239"
+    result = subprocess.run(["bash", str(INSTALL_SH), "--offline", str(release)],
+                            env=environment, capture_output=True, text=True, check=False)
+    assert result.returncode != 0
+    assert "systemd 247" in result.stderr
+    assert not sandbox.current.exists()
+
+
+@POSIX
+def test_installer_restarts_core_when_service_is_already_active(tmp_path: Path) -> None:
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path)
+    environment = sandbox.env(skip_systemd=False)
+    log = tmp_path / "restarts.log"
+    environment["A4DIAG_TEST_RESTART_LOG"] = str(log)
+    result = subprocess.run(["bash", str(INSTALL_SH), "--offline", str(release)],
+                            env=environment, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == ["a4diag-core.service"]

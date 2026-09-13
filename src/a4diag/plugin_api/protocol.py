@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import os
 import socket
 import stat
@@ -295,6 +296,13 @@ def _reject_number(value: str) -> object:
     raise ValueError(f"unsupported JSON number: {value}")
 
 
+def _finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
 def _validate_structure(value: object) -> None:
     count = 0
     stack: list[tuple[object, int]] = [(value, 0)]
@@ -327,7 +335,7 @@ def _decode_frame(frame: bytes) -> object:
         value = json.loads(
             text,
             object_pairs_hook=_unique_object,
-            parse_float=_reject_number,
+            parse_float=_finite_float,
             parse_constant=_reject_number,
         )
     except _DuplicateKey as error:

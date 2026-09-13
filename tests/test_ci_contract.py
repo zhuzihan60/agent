@@ -133,6 +133,25 @@ def test_workflows_contain_no_literal_credentials() -> None:
         assert "token" not in stripped
 
 
+def test_signing_material_is_data_and_cleanup_runs_after_failure() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    steps = workflow["jobs"]["assemble-and-sign"]["steps"]
+    write = next(step for step in steps if step.get("name") == "Write the private signing key from repository secret material")
+    assert "${{ secrets." not in write["run"]
+    assert write["env"]["RELEASE_SIGNING_MATERIAL"] == "${{ secrets.A4DIAG_RELEASE_PRIVATE_KEY }}"
+    assert 'umask 077' in write["run"]
+    cleanup = next(step for step in steps if step.get("name") == "Remove the private signing key")
+    assert cleanup["if"] == "always()"
+
+
+def test_release_publishes_versioned_migration_notes() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    steps = workflow["jobs"]["publish"]["steps"]
+    assert any(step.get("uses", "").startswith("actions/checkout@") for step in steps)
+    publish = next(step for step in steps if step.get("name") == "Create GitHub release")
+    assert publish["with"]["body_path"] == "docs/release/${{ github.ref_name }}.md"
+
+
 def test_test_jobs_install_both_local_packages_before_pytest() -> None:
     """Every workflow that runs the source-tree tests must install both
     src-layout packages first, without asking pip to resolve dependencies.

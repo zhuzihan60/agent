@@ -19,6 +19,36 @@ RELEASE_DIR="${RELEASE_DIR:-/release}"
 echo "distro-smoke: verifying release"
 (cd "$RELEASE_DIR" && sha256sum -c SHA256SUMS >/dev/null)
 
+# Minimal distro containers omit systemd; install its tools so this gate checks
+# the distribution's real credential capability, even without a booted PID 1.
+if ! command -v systemctl >/dev/null 2>&1; then
+  if command -v dnf >/dev/null 2>&1; then
+    dnf -y install systemd
+  elif command -v yum >/dev/null 2>&1; then
+    yum -y install systemd
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y systemd
+  else
+    echo "distro-smoke: cannot install systemd prerequisite" >&2
+    exit 1
+  fi
+fi
+SYSTEMD_VERSION="$(systemctl --version | head -n1 | cut -d' ' -f2)"
+case "$SYSTEMD_VERSION" in ''|*[!0-9]*) exit 1 ;; esac
+if [ "$SYSTEMD_VERSION" -lt 247 ]; then
+  PREFLIGHT_LOG="$(mktemp)"
+  trap 'rm -f "$PREFLIGHT_LOG"' EXIT
+  if A4DIAG_SKIP_SYSTEMD=0 A4DIAG_SKIP_DISK=1 bash "$RELEASE_DIR/install.sh" --offline "$RELEASE_DIR" >"$PREFLIGHT_LOG" 2>&1; then
+    echo "distro-smoke: FAIL unsupported controller unexpectedly installed" >&2
+    exit 1
+  fi
+  grep -q 'systemd 247 or newer is required' "$PREFLIGHT_LOG"
+  [ ! -e /opt/a4diag/current ]
+  echo "distro-smoke: PASS expected controller rejection (systemd $SYSTEMD_VERSION <247); target runtime remains separate"
+  exit 0
+fi
+
 echo "distro-smoke: offline install"
 A4DIAG_SKIP_SYSTEMD=1 A4DIAG_SKIP_DISK=1 bash "$RELEASE_DIR/install.sh" --offline "$RELEASE_DIR"
 

@@ -144,6 +144,13 @@ def equivalent_commands(plan: Plan) -> tuple[str, ...]:
 def residual_risk(state: Mapping[str, object]) -> str:
     """Summarize what remains uncertain after the workflow finished."""
     status = state.get("status")
+    recovery = state.get("recovery_result")
+    if status == "rollback_succeeded" and isinstance(recovery, dict) and recovery.get("ok") is False:
+        return "high: changes restored; business recovery not verified"
+    if status == "rollback_succeeded" and (not isinstance(recovery, dict) or recovery.get("ok") is not True):
+        return "medium: changes restored; business recovery not verified"
+    if status == "insufficient_evidence":
+        return "medium: diagnosis unresolved; nothing applied"
     if status in {"succeeded", "rollback_succeeded"}:
         return "none"
     if status == "rollback_partial":
@@ -224,6 +231,9 @@ def build_runtime_report(
     evidence = state.get("evidence")
     if isinstance(evidence, list):
         report["evidence"] = evidence
+    for name in ("diagnosis", "recovery_result", "recovery_evidence"):
+        if name in state:
+            report[name] = state[name]
 
     operations: list[JsonValue] = []
     commands: list[str] = []
