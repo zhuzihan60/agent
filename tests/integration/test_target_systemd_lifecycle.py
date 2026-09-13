@@ -17,10 +17,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux" or os.environ.get("A4DIAG_TEST_SYSTEMD") != "1",
-    reason="requires opt-in disposable Linux systemd host as root",
-)
+pytestmark = pytest.mark.skipif(sys.platform != "linux" or os.environ.get("A4DIAG_TEST_SYSTEMD") != "1", reason="requires opt-in disposable Linux systemd host as root")
 
 
 def test_executor_socket_survives_service_restart_and_stop_start() -> None:
