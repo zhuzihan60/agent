@@ -244,11 +244,12 @@ class MethodBinding(Generic[ParamsT, ResultT]):
             raise ValueError(
                 f"{self.name} requires fixed {expected_kind.value} method kind"
             )
+        max_dispatch_timeout = 305 if self.name in {"diagnose", "plan", "critic", "capability_probe"} else 120
         if (
             type(self.dispatch_timeout_seconds) not in {int, float}
-            or not 0 < self.dispatch_timeout_seconds <= 120
+            or not 0 < self.dispatch_timeout_seconds <= max_dispatch_timeout
         ):
-            raise ValueError("dispatch_timeout_seconds must be between 0 and 120")
+            raise ValueError(f"dispatch_timeout_seconds must be between 0 and {max_dispatch_timeout}")
         if (
             type(self.cancellation_grace_seconds) not in {int, float}
             or not 0 < self.cancellation_grace_seconds

@@ -363,10 +363,10 @@ class _RpcExecutorPort:
         return restored
 
 
-def _socket_client(instance: str) -> PluginClient:
+def _socket_client(instance: str, *, timeout_seconds: float = 30) -> PluginClient:
     if not _SAFE_INSTANCE.fullmatch(instance):
         raise RuntimeFailure("plugin_instance_invalid", instance)
-    return PluginClient(f"/run/a4diag/{instance}.sock")
+    return PluginClient(f"/run/a4diag/{instance}.sock", timeout_seconds=timeout_seconds)
 
 
 def _target_signer(target: TargetConfig) -> TargetSigner:
@@ -738,7 +738,13 @@ def build_rpc_plugin_ports(
         model = _UnavailableModelPort()
     else:
         registry.require(settings.model.plugin, PluginType.MODEL)
-        model = _RpcModelPort(client_factory(settings.model.plugin), registry)
+        model_client = (
+            _socket_client(settings.model.plugin,
+                           timeout_seconds=settings.model.timeout_seconds + 5)
+            if client_factory is _socket_client
+            else client_factory(settings.model.plugin)
+        )
+        model = _RpcModelPort(model_client, registry)
     notification_clients: list[PluginClient] = []
     for notification in settings.notifications:
         plugin_name = (

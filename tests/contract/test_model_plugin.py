@@ -624,6 +624,23 @@ def test_model_bindings_use_fixed_kinds() -> None:
     assert all(binding.ticket_phase is None for binding in bindings.values())
 
 
+def test_configured_reasoning_budget_reaches_provider_and_host_deadline() -> None:
+    config = ModelConfig(base_url="https://api.deepseek.com/v1", model="test",
+                         max_tokens=16384, timeout_seconds=180)
+    http = FakeHttp()
+    http.response = provider_response(valid_diagnosis())
+    plugin = model_plugin(http, config=config)
+    plugin.diagnose(evidence_params())
+    assert json.loads(http.requests[-1]["body"])["max_tokens"] == 16384
+    assert http.requests[-1]["timeout"] == 180
+    plugin.diagnose(evidence_params(max_tokens=512))
+    assert json.loads(http.requests[-1]["body"])["max_tokens"] == 512
+    bindings = build_model_bindings(plugin)
+    for name in ("capability_probe", "diagnose", "plan", "critic"):
+        assert bindings[name].dispatch_timeout_seconds > config.timeout_seconds
+    assert bindings["health"].dispatch_timeout_seconds == 30
+
+
 def test_model_manifest_contract() -> None:
     manifest = PluginManifest.model_validate(
         json.loads((MANIFEST_ROOT / "model-openai-compatible.json").read_text(encoding="utf-8"))

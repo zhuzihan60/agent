@@ -106,7 +106,8 @@ class ModelConfig(BaseModel):
     api_key_ref: str | None = None
     model: str
     api_style: Literal["openai", "azure", "ollama"] = "openai"
-    timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    timeout_seconds: float = Field(default=120.0, ge=1.0, le=300.0)
+    max_tokens: int = Field(default=8192, ge=64, le=16384, strict=True)
     deployment: str | None = None
     api_version: str | None = None
     headers: dict[str, str] = Field(default_factory=dict)
@@ -366,7 +367,7 @@ class ModelEvidenceParams(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     evidence: dict[str, JsonValue]
-    max_tokens: int = Field(default=4096, ge=64, le=16384)
+    max_tokens: int | None = Field(default=None, ge=64, le=16384, strict=True)
 
     @field_validator("evidence")
     @classmethod
@@ -379,7 +380,7 @@ class ModelCriticParams(BaseModel):
 
     plan: dict[str, JsonValue]
     evidence: dict[str, JsonValue] = Field(default_factory=dict)
-    max_tokens: int = Field(default=4096, ge=64, le=16384)
+    max_tokens: int | None = Field(default=None, ge=64, le=16384, strict=True)
 
     @field_validator("plan", "evidence")
     @classmethod
@@ -489,7 +490,7 @@ class ModelPlugin:
             self._config,
             messages=messages,
             json_mode=True,
-            max_tokens=max_tokens,
+            max_tokens=self._config.max_tokens if max_tokens is None else max_tokens,
         )
         if self._config.api_key_ref is not None:
             headers.update(_auth_headers(self._config, self._secrets))
@@ -607,6 +608,7 @@ def build_model_bindings(
             CapabilityProbeResult,
             plugin.capability_probe,
             kind=MethodKind.READ,
+            dispatch_timeout_seconds=plugin._config.timeout_seconds + 1,
         ),
         "diagnose": MethodBinding(
             "diagnose",
@@ -614,6 +616,7 @@ def build_model_bindings(
             DiagnosisResult,
             plugin.diagnose,
             kind=MethodKind.MODEL,
+            dispatch_timeout_seconds=plugin._config.timeout_seconds + 1,
         ),
         "plan": MethodBinding(
             "plan",
@@ -621,6 +624,7 @@ def build_model_bindings(
             PlanProposalResult,
             plugin.plan,
             kind=MethodKind.MODEL,
+            dispatch_timeout_seconds=plugin._config.timeout_seconds + 1,
         ),
         "critic": MethodBinding(
             "critic",
@@ -628,6 +632,7 @@ def build_model_bindings(
             CriticReviewResult,
             plugin.critic,
             kind=MethodKind.MODEL,
+            dispatch_timeout_seconds=plugin._config.timeout_seconds + 1,
         ),
     }
 
