@@ -1,6 +1,6 @@
-# A4Diag 0.5.0
+# A4Diag 0.5.1
 
-v0.5.0 包含[服务异常与 HTTP 恢复闭环](docs/deployment/service-http-recovery.md)。控制端、内置插件和目标端必须使用同一版本。兼容性变化和升级顺序见 [v0.5.0 发布说明](docs/release/v0.5.0.md)。
+v0.5.1 包含[服务异常与 HTTP 恢复闭环](docs/deployment/service-http-recovery.md)。控制端、内置插件和目标端必须使用同一版本。兼容性变化和升级顺序见 [v0.5.1 发布说明](docs/release/v0.5.1.md)。
 
 [![CI](https://github.com/zhuzihan60/agent/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/zhuzihan60/agent/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/zhuzihan60/agent)](https://github.com/zhuzihan60/agent/releases/latest)
@@ -53,7 +53,7 @@ targets: []
 plugins: []
 ```
 
-当前版本：[v0.5.0](https://github.com/zhuzihan60/agent/releases/tag/v0.5.0)
+当前版本：[v0.5.1](https://github.com/zhuzihan60/agent/releases/tag/v0.5.1)
 
 ## 安全模型
 
