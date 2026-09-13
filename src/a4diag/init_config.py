@@ -84,7 +84,8 @@ class ModelInit(BaseModel):
     model: str
     plugin: str = "model-openai-compatible"
     api_style: Literal["openai", "azure", "ollama"] = "openai"
-    timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    timeout_seconds: float = Field(default=120.0, ge=1.0, le=300.0)
+    max_tokens: int = Field(default=8192, ge=64, le=16384, strict=True)
     deployment: str | None = None
     api_version: str | None = None
 
@@ -325,14 +326,14 @@ class ProductionModelProbe:
     """Require the selected model plugin to pass structured-output probing."""
 
     def __init__(self, client_factory: Callable[[str], object] | None = None) -> None:
-        if client_factory is None:
-            from a4diag.plugin_client import PluginClient
-
-            client_factory = lambda name: PluginClient(f"/run/a4diag/{name}.sock")
         self._client_factory = client_factory
 
     def probe(self, config: ModelInit) -> None:
-        client = self._client_factory(config.plugin)
+        from a4diag.plugin_client import PluginClient
+
+        client = (self._client_factory(config.plugin) if self._client_factory is not None
+                  else PluginClient(f"/run/a4diag/{config.plugin}.sock",
+                                    timeout_seconds=config.timeout_seconds + 5))
         result = asyncio.run(client.call("capability_probe", {}))  # type: ignore[attr-defined]
         if not isinstance(result, dict) or result.get("write_capable") is not True:
             raise ModelProbeError("model_probe_failed")
@@ -558,7 +559,7 @@ def interactive_init_request(*, input_fn: Callable[[str], str]) -> InitRequest:
             api_key_ref=ask("model api_key_ref (empty for none): ") or None,
             model=ask("model name: "),
             api_style=ask("api style (openai/azure/ollama) [openai]: ") or "openai",
-            timeout_seconds=int(ask("timeout seconds [30]: ") or 30),
+            timeout_seconds=int(ask("timeout seconds [120]: ") or 120),
         )
     targets: list[TargetInit] = []
     while yes_no("add target? (yes/no) "):

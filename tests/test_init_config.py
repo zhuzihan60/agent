@@ -34,6 +34,29 @@ from a4diag.init_config import (
 from a4diag.settings import load_settings
 
 
+def test_model_budget_survives_initialization_and_probe_waits_for_provider(monkeypatch):
+    from a4diag.init_config import ProductionModelProbe
+    from a4diag.settings import ModelSettings
+    from a4diag import plugin_client
+    seen = []
+
+    class Client:
+        def __init__(self, path, *, timeout_seconds):
+            seen.append((path, timeout_seconds))
+
+        async def call(self, method, params):
+            assert method == "capability_probe"
+            return {"write_capable": True}
+
+    monkeypatch.setattr(plugin_client, "PluginClient", Client)
+    config = ModelInit(base_url="https://example.com/v1", model="test",
+                       max_tokens=16384, timeout_seconds=180)
+    settings = ModelSettings(**config.model_dump())
+    assert settings.max_tokens == 16384
+    ProductionModelProbe().probe(config)
+    assert seen == [("/run/a4diag/model-openai-compatible.sock", 185)]
+
+
 class FakeTransport:
     def __init__(self) -> None:
         self.probe_error: Exception | str | None = None
