@@ -521,9 +521,9 @@ class _RpcCollectorPort:
                 elif check.kind == "probe":
                     try:
                         probe = next(p for p in target.diagnostic_probes if p.id == check.resource)
-                        response = _run(lambda: self._client(target).call("read", {
+                        response = _run(lambda: asyncio.wait_for(self._client(target).call("read", {
                             "kind": "probe", "probe_id": probe.id, "output_limit_bytes": 16384,
-                        }))
+                        }), timeout=check.timeout_seconds))
                         if response.get("ok") is not True or response.get("data", {}).get("truncated") is not False:
                             raise ValueError("probe unavailable")
                         state = parse_probe_output(probe, response["stdout"])

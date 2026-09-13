@@ -64,3 +64,19 @@ def test_capacity_cannot_lie_about_usage():
     p = LinuxProbe(id="disk", kind="filesystem", resource="/")
     with pytest.raises(ValueError, match="percentage"):
         parse_probe_output(p, json.dumps(dict(total_bytes=100, available_bytes=0, used_percent=0, free_inodes=1)))
+
+
+def test_probe_check_respects_admin_timeout():
+    import asyncio
+    class SlowClient(ProbeClient):
+        async def call(self, method, params):
+            if method == "read":
+                await asyncio.sleep(1.2)
+            return await super().call(method, params)
+    client = SlowClient()
+    client.mode = 420
+    t = configured()
+    t = t.model_copy(update={"recovery_checks": (t.recovery_checks[0].model_copy(update={"timeout_seconds": 1}),)})
+    result = collector(client).final_verify(t, "machine-1", [])
+    assert not result.ok
+    assert result.data["checks"][0]["status"] == "probe_unavailable"
