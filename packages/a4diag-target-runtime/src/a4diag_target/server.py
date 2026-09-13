@@ -155,7 +155,7 @@ class TargetSocketServer:
                     probe_identity(self._identity_root).model_dump(mode="json")
                 )
             if value.get("method") == "read":
-                if value.get("kind") in ("file", "service_state", "service_logs"):
+                if value.get("kind") in ("file", "service_state", "service_logs", "probe"):
                     return canonical_json_bytes(
                         await read_diagnostic(self._diagnostic_root, value, self._policy),
                         max_bytes=MAX_FRAME_BYTES,
