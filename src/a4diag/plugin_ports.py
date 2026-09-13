@@ -33,6 +33,7 @@ from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import canonical_operation_digest
 from a4diag.runtime import RuntimeFailure
 from a4diag.recovery import check_http
+from a4diag.linux_probes import PROBE_OUTPUTS, parse_bound_probe_output, evaluate_probe_conditions
 from a4diag.redaction import redact
 from a4diag.settings import AgentSettings
 from a4diag.workflow import (
@@ -470,7 +471,7 @@ class _RpcCollectorPort:
         for source_id in dict.fromkeys(source_ids):
             source = catalog[source_id]
             params = {"kind": source.kind, "output_limit_bytes": source.max_bytes}
-            params["path" if source.kind == "file" else "unit"] = source.resource
+            params[{"file": "path", "probe": "probe_id"}.get(source.kind, "unit")] = source.resource
             row = {"kind": source.kind, "source_id": source.id, "resource": source.resource}
             try:
                 result = _run(lambda: self._client(target).call("read", params))
@@ -480,6 +481,11 @@ class _RpcCollectorPort:
                     or type(result["data"].get("truncated")) is not bool
                     or len(result["stdout"].encode("utf-8")) > source.max_bytes):
                     raise ValueError("invalid evidence response")
+                if source.kind == "probe":
+                    probe = next(p for p in target.diagnostic_probes if p.id == source.resource)
+                    if result["data"]["truncated"]:
+                        raise ValueError("truncated probe")
+                    parse_bound_probe_output(probe, result["stdout"])
                 row.update(content=redact(result["stdout"]), available=True,
                            truncated=result["data"]["truncated"])
             except Exception:
@@ -512,6 +518,19 @@ class _RpcCollectorPort:
             for attempt in range(1, check.attempts + 1):
                 if check.kind == "http":
                     result = check_http(check)
+                elif check.kind == "probe":
+                    try:
+                        probe = next(p for p in target.diagnostic_probes if p.id == check.resource)
+                        response = _run(lambda: asyncio.wait_for(self._client(target).call("read", {
+                            "kind": "probe", "probe_id": probe.id, "output_limit_bytes": 16384,
+                        }), timeout=check.timeout_seconds))
+                        if response.get("ok") is not True or response.get("data", {}).get("truncated") is not False:
+                            raise ValueError("probe unavailable")
+                        state = parse_bound_probe_output(probe, response["stdout"])
+                        healthy = evaluate_probe_conditions(state, check.conditions)
+                        result = {"ok": healthy, "status": "probe_healthy" if healthy else "probe_unhealthy"}
+                    except Exception:
+                        result = {"ok": False, "status": "probe_unavailable"}
                 else:
                     try:
                         response = _run(lambda: self._client(target).call("read", {
@@ -565,6 +584,10 @@ class _RpcModelPort:
             "operation_contracts": contracts,
             "evidence_sources": [source.model_dump(mode="json") for source in target.evidence_sources],
             "recovery_checks": [check.model_dump(mode="json") for check in target.recovery_checks],
+            "diagnostic_probes": [
+                {**probe.model_dump(mode="json"), "output_fields": PROBE_OUTPUTS[probe.kind]}
+                for probe in target.diagnostic_probes
+            ],
             **extra,
         }
 

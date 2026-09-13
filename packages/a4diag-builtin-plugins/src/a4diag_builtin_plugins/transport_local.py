@@ -28,7 +28,7 @@ from a4diag_builtin_plugins.transport_common import (
     TransportReadError,
 )
 
-_VERSION = "0.5.1"
+_VERSION = "1.0.0"
 _MAX_IDENTITY_TEXT_BYTES = 65_536
 
 
@@ -178,7 +178,7 @@ class LocalTransport(BaseTransport):
         return [TRANSPORT_HELPER_EXECUTABLE]
 
     async def _perform_read(self, params: ReadParams) -> tuple[str, bool]:
-        if params.kind in (ReadKind.FILE, ReadKind.SERVICE_STATE, ReadKind.SERVICE_LOGS):
+        if params.kind in (ReadKind.FILE, ReadKind.SERVICE_STATE, ReadKind.SERVICE_LOGS, ReadKind.PROBE):
             return await self._read_via_helper(params)
         identity = await self._probe_identity()
         if params.kind is ReadKind.MACHINE_ID:

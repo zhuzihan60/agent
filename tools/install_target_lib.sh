@@ -82,9 +82,9 @@ try:
     value = json.loads(raw, object_pairs_hook=unique)
     allowed = {"protocol_version", "target_id", "ssh_public_key", "operation_public_key",
                "controller_key_fingerprint", "allowed_source_cidrs", "managed_resources",
-               "confirm_managed_resources"}
+               "confirm_managed_resources", "diagnostic_probes"}
     if type(value) is not dict or set(value) - allowed: fail("unknown configuration field")
-    required = allowed - {"confirm_managed_resources"}
+    required = allowed - {"confirm_managed_resources", "diagnostic_probes"}
     if not required <= set(value): fail("missing configuration field")
     if value["protocol_version"] != "1.0": fail("protocol_version must be 1.0")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value["target_id"]): fail("invalid target_id")
@@ -125,6 +125,25 @@ try:
             fail("package grants are unsupported by the hardened target executor")
     if resources and value.get("confirm_managed_resources") != "ENABLE":
         fail("nonempty managed_resources requires literal ENABLE")
+    probes = value.get("diagnostic_probes", [])
+    if type(probes) is not list or len(probes) > 8:
+        fail("diagnostic_probes must be a list of at most 8 probes")
+    probe_ids = set()
+    for probe in probes:
+        if type(probe) is not dict or set(probe) - {"id", "kind", "resource", "max_bytes"} or not {"id", "kind", "resource"} <= set(probe):
+            fail("invalid diagnostic probe shape")
+        if any(type(probe[field]) is not str for field in ("id", "kind", "resource")):
+            fail("diagnostic probe fields must be strings")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", probe["id"]) or probe["id"] in probe_ids:
+            fail("invalid or duplicate diagnostic probe id")
+        probe_ids.add(probe["id"])
+        if probe["kind"] not in {"filesystem", "memory", "load", "file", "package", "tcp", "dns"}:
+            fail("invalid diagnostic probe kind")
+        if not probe["resource"] or len(probe["resource"]) > 1024 or any(ord(c) < 32 or ord(c) == 127 for c in probe["resource"]):
+            fail("invalid diagnostic probe resource")
+        bound = probe.get("max_bytes", 1048576)
+        if type(bound) is not int or not 1 <= bound <= 1048576:
+            fail("invalid diagnostic probe max_bytes")
 except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
     fail(str(exc))
 PY
@@ -202,8 +221,9 @@ PY
   install -d -m 0755 "$TARGET_ETC"
   drop_in_dir="$TARGET_SYSTEMD/a4diag-target-executor.service.d"
   install -d -m 0755 "$drop_in_dir"
-  python3.11 - "$config" "$TARGET_ETC/policy.json.tmp" "$drop_in_dir/managed-roots.conf.tmp" "$fingerprint" <<'PY'
+  "$runtime_python" - "$config" "$TARGET_ETC/policy.json.tmp" "$drop_in_dir/managed-roots.conf.tmp" "$fingerprint" <<'PY'
 import json, pathlib, sys
+from a4diag_target.policy import TargetPolicy
 source = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 resources = source["managed_resources"]
 roots, units, packages = [], [], []
@@ -216,7 +236,9 @@ for item in resources:
     else: raise ValueError("invalid managed resource capability")
 policy = {"target_id": source["target_id"], "target_fingerprint": sys.argv[4],
           "controller_key_fingerprint": source["controller_key_fingerprint"],
-          "managed_roots": roots, "allowed_units": units, "allowed_packages": packages}
+          "managed_roots": roots, "allowed_units": units, "allowed_packages": packages,
+          "diagnostic_probes": source.get("diagnostic_probes", [])}
+policy = TargetPolicy.model_validate(policy).model_dump(mode="json")
 pathlib.Path(sys.argv[2]).write_text(json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 lines = [
     "[Service]",
@@ -225,6 +247,8 @@ lines = [
 ]
 if roots:
     lines.append("ReadWritePaths=" + " ".join(sorted(roots)))
+if any(probe["kind"] in {"tcp", "dns"} for probe in policy["diagnostic_probes"]):
+    lines.extend(["RestrictAddressFamilies=", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"])
 pathlib.Path(sys.argv[3]).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
   install -m 0600 "$TARGET_ETC/policy.json.tmp" "$TARGET_ETC/policy.json"
@@ -272,10 +296,10 @@ install_target() {
     touch "$destination/.runtime-ready"
   fi
   if [ "${A4DIAG_TARGET_INJECT_FAILURE:-}" = "before_switch" ]; then die "injected failure before switch"; fi
+  write_configuration "$config" "$destination/venv/bin/python"
   ln -sfn "$destination" "$TARGET_CURRENT.tmp.$$"
   mv -Tf "$TARGET_CURRENT.tmp.$$" "$TARGET_CURRENT"
   install -m 0755 "$destination/venv/bin/a4diag-transport-helper" "$TARGET_LIBEXEC/a4diag-transport-helper"
-  write_configuration "$config" "$destination/venv/bin/python"
   install -m 0644 "$destination/systemd/a4diag-target-executor.service" "$TARGET_SYSTEMD/a4diag-target-executor.service"
   install -m 0644 "$destination/systemd/a4diag-target-executor.socket" "$TARGET_SYSTEMD/a4diag-target-executor.socket"
   if [ "${A4DIAG_TARGET_SKIP_SYSTEMD:-0}" != "1" ]; then
@@ -287,11 +311,13 @@ install_target() {
     # OpenSSH rejects even for public keys when UsePAM=no. The authorized key
     # remains restricted to the fixed relay command with forwarding disabled.
     usermod --shell /bin/sh --password '*' a4diag-target
+    # Stop both old units before recreating runtime paths. Older services
+    # remove the directory on stop; an active socket may already be unlinked.
+    systemctl stop a4diag-target-executor.socket a4diag-target-executor.service
     systemd-tmpfiles --create a4diag-target.conf
     chown -R root:root "$TARGET_STATE/executor" "$TARGET_ETC"
     chown -R a4diag-target:a4diag-target "$TARGET_STATE/.ssh"
     systemctl daemon-reload
-    systemctl try-restart a4diag-target-executor.service
     systemctl enable --now a4diag-target-executor.socket
   fi
   log "installed restricted target runtime $version"

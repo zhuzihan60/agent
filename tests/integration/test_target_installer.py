@@ -119,7 +119,8 @@ def test_target_configuration_rejects_package_grants_without_a_separate_helper(
 
 
 @POSIX
-def test_target_install_is_restricted_idempotent_and_rolls_back(tmp_path: Path) -> None:
+@pytest.mark.parametrize("network_probe", [False, True])
+def test_target_install_is_restricted_idempotent_and_rolls_back(tmp_path: Path, network_probe: bool) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     python = fake_bin / "python3.11"
@@ -158,16 +159,16 @@ exit 0
         (release / "systemd" / name).write_text("[Unit]\n", encoding="utf-8")
     (release / "systemd" / "sysusers.d" / "a4diag-target.conf").write_text("u a4diag-target\n", encoding="utf-8")
     (release / "systemd" / "tmpfiles.d" / "a4diag-target.conf").write_text("d /run/a4diag-target\n", encoding="utf-8")
-    (release / "VERSION").write_text("0.5.1\n", encoding="utf-8")
+    (release / "VERSION").write_text("1.0.0\n", encoding="utf-8")
     for name in (
-        "a4diag-0.5.1-py3-none-any.whl",
-        "a4diag_builtin_plugins-0.5.1-py3-none-any.whl",
-        "a4diag_target_runtime-0.5.1-py3-none-any.whl",
+        "a4diag-1.0.0-py3-none-any.whl",
+        "a4diag_builtin_plugins-1.0.0-py3-none-any.whl",
+        "a4diag_target_runtime-1.0.0-py3-none-any.whl",
     ):
         (release / "wheelhouse" / name).write_bytes(b"wheel")
     artifacts = sorted(path for path in release.rglob("*") if path.is_file())
     manifest = {
-        "version": "0.5.1",
+        "version": "1.0.0",
         "artifacts": {
             path.relative_to(release).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in artifacts
@@ -194,6 +195,7 @@ exit 0
                     {"capability": "files", "resource": "/etc/example"},
                 ],
                 confirm_managed_resources="ENABLE",
+                **({"diagnostic_probes": [{"id": "app-tcp", "kind": "tcp", "resource": "tcp://127.0.0.1:8080"}]} if network_probe else {}),
             )
         ),
         encoding="utf-8",
@@ -234,6 +236,7 @@ exit 0
         (target_root / "etc" / "a4diag-target" / "policy.json").read_text(encoding="utf-8")
     )
     assert policy["managed_roots"] == ["/srv/app", "/etc/example"]
+    assert len(policy["diagnostic_probes"]) == int(network_probe)
     drop_in = (
         target_root
         / "etc"
@@ -247,15 +250,21 @@ exit 0
         "ReadWritePaths=\n"
         "ReadWritePaths=/run/a4diag-target /var/lib/a4diag-target/executor\n"
         "ReadWritePaths=/etc/example /srv/app\n"
+        + ("RestrictAddressFamilies=\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n" if network_probe else "")
     )
     commands = command_log.read_text(encoding="utf-8").splitlines()
     assert commands.count("usermod --shell /bin/sh --password * a4diag-target") == 2
-    assert commands.count(
-        "systemctl try-restart a4diag-target-executor.service"
-    ) == 2
-    assert commands.count(
-        "systemctl enable --now a4diag-target-executor.socket"
-    ) == 2
+    # Upgrades must stop the old service before tmpfiles recreates its runtime
+    # directory, then rebind the socket (including an already unlinked one).
+    stop = "systemctl stop a4diag-target-executor.socket a4diag-target-executor.service"
+    start = "systemctl enable --now a4diag-target-executor.socket"
+    assert commands.count(stop) == 2
+    assert commands.count(start) == 2
+    for start_index in (index for index, command in enumerate(commands) if command == start):
+        stop_index = max(index for index in range(start_index) if commands[index] == stop)
+        create_index = commands.index("systemd-tmpfiles --create a4diag-target.conf", stop_index)
+        reload_index = commands.index("systemctl daemon-reload", create_index)
+        assert stop_index < create_index < reload_index < start_index
 
     shutil.rmtree(target_root / "srv" / "app")
     (target_root / "srv" / "app").symlink_to(
