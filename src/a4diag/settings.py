@@ -26,7 +26,8 @@ class ModelSettings(BaseModel):
     plugin: str = "model-openai-compatible"
     api_key_ref: str | None = None
     api_style: Literal["openai", "azure", "ollama"] = "openai"
-    timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    timeout_seconds: float = Field(default=120.0, ge=1.0, le=300.0)
+    max_tokens: int = Field(default=8192, ge=64, le=16384, strict=True)
     deployment: str | None = None
     api_version: str | None = None
 
