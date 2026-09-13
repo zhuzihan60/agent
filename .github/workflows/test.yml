@@ -52,6 +52,7 @@ jobs:
           tests/e2e/run_production_wiring.sh
           A4DIAG_E2E=1 A4DIAG_E2E_EVIDENCE=/tmp/a4diag-e2e/evidence.json \
             python -m pytest -q tests/e2e/test_production_wiring.py
+          sudo env A4DIAG_TEST_SYSTEMD=1 "$(command -v python)" -m pytest -q tests/integration/test_target_systemd_lifecycle.py
 
   build:
     runs-on: ubuntu-latest

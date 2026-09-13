@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import errno
 import json
 import socket
 import sys
@@ -23,7 +24,14 @@ def main(argv=None) -> int:
         try:
             with socket.create_connection((target.hostname, target.port), timeout=3.0):
                 result = {"reachable": True}
-        except OSError:
+        except OSError as exc:
+            # Local resource/permission/resolver failures are not evidence that
+            # the remote endpoint is down. Only completed connection failures
+            # may satisfy an administrator's negative reachability predicate.
+            if not isinstance(exc, TimeoutError) and exc.errno not in {
+                errno.ECONNREFUSED, errno.ETIMEDOUT, errno.ENETUNREACH, errno.EHOSTUNREACH,
+            }:
+                return 1
             result = {"reachable": False}
     else:
         try:

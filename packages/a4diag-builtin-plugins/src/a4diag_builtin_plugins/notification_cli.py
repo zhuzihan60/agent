@@ -22,7 +22,7 @@ from a4diag_builtin_plugins.notification_common import (
     redact_event,
 )
 
-_VERSION = "0.5.1"
+_VERSION = "1.0.0"
 
 
 class CliNotification(BaseNotificationPlugin):

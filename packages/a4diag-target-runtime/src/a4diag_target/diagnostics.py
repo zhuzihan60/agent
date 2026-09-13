@@ -11,7 +11,7 @@ from pathlib import Path
 from a4diag_builtin_plugins.transport_common import MAX_DIAGNOSTIC_BODY_BYTES, ReadKind, ReadParams, SubprocessRunner
 from a4diag_target.policy import TargetPolicy
 from a4diag_target.linux_probes import run_probe
-from a4diag.linux_probes import validate_probe_output
+from a4diag.linux_probes import probe_definition_digest, validate_probe_output
 
 DIAGNOSTIC_TIMEOUT_SECONDS = 10.0
 _STATE_PROPERTIES = ("ActiveState", "SubState", "LoadState", "Result", "ExecMainStatus", "MainPID", "UnitFileState")
@@ -65,7 +65,8 @@ async def read_diagnostic(root: Path, request: dict[str, object], policy: Target
         probe = policy.authorize_probe(params.probe_id)
         try:
             result = validate_probe_output(probe, await run_probe(root, probe))
-            raw = json.dumps(result, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            envelope = {"probe_digest": probe_definition_digest(probe), "result": result}
+            raw = json.dumps(envelope, separators=(",", ":"), allow_nan=False).encode("utf-8")
             if len(raw) > limit:
                 return {"ok": False, "reason": "read_failed"}
             return _bounded_response(raw, limit)

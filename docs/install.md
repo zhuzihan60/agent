@@ -1,6 +1,6 @@
-# A4Diag v0.5.1 安装与升级指南
+# A4Diag v1.0.0 安装与升级指南
 
-本指南对应 v0.5.1。升级前请阅读 [v0.5.1 发布说明](release/v0.5.1.md)，先升级目标端，再升级控制端并重新初始化插件配置。
+本指南对应 v1.0.0。升级前请阅读 [v1.0.0 发布说明](release/v1.0.0.md)，先升级目标端，再升级控制端并重新初始化插件配置。
 
 A4Diag 由两个独立部分组成：
 
@@ -240,4 +240,4 @@ sudo rm -rf /opt/a4diag/releases /opt/a4diag/current
 - [v0.3 到 v0.4 迁移指南](migration/v0.3-to-v0.4.md)
 - [验收运行手册](testing/acceptance-runbook.md)
 - [发行版兼容矩阵](testing/distro-matrix.md)
-- [v0.5.1 发布说明](release/v0.5.1.md)
+- [v1.0.0 发布说明](release/v1.0.0.md)

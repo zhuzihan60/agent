@@ -24,6 +24,8 @@ ReadOnlyPaths=/etc/a4diag-target /opt/a4diag-target/current
 ReadWritePaths=/run/a4diag-target /var/lib/a4diag-target/executor
 RuntimeDirectory=a4diag-target
 RuntimeDirectoryMode=0750
+# The socket remains active when this service stops and owns its listener.
+RuntimeDirectoryPreserve=yes
 MemoryMax=256M
 TasksMax=32
 LimitNOFILE=1024

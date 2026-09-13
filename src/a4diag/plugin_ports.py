@@ -33,7 +33,7 @@ from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import canonical_operation_digest
 from a4diag.runtime import RuntimeFailure
 from a4diag.recovery import check_http
-from a4diag.linux_probes import PROBE_OUTPUTS, parse_probe_output, evaluate_probe_conditions
+from a4diag.linux_probes import PROBE_OUTPUTS, parse_bound_probe_output, evaluate_probe_conditions
 from a4diag.redaction import redact
 from a4diag.settings import AgentSettings
 from a4diag.workflow import (
@@ -485,7 +485,7 @@ class _RpcCollectorPort:
                     probe = next(p for p in target.diagnostic_probes if p.id == source.resource)
                     if result["data"]["truncated"]:
                         raise ValueError("truncated probe")
-                    parse_probe_output(probe, result["stdout"])
+                    parse_bound_probe_output(probe, result["stdout"])
                 row.update(content=redact(result["stdout"]), available=True,
                            truncated=result["data"]["truncated"])
             except Exception:
@@ -526,7 +526,7 @@ class _RpcCollectorPort:
                         }), timeout=check.timeout_seconds))
                         if response.get("ok") is not True or response.get("data", {}).get("truncated") is not False:
                             raise ValueError("probe unavailable")
-                        state = parse_probe_output(probe, response["stdout"])
+                        state = parse_bound_probe_output(probe, response["stdout"])
                         healthy = evaluate_probe_conditions(state, check.conditions)
                         result = {"ok": healthy, "status": "probe_healthy" if healthy else "probe_unhealthy"}
                     except Exception:

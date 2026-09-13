@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from a4diag.linux_probes import LinuxProbe
+from a4diag.linux_probes import LinuxProbe, parse_bound_probe_output
 from a4diag_builtin_plugins.transport_common import ReadParams, RunOutcome
 from a4diag_builtin_plugins.transport_local import LocalTransport
 from a4diag_builtin_plugins.transport_ssh import SshTargetConfig, SshTransport
@@ -101,7 +101,7 @@ def test_probe_survives_production_transport_helper_and_server(tmp_path, monkeyp
             host="example.com", port=22, user="a4diag", identity_file="/etc/key", known_hosts="/etc/known_hosts"))
     result = asyncio.run(transport.read(ReadParams(kind="probe", probe_id="config")))
     assert result.ok is True
-    assert json.loads(result.stdout) == data
+    assert parse_bound_probe_output(target._policy.diagnostic_probes[0], result.stdout) == data
     assert result.data == {"kind": "probe", "truncated": False}
     assert runner.calls[0][1] == {"method": "read", "kind": "probe", "probe_id": "config", "limit": 65536}
     assert seen == [(tmp_path, target._policy.diagnostic_probes[0])]
@@ -138,7 +138,7 @@ def test_actual_file_probe_through_transport(tmp_path):
     (folder / "config").chmod(0o640)
     result = asyncio.run(LocalTransport(runner=RelayRunner(server(tmp_path))).read(ReadParams(kind="probe", probe_id="config")))
     assert result.ok and not result.data["truncated"]
-    assert json.loads(result.stdout)["mode"] == 0o640
+    assert parse_bound_probe_output(server(tmp_path)._policy.diagnostic_probes[0], result.stdout)["mode"] == 0o640
 
 
 def test_transport_rejects_truncated_probe_response():
