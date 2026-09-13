@@ -21,6 +21,7 @@ from a4diag.plugin_api.target_protocol import SignedTargetRequest, TargetVerifie
 from a4diag_builtin_plugins.capability_common import LocalFileAdapter
 from a4diag_builtin_plugins.transport_common import TargetIdentity, identity_fingerprint
 from a4diag_target.executor import ExecutorError, TargetExecutor
+from a4diag_target.diagnostics import read_diagnostic
 from a4diag_target.policy import TargetPolicy
 from a4diag_target.replay import SqliteReplayLedger
 
@@ -128,7 +129,9 @@ class TargetSocketServer:
         replay_path: Path = Path("/var/lib/a4diag-target/executor/replay.sqlite3"),
     ) -> None:
         self._identity_root = Path(os.environ.get("A4DIAG_TARGET_IDENTITY_ROOT", "/"))
+        self._diagnostic_root = Path("/")
         policy = TargetPolicy.model_validate_json(policy_path.read_text(encoding="utf-8"))
+        self._policy = policy
         key = serialization.load_pem_public_key(public_key_path.read_bytes())
         if not isinstance(key, Ed25519PublicKey):
             raise TypeError("target operation public key must be Ed25519")
@@ -152,6 +155,11 @@ class TargetSocketServer:
                     probe_identity(self._identity_root).model_dump(mode="json")
                 )
             if value.get("method") == "read":
+                if value.get("kind") in ("file", "service_state", "service_logs"):
+                    return canonical_json_bytes(
+                        await read_diagnostic(self._diagnostic_root, value, self._policy),
+                        max_bytes=MAX_FRAME_BYTES,
+                    )
                 return canonical_json_bytes(read_identity(self._identity_root, value))
             result = await self._executor.execute(
                 SignedTargetRequest.model_validate(value)

@@ -6,6 +6,8 @@ import re
 import unicodedata
 from enum import StrEnum
 
+from a4diag.recovery import EvidenceSource, RecoveryCheck, validate_catalog
+
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -208,6 +210,9 @@ class TargetConfig(BaseModel):
     auto_execute_low: bool = False
     capabilities: tuple[CapabilityGrant, ...] = ()
     notification_required: bool = False
+    evidence_sources: tuple[EvidenceSource, ...] = Field(default=(), max_length=8)
+    recovery_checks: tuple[RecoveryCheck, ...] = Field(default=(), max_length=8)
+    minimum_confidence: float = Field(default=0.7, ge=0.0, le=1.0, allow_inf_nan=False)
 
     @field_validator("id")
     @classmethod
@@ -245,6 +250,7 @@ class TargetConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_target(self) -> TargetConfig:
+        validate_catalog(self.evidence_sources, self.recovery_checks)
         if self.identity_ref != f"target/{self.id}":
             raise ValueError("identity_ref must equal target/{id}")
 

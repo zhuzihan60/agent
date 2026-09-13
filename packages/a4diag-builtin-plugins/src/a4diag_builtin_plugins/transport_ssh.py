@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -23,10 +22,8 @@ from a4diag_builtin_plugins.transport_common import (
     ReadParams,
     SubprocessRunner,
     TRANSPORT_HELPER_EXECUTABLE,
-    TRANSPORT_READ_TIMEOUT_SECONDS,
     TargetIdentity,
     TransportIdentityError,
-    TransportReadError,
     validate_absolute_path,
     validate_sha256_digest,
 )
@@ -34,7 +31,7 @@ from a4diag_builtin_plugins.transport_common import (
 SSH_EXECUTABLE = "/usr/bin/ssh"
 SSH_CONNECT_TIMEOUT = "10"
 SSH_IDENTITY_PROBE_OUTPUT_LIMIT = 65_536
-_VERSION = "0.4.3"
+_VERSION = "0.5.1"
 
 _HOSTNAME_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$")
 _IPV6_PATTERN = re.compile(r"^[0-9A-Fa-f:]+$")
@@ -140,7 +137,8 @@ class SshTransport(BaseTransport):
                 raise ValueError("identity response must be an object")
             return TargetIdentity(
                 machine_id=str(payload["machine_id"]),
-                host_key_sha256=self._config.host_key_sha256,
+                host_key_sha256=(self._config.host_key_sha256
+                                 or payload.get("host_key_sha256")),
                 os_id=str(payload["os_id"]),
                 os_version_id=str(payload["os_version_id"]),
                 systemd_version=str(payload["systemd_version"]),
@@ -152,27 +150,7 @@ class SshTransport(BaseTransport):
         return build_ssh_argv(self._config)
 
     async def _perform_read(self, params: ReadParams) -> tuple[str, bool]:
-        request: dict[str, Any] = {
-            "method": "read",
-            "kind": params.kind.value,
-            "path": params.path,
-            "limit": int(params.output_limit_bytes),
-        }
-        outcome = await self._run_helper(
-            build_ssh_argv(self._config),
-            request,
-            timeout_seconds=TRANSPORT_READ_TIMEOUT_SECONDS,
-            output_limit_bytes=int(params.output_limit_bytes),
-        )
-        if outcome.timed_out or not outcome.started or outcome.returncode != 0:
-            raise TransportReadError("read_failed")
-        try:
-            payload = json.loads(outcome.stdout)
-            if type(payload) is not dict:
-                raise ValueError("read response must be an object")
-            return str(payload["content"]), bool(payload.get("truncated", False))
-        except (ValueError, KeyError, TypeError) as error:
-            raise TransportReadError("read_failed") from error
+        return await self._read_via_helper(params)
 
 
 def main() -> None:

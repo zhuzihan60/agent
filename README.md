@@ -1,4 +1,6 @@
-# A4Diag 0.4.3
+# A4Diag 0.5.1
+
+v0.5.1 包含[服务异常与 HTTP 恢复闭环](docs/deployment/service-http-recovery.md)。控制端、内置插件和目标端必须使用同一版本。兼容性变化和升级顺序见 [v0.5.1 发布说明](docs/release/v0.5.1.md)。
 
 [![CI](https://github.com/zhuzihan60/agent/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/zhuzihan60/agent/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/zhuzihan60/agent)](https://github.com/zhuzihan60/agent/releases/latest)
@@ -13,20 +15,21 @@ A4Diag 是一个基于 LangGraph 的通用 Linux 故障诊断与受控修复 Age
 
 ### 系统要求
 
-- x86_64 Linux 与 systemd
+- x86_64 Linux；控制端要求 systemd 247+
 - Python 3.11
 - `curl`、`openssl`、`sha256sum`、`tar`
 - root 权限
 
-GitHub Actions 已验证以下发行版：
+控制端安装验证范围：
 
 | 发行版 | 已验证版本 |
 | --- | --- |
-| Alibaba Cloud Linux | 3 |
-| Rocky Linux | 8、9 |
-| AlmaLinux | 8、9 |
+| Rocky Linux | 9 |
+| AlmaLinux | 9 |
 | Ubuntu | 22.04、24.04 |
 | Debian | 12 |
+
+Alibaba Cloud Linux 3、Rocky/AlmaLinux 8 的旧版 systemd 不满足控制端要求，CI 验证安装器明确拒绝。目标端单独验证 Alibaba Cloud Linux 3、Rocky Linux 9、Ubuntu 24.04 和 Debian 12。
 
 ### 一键安装
 
@@ -50,7 +53,7 @@ targets: []
 plugins: []
 ```
 
-当前正式版本：[v0.4.3](https://github.com/zhuzihan60/agent/releases/tag/v0.4.3)
+当前版本：[v0.5.1](https://github.com/zhuzihan60/agent/releases/tag/v0.5.1)
 
 ## 安全模型
 

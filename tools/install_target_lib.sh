@@ -254,15 +254,22 @@ install_target() {
   validate_managed_root_directories "$config"
   verify_release "$release"
   version="$(cat "$release/VERSION")"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release version"
   destination="$TARGET_BASE/releases/$version"
   install -d -m 0755 "$TARGET_BASE/releases" "$TARGET_LIBEXEC" "$TARGET_SYSTEMD"
   install -d -m 0750 "$TARGET_STATE"
   install -d -m 0700 "$TARGET_STATE/executor" "$TARGET_STATE/.ssh"
   if [ ! -d "$destination" ]; then
     cp -a "$release" "$destination.tmp.$$"
-    python3.11 -m venv "$destination.tmp.$$/venv"
-    "$destination.tmp.$$/venv/bin/python" -m pip install --no-index --find-links "$destination.tmp.$$/wheelhouse" "a4diag-target-runtime==$version"
     mv "$destination.tmp.$$" "$destination"
+  fi
+  # Python environments contain absolute interpreter paths. Build at the final
+  # version path; only publish current after pip succeeds. Retry partial builds,
+  # including installs made by the old relocating installer.
+  if [ ! -f "$destination/.runtime-ready" ]; then
+    python3.11 -m venv "$destination/venv"
+    "$destination/venv/bin/python" -m pip install --force-reinstall --no-index --find-links "$destination/wheelhouse" "a4diag-target-runtime==$version"
+    touch "$destination/.runtime-ready"
   fi
   if [ "${A4DIAG_TARGET_INJECT_FAILURE:-}" = "before_switch" ]; then die "injected failure before switch"; fi
   ln -sfn "$destination" "$TARGET_CURRENT.tmp.$$"
@@ -276,6 +283,10 @@ install_target() {
     install -m 0644 "$destination/systemd/sysusers.d/a4diag-target.conf" "${TARGET_ROOT}etc/sysusers.d/a4diag-target.conf"
     install -m 0644 "$destination/systemd/tmpfiles.d/a4diag-target.conf" "${TARGET_ROOT}etc/tmpfiles.d/a4diag-target.conf"
     systemd-sysusers a4diag-target.conf
+    # '*' is an unusable password hash, without the '!' account lock that
+    # OpenSSH rejects even for public keys when UsePAM=no. The authorized key
+    # remains restricted to the fixed relay command with forwarding disabled.
+    usermod --shell /bin/sh --password '*' a4diag-target
     systemd-tmpfiles --create a4diag-target.conf
     chown -R root:root "$TARGET_STATE/executor" "$TARGET_ETC"
     chown -R a4diag-target:a4diag-target "$TARGET_STATE/.ssh"

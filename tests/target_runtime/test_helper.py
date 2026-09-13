@@ -32,6 +32,7 @@ def test_helper_relays_one_bounded_json_object_to_fixed_socket() -> None:
         (b"{}\n", {"SSH_ORIGINAL_COMMAND": "uname -a"}),
         (b'{"x":1,"x":2}\n', {}),
     ),
+    ids=["multiple_objects", "oversized", "unexpected_command", "duplicate_key"],
 )
 def test_helper_rejects_ambiguous_oversized_or_command_input(
     body: bytes, environment: dict[str, str]

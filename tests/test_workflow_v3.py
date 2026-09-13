@@ -208,7 +208,7 @@ class FakeModel:
         self.calls.append("diagnose")
         if self.diagnose_error is not None:
             raise self.diagnose_error
-        return {"cause": "service configuration drift", "confidence": 90}
+        return {"cause": "service configuration drift", "confidence": 0.9}
 
     def plan(
         self,
