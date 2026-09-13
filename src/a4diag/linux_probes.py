@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import re
 from typing import Literal
@@ -148,7 +149,14 @@ def validate_probe_output(probe: LinuxProbe, data: object) -> dict:
     return data
 
 
-def parse_probe_output(probe: LinuxProbe, text: str) -> dict:
+def probe_definition_digest(probe: LinuxProbe) -> str:
+    """Bind observations to the complete administrator definition, including defaults."""
+    canonical = json.dumps(probe.model_dump(mode="json"), sort_keys=True,
+                           separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _parse_probe_json(text: str) -> object:
     if len(text.encode("utf-8")) > 16384:
         raise ValueError("probe output too large")
     def unique(pairs):
@@ -159,9 +167,21 @@ def parse_probe_output(probe: LinuxProbe, text: str) -> dict:
             result[key] = value
         return result
     try:
-        return validate_probe_output(probe, json.loads(text, object_pairs_hook=unique))
+        return json.loads(text, object_pairs_hook=unique)
     except RecursionError as error:
         raise ValueError("probe output nesting too deep") from error
+
+
+def parse_probe_output(probe: LinuxProbe, text: str) -> dict:
+    return validate_probe_output(probe, _parse_probe_json(text))
+
+
+def parse_bound_probe_output(probe: LinuxProbe, text: str) -> dict:
+    envelope = _parse_probe_json(text)
+    if (not isinstance(envelope, dict) or set(envelope) != {"probe_digest", "result"}
+        or envelope["probe_digest"] != probe_definition_digest(probe)):
+        raise ValueError("probe definition mismatch")
+    return validate_probe_output(probe, envelope["result"])
 
 
 def evaluate_probe_conditions(data: dict, conditions) -> bool:

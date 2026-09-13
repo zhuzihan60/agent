@@ -1,6 +1,6 @@
 # 发行版验证矩阵
 
-A4Diag 0.5.1 通过 `.github/workflows/test.yml` 和 `release.yml` 验证以下环境。控制端要求 systemd 247+；矩阵绿色既可能表示安装成功，也可能表示旧环境被按预期拒绝，不能一概视为支持。
+A4Diag 1.0.0 通过 `.github/workflows/test.yml` 和 `release.yml` 验证以下环境。控制端要求 systemd 247+；矩阵绿色既可能表示安装成功，也可能表示旧环境被按预期拒绝，不能一概视为支持。
 
 | 发行版 | 版本 | 容器镜像 |
 | --- | --- | --- |
@@ -19,7 +19,7 @@ Alibaba Cloud Linux CI 容器是通过 digest 固定的 Alibaba Linux 3 测试�
 ## 每个矩阵作业的门禁
 
 - **unit**：在 Linux Python 3.11 上运行完整 `pytest -q -rs`，覆盖 unit、contract、integration 和 acceptance。Windows 不是受支持的运行时，也不是发布门禁。
-- **build**：构建同为 0.5.1 的控制端、内置插件和目标端 wheel；运行 `verify-source` 检查固定目标字面量，并验证两类发布包的清单和哈希。
+- **build**：构建同为 1.0.0 的控制端、内置插件和目标端 wheel；运行 `verify-source` 检查固定目标字面量，并验证两类发布包的清单和哈希。
 - **distro**：在每个特权容器镜像中运行 `distro_smoke.sh`，离线安装组装后的发布包；验证只读默认值 `global_mode: read_only`、`targets: []`、离线 `self-check`，并确认 systemd 单元绝不允许写入 `/etc/a4diag/config.yaml`。
 - **release**：只由 `v*` 标签触发；从 lockfile 重新构建，使用仓库 secret 对 manifest 签名，重新验证签名，在已签名发布包上运行发行版 smoke，并且只有全部必需作业成功后才发布。
 

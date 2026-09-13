@@ -311,11 +311,13 @@ install_target() {
     # OpenSSH rejects even for public keys when UsePAM=no. The authorized key
     # remains restricted to the fixed relay command with forwarding disabled.
     usermod --shell /bin/sh --password '*' a4diag-target
+    # Stop both old units before recreating runtime paths. Older services
+    # remove the directory on stop; an active socket may already be unlinked.
+    systemctl stop a4diag-target-executor.socket a4diag-target-executor.service
     systemd-tmpfiles --create a4diag-target.conf
     chown -R root:root "$TARGET_STATE/executor" "$TARGET_ETC"
     chown -R a4diag-target:a4diag-target "$TARGET_STATE/.ssh"
     systemctl daemon-reload
-    systemctl try-restart a4diag-target-executor.service
     systemctl enable --now a4diag-target-executor.socket
   fi
   log "installed restricted target runtime $version"

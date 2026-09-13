@@ -1,6 +1,6 @@
 import json
 import pytest
-from a4diag.linux_probes import LinuxProbe, parse_probe_output
+from a4diag.linux_probes import LinuxProbe, parse_probe_output, probe_definition_digest
 from test_recovery_loop import Client, collector, target
 
 
@@ -21,7 +21,9 @@ class ProbeClient(Client):
         if method == "verify_identity":
             return await super().call(method, params)
         self.calls.append((method, params))
-        return dict(ok=True, stdout=json.dumps(dict(exists=True, mode=self.mode, size_bytes=1, sha256="")),
+        return dict(ok=True, stdout=json.dumps(dict(
+                        probe_digest=probe_definition_digest(configured().diagnostic_probes[0]),
+                        result=dict(exists=True, mode=self.mode, size_bytes=1, sha256=""))),
                     data=dict(truncated=self.truncated))
 
 
