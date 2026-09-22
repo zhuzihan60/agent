@@ -4,6 +4,8 @@ import asyncio
 import base64
 import hashlib
 import json
+import multiprocessing
+import os
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -190,6 +192,19 @@ def _handle_signed(
     return value
 
 
+def _handle_signed_in_subprocess(
+    server: TargetSocketServer,
+    payload: bytes,
+    effect_calls: list[tuple[str, ...]],
+    connection: object,
+) -> None:
+    try:
+        raw = asyncio.run(server.handle(payload))
+        connection.send((raw, effect_calls))  # type: ignore[attr-defined]
+    finally:
+        connection.close()  # type: ignore[attr-defined]
+
+
 def test_target_systemd_version_uses_fixed_cross_distro_systemctl() -> None:
     completed = type("Completed", (), {"stdout": b"systemd 255 (255.4-1)\n"})()
     with patch("a4diag_target.server.subprocess.run", return_value=completed) as execute:
@@ -323,6 +338,56 @@ def test_socket_server_policy_reload_failure_denies_signed_effect(
 
     assert result == {"ok": False, "reason": "target_policy_unavailable"}
     assert effects == []
+
+
+def test_socket_server_fifo_policy_fails_closed_without_blocking_or_cached_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = int(time.time())
+    key = Ed25519PrivateKey.generate()
+    signer = TargetSigner(key)
+    profile = _profile(expires_at=now + 600)
+    effects: list[tuple[str, ...]] = []
+    server, policy_path = _server(
+        tmp_path,
+        monkeypatch,
+        key=key,
+        policy=_policy(key, profile),
+        effect_calls=effects,
+    )
+    policy_path.unlink()
+    os.mkfifo(policy_path)
+    payload = canonical_json_bytes(
+        signer.sign(
+            _request(
+                profile,
+                TargetLifecycleV11.PREPARE,
+                "nonce-fifo-policy",
+                now,
+            )
+        ).model_dump(mode="json")
+    )
+    context = multiprocessing.get_context("fork")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_handle_signed_in_subprocess,
+        args=(server, payload, effects, child),
+    )
+    process.start()
+    child.close()
+    process.join(timeout=2)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=2)
+        pytest.fail("FIFO policy read blocked the target request")
+    assert process.exitcode == 0
+    assert parent.poll(1)
+    raw, child_effects = parent.recv()
+    parent.close()
+
+    assert json.loads(raw) == {"ok": False, "reason": "target_policy_unavailable"}
+    assert child_effects == []
 
 
 def test_socket_server_diagnostic_read_uses_current_policy(

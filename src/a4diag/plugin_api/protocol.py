@@ -25,9 +25,10 @@ from pydantic import (
 
 from a4diag.plugin_api.ticket import (
     OperationPhase,
-    OperationTicket,
     OperationTicketEnvelope,
     OperationTicketExpectation,
+    OperationTicketExpectationType,
+    OperationTicketType,
     TicketError,
     TicketVerifier,
     effect_payload_digest,
@@ -125,6 +126,19 @@ class TicketedEffectParams(OperationTicketEnvelope):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    def ticket_expectation(
+        self, phase: OperationPhase
+    ) -> OperationTicketExpectationType:
+        """Build the legacy ticket expectation for this exact effect request."""
+
+        return OperationTicketExpectation(
+            **self.model_dump(
+                exclude=set(type(self).model_fields) - _BASE_EFFECT_FIELDS
+            ),
+            phase=phase,
+            effect_payload_digest=effect_fields_digest(self),
+        )
+
 
 _BASE_EFFECT_FIELDS = frozenset(OperationTicketEnvelope.model_fields)
 
@@ -203,7 +217,7 @@ def _is_async_callable(handler: Callable[..., object]) -> bool:
 class VerifiedInvocation:
     request_id: str
     method: str
-    claims: OperationTicket
+    claims: OperationTicketType
 
 
 ParamsT = TypeVar("ParamsT", bound=BaseModel)
@@ -506,13 +520,9 @@ class PluginHost:
             if self._ticket_verifier is None or not isinstance(params, TicketedEffectParams):
                 return _error(request.id, -32603, "Internal error", "ticket_verifier_unavailable")
             try:
-                expected = OperationTicketExpectation(
-                    **params.model_dump(
-                        exclude=set(type(params).model_fields) - _BASE_EFFECT_FIELDS
-                    ),
-                    phase=binding.kind.ticket_phase,
-                    effect_payload_digest=effect_fields_digest(params),
-                )
+                phase = binding.kind.ticket_phase
+                assert phase is not None
+                expected = params.ticket_expectation(phase)
                 claims = self._ticket_verifier.verify(request.ticket, expected)  # type: ignore[attr-defined]
             except (ValidationError, TicketError) as error:
                 if isinstance(error, TicketError):

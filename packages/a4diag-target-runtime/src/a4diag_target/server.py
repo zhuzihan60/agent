@@ -153,7 +153,7 @@ class TargetSocketServer:
         try:
             descriptor = os.open(
                 self._policy_path,
-                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
             )
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):

@@ -88,3 +88,33 @@ Ruling: every-stage profile rechecks must take effect in the long-running `Targe
 - Missing, malformed, oversized, non-regular, and symlinked policy paths produce the stable `target_policy_unavailable` denial.
 - A real `TargetSocketServer.handle` test signs prepare, atomically replaces the policy with a revoked profile set, signs apply, and verifies `profile_revoked` with zero adapter effects.
 - Per the review ruling, the previous full-suite result remains the full-suite evidence; only the affected F2 and server-related regression set was rerun for this follow-up.
+
+## Independent review corrections F2-R1 and F2-R2
+
+### RED
+
+- `run-remediation-tests.ps1 -q tests/contract/test_transport_plugins.py tests/target_runtime/test_server.py`
+  - Result: `4 failed, 58 passed in 3.81s`.
+  - Evidence: both standing and one-shot V11 prepare tickets failed at the real `PluginHost` verifier with `protocol_mismatch`; the signed profile-metadata mismatch was hidden by the same legacy-only branch; a FIFO policy replacement exceeded the bounded two-second subprocess watchdog.
+  - Log: `/opt/a4diag-remediation-test/tests-m8xexcd0/pytest.log`.
+
+### GREEN
+
+- `run-remediation-tests.ps1 -q tests/contract/test_transport_plugins.py tests/target_runtime/test_server.py`
+  - Result: `62 passed in 1.69s`.
+  - Log: `/opt/a4diag-remediation-test/tests-ws6nsv2n/pytest.log`.
+- `run-remediation-tests.ps1 -q tests/contract/test_transport_plugins.py`
+  - Result after adding explicit legacy V1.0 relay coverage: `54 passed in 1.33s`.
+  - Log: `/opt/a4diag-remediation-test/tests-hb14ethh/pytest.log`.
+- `run-remediation-tests.ps1 -q tests/test_repair_authorization.py tests/target_runtime/test_repair_protocol.py tests/target_runtime/test_server.py tests/contract/test_transport_plugins.py tests/test_operation_ticket.py tests/test_target_protocol.py tests/contract/test_plugin_protocol.py`
+  - Final focused result: `233 passed in 2.94s`.
+  - Log: `/opt/a4diag-remediation-test/tests-7ny94dbe/pytest.log`.
+
+### Correction details
+
+- The plugin host now asks each strict ticketed parameter model for its ticket expectation. The unchanged base implementation constructs the exact legacy V1.0 expectation, while transport effect parameters explicitly parse the signed target-envelope version and construct a V1.1 expectation containing the signed repair binding, authorization kind, and authorization ID.
+- Transport envelope validation dispatches `TargetRequest` and `TargetRequestV11` by their explicit protocol version, preserves the absent-version V1.0 default, and validates the common RPC bindings plus the V1.0 approval ID or V1.1 authorization ID before relay.
+- The integration test uses the real `TicketIssuer`, `TicketVerifier`, `PluginHost`, and `LocalTransport` relay with signed V1.1 prepare envelopes. It covers successful standing and one-shot authorization and rejects a separately signed profile-binding mismatch before the helper runner is called.
+- A parallel signed V1.0 prepare test verifies that the default-version ticket expectation and relay path remain unchanged.
+- Policy files are opened with `O_NONBLOCK` in addition to `O_NOFOLLOW`; the existing `fstat` regular-file check therefore rejects a FIFO without waiting for a writer. The bounded forked regression replaces a previously valid live policy with a FIFO and verifies `target_policy_unavailable`, no adapter effect, and no cached fallback.
+- Per the review instruction, the previous complete-suite evidence (`1433 passed, 4 skipped, 80 subtests passed`) and the production-revocation focused evidence (`236 passed, 1 skipped`) stand; no complete suite was repeated for this correction.

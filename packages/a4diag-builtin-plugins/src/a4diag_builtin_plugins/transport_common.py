@@ -32,12 +32,25 @@ from pydantic import (
 
 from a4diag.domain import Operation, Risk, canonical_json_bytes
 from a4diag.linux_probes import validate_probe_id
-from a4diag.plugin_api.target_protocol import SignedTargetRequest, TargetLifecycle, TargetRequest
+from a4diag.plugin_api.target_protocol import (
+    SignedTargetRequest,
+    TargetLifecycle,
+    TargetRequest,
+    TargetRequestType,
+    TargetRequestV11,
+)
 from a4diag.plugin_api.protocol import (
     EmptyParams,
     MethodBinding,
     MethodKind,
     TicketedEffectParams,
+    effect_fields_digest,
+)
+from a4diag.plugin_api.ticket import (
+    OperationPhase,
+    OperationTicketExpectationType,
+    OperationTicketExpectationV11,
+    TicketError,
 )
 
 TRANSPORT_HELPER_EXECUTABLE = "/usr/libexec/a4diag/a4diag-transport-helper"
@@ -283,18 +296,48 @@ class ExecuteTypedParams(TicketedEffectParams):
         return value
 
 
-class TransportPrepareParams(TicketedEffectParams):
+class _TransportTicketedEffectParams(TicketedEffectParams):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    def ticket_expectation(
+        self, phase: OperationPhase
+    ) -> OperationTicketExpectationType:
+        try:
+            request = _validated_transport_request(
+                self, TargetLifecycle(phase.value)
+            )
+        except TransportError as error:
+            raise TicketError(error.code) from error
+        if isinstance(request, TargetRequest):
+            return TicketedEffectParams.ticket_expectation(self, phase)
+        return OperationTicketExpectationV11(
+            transaction_id=self.transaction_id,
+            step_id=self.step_id,
+            target_id=self.target_id,
+            target_fingerprint=self.target_fingerprint,
+            operation=self.operation,
+            phase=phase,
+            effect_payload_digest=effect_fields_digest(self),
+            plan_digest=self.plan_digest,
+            risk=self.risk,
+            binding=request.binding,
+            authorization_kind=request.authorization_kind,
+            authorization_id=request.authorization_id,
+        )
+
+
+class TransportPrepareParams(_TransportTicketedEffectParams):
     model_config = ConfigDict(extra="forbid", frozen=True)
     envelope: SignedTargetRequest
 
 
-class TransportApplyParams(TicketedEffectParams):
+class TransportApplyParams(_TransportTicketedEffectParams):
     model_config = ConfigDict(extra="forbid", frozen=True)
     marker: dict[str, JsonValue]
     envelope: SignedTargetRequest
 
 
-class TransportUndoParams(TicketedEffectParams):
+class TransportUndoParams(_TransportTicketedEffectParams):
     model_config = ConfigDict(extra="forbid", frozen=True)
     marker: dict[str, JsonValue]
     undo: dict[str, JsonValue] | None = None
@@ -330,6 +373,56 @@ class RunOutcome:
     stderr: str = ""
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+
+
+def _parse_target_request(envelope: SignedTargetRequest) -> TargetRequestType:
+    try:
+        value = json.loads(envelope.payload)
+        if type(value) is not dict:
+            raise ValueError("target request must be an object")
+        version = value.get("protocol_version", "1.0")
+        if version == "1.0":
+            request_model = TargetRequest
+        elif version == "1.1":
+            request_model = TargetRequestV11
+        else:
+            raise ValueError("unsupported target request version")
+        return request_model.model_validate(value)
+    except (json.JSONDecodeError, UnicodeError, ValueError) as error:
+        raise TransportError("target_envelope_invalid") from error
+
+
+def _validated_transport_request(
+    params: TransportPrepareParams | TransportApplyParams | TransportUndoParams |
+    TransportVerifyParams | TransportReconcileParams,
+    lifecycle: TargetLifecycle,
+) -> TargetRequestType:
+    request = _parse_target_request(params.envelope)
+    if (
+        request.lifecycle.value != lifecycle.value
+        or request.transaction_id != params.transaction_id
+        or request.step_id != params.step_id
+        or request.operation != params.operation
+        or request.target_fingerprint
+        != getattr(params, "target_fingerprint", request.target_fingerprint)
+        or request.marker != getattr(params, "marker", None)
+        or request.undo != getattr(params, "undo", None)
+    ):
+        raise TransportError("target_envelope_binding_mismatch")
+    if isinstance(params, TicketedEffectParams):
+        authorization_id = (
+            request.approval_id
+            if isinstance(request, TargetRequest)
+            else request.authorization_id
+        )
+        if (
+            request.target_id != params.target_id
+            or request.plan_digest != params.plan_digest
+            or request.risk is not params.risk
+            or authorization_id != params.approval_id
+        ):
+            raise TransportError("target_envelope_binding_mismatch")
+    return request
 
 
 class ProcessRunner(Protocol):
@@ -630,29 +723,8 @@ class BaseTransport:
         params: TransportPrepareParams | TransportApplyParams | TransportUndoParams |
         TransportVerifyParams | TransportReconcileParams,
         lifecycle: TargetLifecycle,
-    ) -> TargetRequest:
-        try:
-            request = TargetRequest.model_validate_json(params.envelope.payload)
-        except ValueError as error:
-            raise TransportError("target_envelope_invalid") from error
-        if (
-            request.lifecycle is not lifecycle
-            or request.transaction_id != params.transaction_id
-            or request.step_id != params.step_id
-            or request.operation != params.operation
-            or request.target_fingerprint != getattr(params, "target_fingerprint", request.target_fingerprint)
-            or request.marker != getattr(params, "marker", None)
-            or request.undo != getattr(params, "undo", None)
-        ):
-            raise TransportError("target_envelope_binding_mismatch")
-        if isinstance(params, TicketedEffectParams) and (
-            request.target_id != params.target_id
-            or request.plan_digest != params.plan_digest
-            or request.risk is not params.risk
-            or request.approval_id != params.approval_id
-        ):
-            raise TransportError("target_envelope_binding_mismatch")
-        return request
+    ) -> TargetRequestType:
+        return _validated_transport_request(params, lifecycle)
 
     async def _relay_signed(
         self,
