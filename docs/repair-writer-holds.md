@@ -8,6 +8,12 @@ controller/target/transaction/plan identity. `stop_job_id` is absent only for
 the stop's own PREPARE/APPLY; later requests carry the admitted job ID. An
 absent dependency preserves historical canonical serialization, including V10.
 
+For an original stop's read-only job observation, the transport derives its
+stop reference from the bound job ID without changing the historical HMAC
+claim. A validated APPLY or QUERY response supplies that same reference for
+later VERIFY/RECONCILE. A dependent job always retains the original stored
+stop ID, which is distinct from the dependent job's own ID.
+
 An administrator must explicitly include `stop` in a services profile's actions.
 A disk writer setting cannot grant that action. Ordinary stop operations without
 a preparation dependency retain their existing lifecycle.

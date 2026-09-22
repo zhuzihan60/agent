@@ -73,6 +73,70 @@ def wire(deps, tmp_path):
     return deps, jobs, launches, requests, target_policy, host
 
 
+@pytest.mark.parametrize('recreated', [False, True])
+def test_held_stop_historical_claim_observes_own_job_and_read_context(deps_factory, tmp_path, recreated):
+    from a4diag.plugin_api.ticket import OperationPhase, OperationTicketRequestV11, effect_payload_digest
+    from a4diag.policy_engine import issue_repair_policy_authorization, bind_repair_preconditions
+    from a4diag.runtime import RuntimeFailure
+    from tests.target_runtime.test_preparation_dependency import dependency
+    from tests.test_repair_authorization import _operation
+    from test_workflow_v3 import POLICY_KEY
+    deps = repair_deps(deps_factory, tmp_path)
+    target = deps.settings.targets[0]
+    profile = target.repair_profiles[0].model_copy(update={'actions':('stop',)})
+    target = target.model_copy(update={'repair_profiles':(profile,)})
+    settings = deps.settings.model_copy(update={'targets':(target,)})
+    deps = replace(deps, settings=settings, policy=deps.policy.with_settings(settings))
+    deps, jobs, launches, requests, policies, host = wire(deps, tmp_path)
+    port = deps.plugins.executor
+    port.bind_transaction('repair-1')
+    operation = _operation(action='stop')
+    dep = dependency(profile, operation)
+    def ticket(phase, marker=None):
+        auth = issue_repair_policy_authorization(profile, operation,
+            target_fingerprint=policies[0].target_fingerprint, plan_digest='d'*64,
+            authorization_kind='standing', authorization_id=profile.id, now=100, key=POLICY_KEY)
+        if marker is not None:
+            auth = bind_repair_preconditions(auth, marker, key=POLICY_KEY)
+        return deps.tickets.issue(OperationTicketRequestV11(transaction_id='repair-1', step_id='0',
+            target_id=target.id, target_fingerprint=policies[0].target_fingerprint,
+            operation=operation, phase=phase, plan_digest='d'*64, binding=auth.binding,
+            authorization_kind='standing', authorization_id=profile.id, preparation_dependency=dep,
+            effect_payload_digest=effect_payload_digest({} if marker is None else {'marker':marker})), auth)
+    prepared = port.prepare(target, '0', operation, ticket(OperationPhase.PREPARE))
+    apply_ticket = ticket(OperationPhase.APPLY, prepared.marker)
+    response = port.apply(target, '0', operation, prepared.marker, apply_ticket)
+    claim = deps.tickets.inspect_for_recovery(apply_ticket)
+    before = claim.model_dump_json()
+    assert claim.preparation_dependency.stop_job_id is None
+    jobs.complete(response.job.id, state='succeeded', changed=True, result={'ok':True}, now=101)
+    if recreated:
+        port = _RpcExecutorPort(port.clients, signer_resolver=port.signer_resolver, clock=deps.clock)
+        port.bind_transaction('repair-1')
+    else:
+        # Normal APPLY response is sufficient to bind immediate VERIFY.
+        assert port.verify(target, '0', operation, prepared.marker).status == 'state_mismatch'
+    deps.clock.value = 150  # original APPLY HMAC is expired; observation is read-only
+    observed = port.query_job(target, '0', operation, response.job.id, claim)
+    assert observed.job.id == response.job.id
+    assert requests[-1]['preparation_dependency']['stop_job_id'] == response.job.id
+    assert claim.model_dump_json() == before
+    foreign_request = jobs.request(response.job.id).model_copy(update={
+        'transaction_id':'foreign-transaction', 'nonce':'foreign-original-stop'})
+    foreign = jobs.ensure(foreign_request.transaction_id, '0', response.job.operation_digest,
+        profile_digest=response.job.profile_digest)
+    envelope = port.signer_resolver(target).sign(foreign_request)
+    jobs.bind_request(foreign.id, foreign_request, envelope=envelope,
+        controller_key_fingerprint=envelope.key_fingerprint)
+    with pytest.raises(RuntimeFailure):
+        port.query_job(target, '0', operation, foreign.id, claim)
+    assert port.verify(target, '0', operation, prepared.marker).status == 'state_mismatch'
+    assert port.reconcile(target, '0', operation, 'apply', 'dispatch', prepared.marker).outcome == 'not_applied'
+    assert all(r['preparation_dependency']['stop_job_id'] == response.job.id for r in requests
+               if r['lifecycle'] in ('verify','reconcile'))
+    assert len(launches) == 1
+
+
 @pytest.mark.parametrize('revoked', [False, True])
 def test_pending_job_signed_observation_never_undoes_or_reapplies(deps_factory, tmp_path, revoked):
     deps = repair_deps(deps_factory, tmp_path)

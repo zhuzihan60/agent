@@ -137,6 +137,9 @@ class JobStore:
         if (saved is None) != (current is None) or (saved is not None and
                 PreparationDependency.model_validate(saved).identity() != current.identity()):
             raise RepairJobError('job_binding_mismatch')
+        if (saved is not None and request.step_id == current.dependent_step_id
+                and saved['stop_job_id'] != current.stop_job_id):
+            raise RepairJobError('job_binding_mismatch')
         expected = (original['controller_id'], original['target_id'], original['target_fingerprint'],
             original['transaction_id'], original['step_id'], original['plan_digest'],
             original['binding']['profile_id'], original['binding']['profile_digest'],
@@ -156,7 +159,9 @@ class JobStore:
             if row['request'] is None:
                 raise RepairJobError('job_binding_missing')
             self._check_owner(json.loads(row['request']), request)
-            if request.preparation_dependency is not None and request.preparation_dependency.stop_job_id != job.id:
+            dependency = request.preparation_dependency
+            if (dependency is not None and request.step_id == dependency.stop_step_id
+                    and dependency.stop_job_id != job.id):
                 raise RepairJobError('job_binding_mismatch')
             if job.profile_digest != request.binding.profile_digest or job.operation_digest != canonical_operation_digest(request.operation):
                 raise RepairJobError('job_binding_mismatch')

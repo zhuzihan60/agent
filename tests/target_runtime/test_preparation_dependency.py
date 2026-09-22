@@ -8,6 +8,10 @@ from tests.target_runtime.test_repair_jobs import _wire, _apply
 from tests.target_runtime.test_repair_protocol import prepared_repair, _profile, _operation
 
 
+def disk_operation():
+    return _operation(capability='disk', action='cleanup', resource='/var/cache/demo', parameters={})
+
+
 def dependency(profile, operation, **changes):
     from a4diag.preparation import PreparationDependency
     from a4diag.policy_engine import canonical_operation_digest
@@ -16,7 +20,8 @@ def dependency(profile, operation, **changes):
                   stop_profile_digest=profile_digest(profile),
                   stop_operation_digest=canonical_operation_digest(operation),
                   dependent_step_id='1', dependent_profile_id='cache',
-                  dependent_profile_digest='c'*64, dependent_operation_digest='e'*64)
+                  dependent_profile_digest='c'*64,
+                  dependent_operation_digest=canonical_operation_digest(disk_operation()))
     values.update(changes)
     return PreparationDependency(**values)
 
@@ -402,3 +407,57 @@ def test_worker_revalidates_revocation_after_admission_wait(prepared_repair, tmp
         if process.is_alive():
             process.terminate()
         process.join(10)
+
+
+@pytest.mark.parametrize('phase', ['query_job', 'confirm_job'])
+@pytest.mark.parametrize('reference', ['original', 'own', 'foreign'])
+def test_dependent_job_preserves_its_original_stop_reference(stopped_writer, phase, reference):
+    from a4diag.domain import RepairBinding, canonical_json_bytes
+    from a4diag.policy_engine import canonical_operation_digest
+    from a4diag.plugin_api.target_protocol import TargetRequestV11
+    from a4diag.plugin_api.ticket import effect_payload_digest
+    from a4diag_target.executor import ExecutorError
+    from a4diag_target.policy import TargetPolicy, PolicyDenied
+    import hashlib
+    stopped = stopped_writer
+    operation = disk_operation()
+    marker = {'frozen':'fixture-only-no-deletion'}
+    dep = stopped.request.preparation_dependency.model_copy(update={'stop_job_id':stopped.job_id})
+    binding = RepairBinding(profile_id='cache', profile_digest='c'*64,
+        preconditions_digest=hashlib.sha256(canonical_json_bytes(marker)).hexdigest())
+    original = TargetRequestV11.model_validate({**stopped.request.model_dump(), 'step_id':'1',
+        'operation':operation, 'binding':binding, 'marker':marker, 'authorization_id':'cache',
+        'preparation_dependency':dep, 'nonce':'nonce-dependent-original',
+        'effect_payload_digest':effect_payload_digest({'marker':marker})})
+    job = stopped.jobs.ensure(original.transaction_id, original.step_id,
+        canonical_operation_digest(operation), profile_digest=binding.profile_digest)
+    stopped.jobs.bind_request(job.id, original, envelope=stopped.signer.sign(original),
+        controller_key_fingerprint=stopped.policy().controller_key_fingerprint)
+    stopped.jobs.start(job.id, now=150)
+    stopped.jobs.complete(job.id, state='failed', changed=False,
+        result={'admission_rejected':True,'change_verified':True}, now=151)
+    class FixtureDiskPolicy(TargetPolicy):
+        def authorize_repair(self, presented_binding, presented_operation, **kwargs):
+            if (presented_binding != binding or presented_operation != operation
+                    or kwargs['authorization_kind'] != 'standing' or kwargs['authorization_id'] != 'cache'):
+                raise PolicyDenied('fixture_scope_mismatch')
+    stopped.executor._policy_source = FixtureDiskPolicy.model_validate(stopped.policy().model_dump())
+    stopped.executor._plugins['disk'] = object()  # lifecycle observations invoke no effect
+    requested_id = stopped.job_id if reference == 'original' else job.id if reference == 'own' else 'foreign-job'
+    request = TargetRequestV11.model_validate({**original.model_dump(), 'lifecycle':phase,
+        'job_id':job.id, 'marker':None, 'effect_payload_digest':effect_payload_digest({}),
+        'preparation_dependency':dep.model_copy(update={'stop_job_id':requested_id}),
+        'nonce':'nonce-dependent-'+phase+'-'+reference})
+    if reference == 'original':
+        assert stopped.jobs.lookup(request).id == job.id
+        assert asyncio.run(stopped.executor.execute(stopped.signer.sign(request)))['job']['id'] == job.id
+    else:
+        from a4diag_target.repair_jobs import RepairJobError
+        rebound = original.model_copy(update={'preparation_dependency':request.preparation_dependency})
+        with pytest.raises(RepairJobError, match='job_binding_mismatch'):
+            stopped.jobs.bind_request(job.id, rebound, envelope=stopped.signer.sign(rebound),
+                controller_key_fingerprint=stopped.policy().controller_key_fingerprint)
+        with pytest.raises(RepairJobError, match='job_binding_mismatch'):
+            stopped.jobs.lookup(request)
+        with pytest.raises(ExecutorError, match='job_binding_mismatch'):
+            asyncio.run(stopped.executor.execute(stopped.signer.sign(request)))

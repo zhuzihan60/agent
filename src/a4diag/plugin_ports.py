@@ -77,6 +77,7 @@ class _RpcExecutorPort:
     clock: Callable[[], int] = lambda: int(time.time())
     nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24)
     _contexts: dict[tuple[str, str], OperationTicketType] = field(default_factory=dict)
+    _observed_jobs: dict[tuple[str, str], tuple[OperationTicketType, str]] = field(default_factory=dict)
     _transaction: ContextVar[str | None] = ContextVar(
         "a4diag_rpc_transaction", default=None
     )
@@ -218,11 +219,26 @@ class _RpcExecutorPort:
             "nonce": self.nonce_factory(),
         }
         if isinstance(claims, OperationTicketV11):
+            dependency = claims.preparation_dependency
+            if (dependency is not None and claims.step_id == dependency.stop_step_id
+                    and dependency.stop_job_id is None
+                    and lifecycle in (TargetLifecycleV11.QUERY_JOB, TargetLifecycle.VERIFY,
+                                      TargetLifecycle.RECONCILE)):
+                reference = job_id
+                if reference is None:
+                    observed = self._observed_jobs.get((claims.transaction_id, claims.step_id))
+                    if observed is not None and observed[0] == claims:
+                        reference = observed[1]
+                if reference is None:
+                    raise RuntimeFailure('preparation_job_context_missing', claims.step_id)
+                # Read-only reference derived from an admitted/queried job.
+                # Never modify the historical HMAC claim or derive effect authority.
+                dependency = dependency.model_copy(update={'stop_job_id':reference})
             request = TargetRequestV11(
                 **common,
                 lifecycle=TargetLifecycleV11(lifecycle.value),
                 binding=claims.binding,
-                preparation_dependency=claims.preparation_dependency,
+                preparation_dependency=dependency,
                 authorization_kind=claims.authorization_kind,
                 authorization_id=claims.authorization_id,
                 job_id=job_id,
@@ -306,7 +322,9 @@ class _RpcExecutorPort:
             "apply_typed",
         )
         if isinstance(claims, OperationTicketV11):
-            return RepairJobResponse.model_validate(result)
+            response = RepairJobResponse.model_validate(result)
+            self._observed_jobs[(claims.transaction_id, step_id)] = (claims, response.job.id)
+            return response
         return self._step_result(result, "applied")
 
     def query_job(self, target, step_id, operation, job_id, claims):
@@ -321,7 +339,12 @@ class _RpcExecutorPort:
             'operation': operation.model_dump(mode='json'), 'job_id': job_id, 'envelope': envelope,
         })), 'query_job_typed')
         from a4diag.repair_jobs import RepairJobResponse
-        return RepairJobResponse.model_validate(result)
+        response = RepairJobResponse.model_validate(result)
+        if response.job.id != job_id:
+            raise RuntimeFailure('job_id_mismatch')
+        self._observed_jobs[(claims.transaction_id, step_id)] = (claims, job_id)
+        self._contexts[(claims.transaction_id, step_id)] = claims
+        return response
 
     def confirm_job(self, target, step_id, operation, job_id, ticket):
         claims = self._claims(ticket)
