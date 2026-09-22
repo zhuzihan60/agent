@@ -193,6 +193,44 @@ def job_result(job):
         data={'job_id': job.id, 'job_state': job.state, 'changed': job.changed, 'result': job.result})
 
 
+def completed_repair_dispatch(deps, state):
+    """Recognize a terminal APPLY whose advancement checkpoint was interrupted.
+
+    Re-enter normal observation and live authorization; this proof itself
+    authorizes neither continuation nor compensation.
+    """
+    import json
+    from a4diag.transaction_store import DispatchStatus, EffectPhase, TransactionStatus
+    tx = state['transaction_id']
+    transaction_status = deps.transactions.get(tx).status
+    if transaction_status not in {TransactionStatus.EXECUTION_UNKNOWN,
+                                  TransactionStatus.EXECUTING, TransactionStatus.ROLLBACK_RUNNING}:
+        return None
+    dispatches = deps.transactions.get_dispatches(tx)
+    if any(d.status is not DispatchStatus.COMPLETED or d.phase is EffectPhase.UNDO for d in dispatches):
+        return None
+    applies = [d for d in dispatches if d.phase is EffectPhase.APPLY]
+    if not applies:
+        return None
+    latest = max(applies, key=lambda d: int(d.step_id))
+    if latest.step_id not in state.get('repair_bindings', {}):
+        return None
+    results = {r.step_id: r for r in deps.transactions.get_results(tx) if r.phase == 'apply'}
+    if any(d.step_id not in results or
+           (d is not latest and results[d.step_id].status != 'succeeded') for d in applies):
+        return None
+    job, _, _ = job_origin(deps, state, latest.step_id)
+    expected = job_result(job)
+    result = results[latest.step_id]
+    if (expected.status == 'unknown'
+        or transaction_status not in {TransactionStatus.EXECUTION_UNKNOWN,
+            TransactionStatus.EXECUTING if expected.ok else TransactionStatus.ROLLBACK_RUNNING}
+        or result.status != ('succeeded' if expected.ok else 'failed')
+        or json.loads(result.payload_json) != expected.model_dump(mode='json')):
+        return None
+    return latest
+
+
 def confirm_job(deps, state, target, step_id, *, now):
     """Acknowledge a durable terminal job; never assert network/business recovery."""
     from a4diag.plugin_api.ticket import OperationPhase

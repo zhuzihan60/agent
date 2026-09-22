@@ -1,4 +1,5 @@
 import threading
+import pytest
 from dataclasses import replace
 
 from a4diag.audit import AuditWriter
@@ -202,3 +203,62 @@ def test_fair_poll_rotates_past_unknown_and_busy_transactions(deps_factory, tmp_
     # Missing checkpoints remain unknown, but cannot monopolize the next tick.
     assert tuple(r.transaction_id for r in runtime.poll_repair_jobs(limit=1)) == ('repair-1',)
     assert tuple(r.transaction_id for r in runtime.poll_repair_jobs(limit=1)) == ('repair-2',)
+
+
+@pytest.mark.parametrize('terminal', ['succeeded', 'partial'])
+@pytest.mark.parametrize('gate', ['allowed', 'revoked', 'cancelled'])
+@pytest.mark.parametrize('crash_point', ['dispatch', 'transition'])
+def test_crash_after_terminal_dispatch_completion_recovers_without_reapply(
+        deps_factory, tmp_path, monkeypatch, terminal, gate, crash_point):
+    import sqlite3
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from a4diag.transaction_store import TransactionStore
+    deps = repair_deps(deps_factory, tmp_path)
+    current = [deps.settings]
+    deps = replace(deps, settings_loader=lambda: current[0])
+    deps, jobs, launches, requests, policy, host = wire(deps, tmp_path)
+    runtime = runtime_for(deps, tmp_path)
+    assert runtime.handle(event()).status == 'execution_unknown'
+    jobs.complete(launches[0], state=terminal, changed=True,
+                  result={'ok': terminal == 'succeeded'}, now=100)
+    class Crash(BaseException):
+        pass
+    method = ('complete_result_dispatch' if crash_point == 'dispatch' else
+              'resume_repair_execution' if terminal == 'succeeded' else 'transition')
+    complete = getattr(deps.transactions, method)
+    def crash_after_commit(*args, **kwargs):
+        complete(*args, **kwargs)
+        raise Crash('process exited after durable dispatch completion')
+    with monkeypatch.context() as patch:
+        patch.setattr(deps.transactions, method, crash_after_commit)
+        with pytest.raises(Crash):
+            runtime.resume('repair-1')
+    assert deps.transactions.pending_dispatch('repair-1') is None
+    expected_state = ('execution_unknown' if crash_point == 'dispatch' else
+                      'executing' if terminal == 'succeeded' else 'rollback_running')
+    assert deps.transactions.get('repair-1').status.value == expected_state
+    checkpoint_path = deps.checkpointer.conn.execute('PRAGMA database_list').fetchone()[2]
+    runtime.close()
+    deps.plugins.executor._contexts.clear()
+    deps = replace(deps, transactions=TransactionStore(deps.transactions.path),
+        checkpointer=SqliteSaver(sqlite3.connect(checkpoint_path, check_same_thread=False)))
+    runtime = runtime_for(deps, tmp_path)
+    try:
+        if gate == 'revoked':
+            current[0] = current[0].model_copy(update={'targets': (
+                current[0].targets[0].model_copy(update={'repair_profiles': ()}),)})
+        elif gate == 'cancelled':
+            runtime.cancel_repair('repair-1')
+        queries_before = sum(r['lifecycle'] == 'query_job' for r in requests)
+        result = runtime.resume('repair-1')
+        assert sum(r['lifecycle'] == 'query_job' for r in requests) == queries_before + 1
+        assert len(launches) == 1
+        assert [r['lifecycle'] for r in requests].count('apply') == 1
+        if gate == 'allowed':
+            assert result.status == ('succeeded' if terminal == 'succeeded' else 'rollback_partial')
+        else:
+            assert result.status == 'execution_unknown'
+            assert requests[-1]['lifecycle'] == 'query_job'
+            assert not any(r['lifecycle'] == 'undo' for r in requests)
+    finally:
+        runtime.close()

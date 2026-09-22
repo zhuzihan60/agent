@@ -1024,6 +1024,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     def reconcile_unknown(state: AgentState) -> AgentState:
         pending = deps.transactions.pending_dispatch(state["transaction_id"])
         if pending is None:
+            from a4diag.repair_workflow import completed_repair_dispatch
+            pending = completed_repair_dispatch(deps, state)
+        if pending is None:
             return {
                 "status": "execution_unknown",
                 "error": "missing_dispatch_intent",
@@ -1051,17 +1054,24 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 # Observation remains available after revocation; advancing the
                 # workflow toward verification/undo still needs current grants.
                 plan_authorization(deps, state, target_for(state), plan_for(state), now=now())
-                deps.transactions.complete_result_dispatch(pending.dispatch_id, phase='apply',
-                    status='succeeded' if result.ok else 'failed', payload=result.model_dump(mode='json'), now=now())
+                if pending.status is DispatchStatus.DISPATCHED:
+                    deps.transactions.complete_result_dispatch(pending.dispatch_id, phase='apply',
+                        status='succeeded' if result.ok else 'failed', payload=result.model_dump(mode='json'), now=now())
             except Exception as error:
                 return {'status': 'execution_unknown', 'reconcile_attempted': True,
                         'error': f'repair_job_observation:{type(error).__name__}'}
             applied = sorted(set(state.get('applied_steps', [])) | {index})
+            transaction_status = deps.transactions.get(state['transaction_id']).status
             if not result.ok:
-                update = begin_rollback(state, applied, reason='repair_job_failed')
+                if transaction_status is TransactionStatus.ROLLBACK_RUNNING:
+                    update = {'status': 'rollback_running', 'applied_steps': applied,
+                              'undo_steps': list(reversed(applied))}
+                else:
+                    update = begin_rollback(state, applied, reason='repair_job_failed')
                 update['reconcile_attempted'] = True
                 return update
-            deps.transactions.resume_repair_execution(state['transaction_id'], now=now())
+            if transaction_status is TransactionStatus.EXECUTION_UNKNOWN:
+                deps.transactions.resume_repair_execution(state['transaction_id'], now=now())
             return {'status': 'executing', 'applied_steps': applied, 'verify_step': 0,
                     'reconcile_attempted': True, 'incomplete_after_reconcile': False}
         try:
@@ -1973,6 +1983,14 @@ def run_event(
                         restore(target, plan, tuple(claims))
                     except Exception:
                         recovery_error = "invalid_recovery_context"
+        if (dependencies is not None and pending is None and recovery_error is None
+            and recovery_action in {RecoveryAction.RECONCILE, RecoveryAction.RESUME, RecoveryAction.ROLLBACK}
+            and graph.get_state(config).values.get('status') == 'execution_unknown'):
+            from a4diag.repair_workflow import completed_repair_dispatch
+            try:
+                pending = completed_repair_dispatch(dependencies, graph.get_state(config).values)
+            except Exception:
+                recovery_error = 'invalid_completed_repair_context'
         if recovery_error is not None:
             graph.update_state(config, {
                 "status": "execution_unknown", "error": recovery_error,
