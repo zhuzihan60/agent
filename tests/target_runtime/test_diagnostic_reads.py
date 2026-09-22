@@ -25,10 +25,12 @@ def policy() -> TargetPolicy:
 
 
 def server(root: Path) -> TargetSocketServer:
+    root.mkdir(parents=True, exist_ok=True)
     instance = object.__new__(TargetSocketServer)
     instance._identity_root = root / "identity"
     instance._diagnostic_root = root
-    instance._policy = policy()
+    instance._policy_path = root / "policy.json"
+    instance._policy_path.write_text(policy().model_dump_json(), encoding="utf-8")
     return instance
 
 
@@ -62,7 +64,12 @@ def test_unsigned_file_reads_deny_unmanaged_paths(tmp_path: Path) -> None:
 
 def test_file_read_rejects_normalization_alias_before_open(tmp_path: Path) -> None:
     instance = server(tmp_path)
-    instance._policy = policy().model_copy(update={"managed_roots": ("/srv/caf\u00e9",)})
+    instance._policy_path.write_text(
+        policy().model_copy(
+            update={"managed_roots": ("/srv/caf\u00e9",)}
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
     request = {"method": "read", "kind": "file", "path": "/srv/cafe\u0301/private", "limit": 100}
     result = json.loads(asyncio.run(instance.handle(json.dumps(request).encode())))
     assert result == {"ok": False, "reason": "resource_not_canonical"}

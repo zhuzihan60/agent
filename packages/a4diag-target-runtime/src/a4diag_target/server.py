@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import struct
 import subprocess
 import time
@@ -130,8 +131,8 @@ class TargetSocketServer:
     ) -> None:
         self._identity_root = Path(os.environ.get("A4DIAG_TARGET_IDENTITY_ROOT", "/"))
         self._diagnostic_root = Path("/")
-        policy = TargetPolicy.model_validate_json(policy_path.read_text(encoding="utf-8"))
-        self._policy = policy
+        self._policy_path = Path(policy_path)
+        self._load_policy()
         key = serialization.load_pem_public_key(public_key_path.read_bytes())
         if not isinstance(key, Ed25519PublicKey):
             raise TypeError("target operation public key must be Ed25519")
@@ -140,10 +141,33 @@ class TargetSocketServer:
                 key, replay_store=SqliteReplayLedger(replay_path),
                 clock=lambda: int(time.time()),
             ),
-            policy=policy,
+            policy=self._load_policy,
             identity_probe=lambda: target_fingerprint(self._identity_root),
             adapter=LocalFileAdapter(),
         )
+
+    def _load_policy(self) -> TargetPolicy:
+        """Read and validate the current protected policy without cache fallback."""
+
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                self._policy_path,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("policy_not_regular")
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                payload = handle.read(MAX_FRAME_BYTES + 1)
+            if len(payload) > MAX_FRAME_BYTES:
+                raise ValueError("policy_too_large")
+            return TargetPolicy.model_validate_json(payload)
+        except (OSError, ValueError) as error:
+            raise ExecutorError("target_policy_unavailable") from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
 
     async def handle(self, payload: bytes) -> bytes:
         try:
@@ -157,7 +181,9 @@ class TargetSocketServer:
             if value.get("method") == "read":
                 if value.get("kind") in ("file", "service_state", "service_logs", "probe"):
                     return canonical_json_bytes(
-                        await read_diagnostic(self._diagnostic_root, value, self._policy),
+                        await read_diagnostic(
+                            self._diagnostic_root, value, self._load_policy()
+                        ),
                         max_bytes=MAX_FRAME_BYTES,
                     )
                 return canonical_json_bytes(read_identity(self._identity_root, value))

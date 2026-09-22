@@ -56,5 +56,35 @@ Implemented protocol 1.1 repair authorization while preserving the protocol 1.0 
 
 - No F3 job persistence or handler was implemented; `query_job` and `confirm_job` validate their authorization and then return `lifecycle_not_wired`.
 - No F5 helper entrypoint was implemented.
-- Target policy hot reload is represented by the executor's policy-provider interface. The current socket server continues to pass a fixed policy instance, so deployed revocation becomes visible when that service is restarted with the updated policy.
 - Commit subject: `feat: bind repair authorization across controller and target`; final hash is returned by the worker after the report is committed.
+
+## Production revocation integration follow-up
+
+Ruling: every-stage profile rechecks must take effect in the long-running `TargetSocketServer`; requiring a service restart after policy revocation was not sufficient.
+
+### RED
+
+- `run-remediation-tests.ps1 -q tests/target_runtime/test_server.py`
+  - Result: `4 failed, 3 passed`.
+  - Evidence: atomically replacing the policy did not revoke apply, missing and malformed policy files did not block prepare, and diagnostics continued using the stale grant.
+  - Log: `/opt/a4diag-remediation-test/tests-vmwmzkzn/pytest.log`.
+- The first expanded server regression run exposed diagnostic fixtures that bypassed `TargetSocketServer.__init__` and injected the removed `_policy` cache directly.
+  - Result: `21 failed, 214 passed, 1 skipped` with `_policy_path` absent from those test-only instances.
+  - Log: `/opt/a4diag-remediation-test/tests-ur3wjfr5/pytest.log`.
+
+### GREEN
+
+- `run-remediation-tests.ps1 -q tests/target_runtime/test_server.py`
+  - Result: `7 passed in 0.43s` after the live provider was connected.
+  - Log: `/opt/a4diag-remediation-test/tests-h87b4muq/pytest.log`.
+- `run-remediation-tests.ps1 -q tests/test_repair_authorization.py tests/target_runtime/test_repair_protocol.py tests/target_runtime/test_server.py tests/target_runtime/test_executor.py tests/target_runtime/test_policy.py tests/target_runtime/test_diagnostic_reads.py tests/test_operation_ticket.py tests/test_target_protocol.py tests/test_policy_engine_v3.py`
+  - Final result: `236 passed, 1 skipped in 1.49s`.
+  - Log: `/opt/a4diag-remediation-test/tests-39rybemp/pytest.log`.
+
+### Integration details
+
+- The server now reopens the policy on every signed execution and policy-authorized diagnostic read; it never falls back to the startup policy.
+- Policy reads use `O_NOFOLLOW`, require a regular file, enforce the existing frame-size bound, and fully validate `TargetPolicy` before use.
+- Missing, malformed, oversized, non-regular, and symlinked policy paths produce the stable `target_policy_unavailable` denial.
+- A real `TargetSocketServer.handle` test signs prepare, atomically replaces the policy with a revoked profile set, signs apply, and verifies `profile_revoked` with zero adapter effects.
+- Per the review ruling, the previous full-suite result remains the full-suite evidence; only the affected F2 and server-related regression set was rerun for this follow-up.
