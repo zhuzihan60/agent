@@ -8,6 +8,7 @@
   "socket": "/run/a4diag/transport-local.sock",
   "config_schema": "schemas/transport-local.json",
   "operations": [],
+  "rpc_methods": ["health", "describe", "capability_probe", "verify_identity", "read", "execute_typed", "prepare_typed", "apply_typed", "verify_typed", "undo_typed", "reconcile_typed", "query_job_typed", "confirm_job_typed"],
   "permissions": [
     "read:machine-id",
     "read:os-release",

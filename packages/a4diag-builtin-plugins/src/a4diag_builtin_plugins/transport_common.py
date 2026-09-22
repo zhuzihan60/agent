@@ -35,6 +35,7 @@ from a4diag.linux_probes import validate_probe_id
 from a4diag.plugin_api.target_protocol import (
     SignedTargetRequest,
     TargetLifecycle,
+    TargetLifecycleV11,
     TargetRequest,
     TargetRequestType,
     TargetRequestV11,
@@ -304,7 +305,7 @@ class _TransportTicketedEffectParams(TicketedEffectParams):
     ) -> OperationTicketExpectationType:
         try:
             request = _validated_transport_request(
-                self, TargetLifecycle(phase.value)
+                self, TargetLifecycleV11(phase.value)
             )
         except TransportError as error:
             raise TicketError(error.code) from error
@@ -362,6 +363,21 @@ class TransportReconcileParams(BaseModel):
     envelope: SignedTargetRequest
 
 
+class TransportQueryJobParams(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    transaction_id: str
+    step_id: str
+    operation: Operation
+    job_id: str
+    envelope: SignedTargetRequest
+
+
+class TransportConfirmJobParams(_TransportTicketedEffectParams):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    job_id: str
+    envelope: SignedTargetRequest
+
+
 @dataclass(frozen=True, slots=True)
 class RunOutcome:
     """Outcome of one fixed-argv process run with bounded output."""
@@ -407,6 +423,7 @@ def _validated_transport_request(
         != getattr(params, "target_fingerprint", request.target_fingerprint)
         or request.marker != getattr(params, "marker", None)
         or request.undo != getattr(params, "undo", None)
+        or getattr(request, 'job_id', None) != getattr(params, 'job_id', None)
     ):
         raise TransportError("target_envelope_binding_mismatch")
     if isinstance(params, TicketedEffectParams):
@@ -765,7 +782,7 @@ class BaseTransport:
             result = json.loads(outcome.stdout)
             if type(result) is not dict:
                 raise ValueError("result must be object")
-            if isinstance(request, TargetRequestV11) and request.lifecycle.value == 'apply':
+            if isinstance(request, TargetRequestV11) and request.lifecycle.value in {'apply', 'query_job', 'confirm_job'}:
                 from a4diag.repair_jobs import RepairJobResponse
                 from a4diag.policy_engine import canonical_operation_digest
                 if outcome.stdout_truncated or len(outcome.stdout.encode()) > request.operation.output_limit_bytes:
@@ -776,6 +793,8 @@ class BaseTransport:
                     canonical_operation_digest(request.operation),
                 ):
                     raise ValueError('job response binding mismatch')
+                if request.job_id is not None and job.id != request.job_id:
+                    raise ValueError('job response ID mismatch')
         except (json.JSONDecodeError, ValueError):
             return TransportResult(ok=False, status=TransportStatus.FAILED, reason="helper_result_invalid")
         return TransportResult(
@@ -797,6 +816,12 @@ class BaseTransport:
 
     async def reconcile_typed(self, params: TransportReconcileParams) -> TransportResult:
         return await self._relay_signed(params, TargetLifecycle.RECONCILE)
+
+    async def query_job_typed(self, params: TransportQueryJobParams) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycleV11.QUERY_JOB)
+
+    async def confirm_job_typed(self, params: TransportConfirmJobParams, invocation: object) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycleV11.CONFIRM_JOB)
 
     async def _run_helper(
         self,
@@ -882,6 +907,10 @@ def build_transport_bindings(
             "reconcile_typed", TransportReconcileParams, TransportResult,
             transport.reconcile_typed, kind=MethodKind.RECONCILE,
         ),
+        'query_job_typed': MethodBinding('query_job_typed', TransportQueryJobParams, TransportResult,
+            transport.query_job_typed, kind=MethodKind.RECONCILE),
+        'confirm_job_typed': MethodBinding('confirm_job_typed', TransportConfirmJobParams, TransportResult,
+            transport.confirm_job_typed, kind=MethodKind.CONFIRM_JOB),
         "execute_typed": MethodBinding(
             "execute_typed",
             ExecuteTypedParams,

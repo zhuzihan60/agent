@@ -103,6 +103,7 @@ class Runtime:
         audit: AuditWriter,
         clock: Callable[[], int] | None = None,
         recoverable: tuple[str, ...] = (),
+        settings_loader: Callable[[], AgentSettings] | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -116,6 +117,7 @@ class Runtime:
             plugins=plugins,
             checkpointer=checkpointer,
             clock=clock,
+            settings_loader=settings_loader,
         )
         self._graph = build_graph(self._deps)
         self._audit = audit
@@ -123,6 +125,9 @@ class Runtime:
         self._read_only = False
         self._registered_ids = frozenset(target.id for target in settings.targets)
         self._repair_store = RepairStore(transactions.path)
+        self._repair_poll_cursor = ''
+        import threading
+        self._repair_poll_guard = threading.Lock()
 
     # -- read-only surface -------------------------------------------------
 
@@ -172,9 +177,68 @@ class Runtime:
             profile_digest=profile_digest, now=now)
         return job
 
+    def confirm_repair_job(self, transaction_id: str, step_id: str) -> RepairJob:
+        with self._deps.transactions.workflow_guard(transaction_id):
+            return self._confirm_repair_job(transaction_id, step_id)
+
+    def _confirm_repair_job(self, transaction_id: str, step_id: str) -> RepairJob:
+        from a4diag.repair_workflow import confirm_job
+        if self._read_only or self._audit.read_only:
+            raise RuntimeFailure('audit_chain_broken')
+        state = self._graph.get_state({'configurable': {'thread_id': transaction_id}}).values
+        settings = self._deps.settings_loader() if self._deps.settings_loader else self._settings
+        target = next(t for t in settings.targets if t.id == state['target_id'])
+        self._audit.append({'event': 'repair_job_confirm_requested', 'transaction_id': transaction_id,
+                            'step_id': step_id})
+        self._deps.plugins.executor.bind_transaction(transaction_id)
+        job = confirm_job(self._deps, state, target, step_id, now=self._deps.clock())
+        self._audit.append({'event': 'repair_job_confirmed', 'transaction_id': transaction_id,
+                            'job': job.model_dump(mode='json')})
+        return job
+
+    def cancel_repair(self, transaction_id: str) -> None:
+        # Cancellation must be recordable while the workflow owns its guard.
+        self._deps.transactions.cancel_repair(transaction_id, now=self._deps.clock())
+        try:
+            self._audit.append({'event': 'repair_cancelled', 'transaction_id': transaction_id})
+        except AuditError:
+            self._read_only = True
+
+    def poll_repair_jobs(self, *, limit: int = 2) -> tuple[RuntimeResult, ...]:
+        """One bounded, fair observation pass; never diagnose or re-plan."""
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError('poll limit must be between 1 and 32')
+        if not self._repair_poll_guard.acquire(blocking=False):
+            return ()
+        try:
+            candidates = self._deps.transactions.repair_poll_candidates(after=self._repair_poll_cursor, limit=limit)
+            if not candidates:
+                candidates = self._deps.transactions.repair_poll_candidates(after='', limit=limit)
+            results = []
+            for transaction_id in candidates:
+                self._repair_poll_cursor = transaction_id
+                with self._deps.transactions.workflow_guard(transaction_id, blocking=False) as acquired:
+                    if not acquired:
+                        continue
+                    try:
+                        results.append(self._resume(transaction_id))
+                    except Exception as error:
+                        results.append(RuntimeResult(status='execution_unknown', transaction_id=transaction_id,
+                            report={'status': 'execution_unknown', 'transaction_id': transaction_id,
+                                    'error': f'repair_poll_failed:{type(error).__name__}'}))
+            return tuple(results)
+        finally:
+            self._repair_poll_guard.release()
+
     # -- event handling ----------------------------------------------------
 
     def handle(self, event: Mapping[str, object]) -> RuntimeResult:
+        if not isinstance(event, Mapping) or not isinstance(event.get('event_id'), str) or not event['event_id']:
+            return self._handle(event)
+        with self._deps.transactions.workflow_guard(event['event_id']):
+            return self._handle(event)
+
+    def _handle(self, event: Mapping[str, object]) -> RuntimeResult:
         if not isinstance(event, Mapping):
             raise TypeError("event must be a mapping")
         event_id = event.get("event_id")
@@ -258,6 +322,7 @@ class Runtime:
                     "event": "runtime_finished",
                     "transaction_id": event_id,
                     "status": result_status,
+                    'effects': list(report.get('effects', {}).values()),
                 }
             )
         except AuditError:
@@ -270,6 +335,12 @@ class Runtime:
         )
 
     def resume(self, transaction_id: str) -> RuntimeResult:
+        if not isinstance(transaction_id, str) or not transaction_id:
+            raise RuntimeFailure('invalid_event', 'resume requires transaction_id')
+        with self._deps.transactions.workflow_guard(transaction_id):
+            return self._resume(transaction_id)
+
+    def _resume(self, transaction_id: str) -> RuntimeResult:
         if not isinstance(transaction_id, str) or not transaction_id:
             raise RuntimeFailure("invalid_event", "resume requires transaction_id")
         # The checkpoint is the source of truth for a resumable thread; a
@@ -331,6 +402,7 @@ class Runtime:
                     "event": "runtime_finished",
                     "transaction_id": transaction_id,
                     "status": result_status,
+                    'effects': list(report.get('effects', {}).values()),
                 }
             )
         except AuditError:
@@ -569,6 +641,7 @@ def build_runtime(
         audit=audit,
         clock=runtime_clock,
         recoverable=recoverable,
+        settings_loader=lambda: load_settings(Path(settings_path)),
     )
 
 

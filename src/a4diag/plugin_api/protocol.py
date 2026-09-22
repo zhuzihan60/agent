@@ -163,6 +163,7 @@ class MethodKind(StrEnum):
     PREPARE = "prepare"
     APPLY = "apply"
     UNDO = "undo"
+    CONFIRM_JOB = 'confirm_job'
 
     @property
     def ticket_phase(self) -> OperationPhase | None:
@@ -170,6 +171,7 @@ class MethodKind(StrEnum):
             MethodKind.PREPARE: OperationPhase.PREPARE,
             MethodKind.APPLY: OperationPhase.APPLY,
             MethodKind.UNDO: OperationPhase.UNDO,
+            MethodKind.CONFIRM_JOB: OperationPhase.CONFIRM_JOB,
         }.get(self)
 
     @property
@@ -190,6 +192,8 @@ _METHOD_KINDS = MappingProxyType(
         "verify_typed": MethodKind.VERIFY,
         "undo_typed": MethodKind.UNDO,
         "reconcile_typed": MethodKind.RECONCILE,
+        "query_job_typed": MethodKind.RECONCILE,
+        "confirm_job_typed": MethodKind.CONFIRM_JOB,
         "diagnose": MethodKind.MODEL,
         "plan": MethodKind.MODEL,
         "critic": MethodKind.MODEL,

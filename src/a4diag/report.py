@@ -289,6 +289,10 @@ def build_runtime_report(
     report["approval_status"] = approval_status
     report["notification_status"] = notification_status
     report["results"] = results
+    if transaction_id:
+        report['effects'] = {step_id: effect.model_dump(mode='json') for step_id, effect
+                             in dependencies.transactions.repair_effects(transaction_id).items()}
+        report['repair_jobs'] = [job.model_dump(mode='json') for job in dependencies.transactions.repair_jobs(transaction_id)]
     report["residual_risk"] = residual_risk(state)
     report["manual_commands"] = manual_investigation_commands(
         str(transaction_id) if transaction_id else ""

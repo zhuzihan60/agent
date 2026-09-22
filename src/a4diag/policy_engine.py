@@ -352,6 +352,19 @@ class PolicyEngine:
         )
         return _decision(True, risk, "auto_execute_low", digest, authorization)
 
+    def with_settings(self, settings: AgentSettings) -> PolicyEngine:
+        return PolicyEngine(settings, self.registry, authorization_key=self._authorization_key)
+
+    def authorize_repair(self, profile, operation, *, target_fingerprint, digest,
+                         authorization_kind, authorization_id, now, marker=None):
+        authorization = issue_repair_policy_authorization(profile, operation,
+            target_fingerprint=target_fingerprint, plan_digest=digest,
+            authorization_kind=authorization_kind, authorization_id=authorization_id,
+            now=now, key=self._authorization_key)
+        if marker is not None:
+            authorization = bind_repair_preconditions(authorization, marker, key=self._authorization_key)
+        return authorization
+
 
 def _initial_risk(plan: Plan, critic_risk: Risk) -> Risk:
     if critic_risk is Risk.HIGH:

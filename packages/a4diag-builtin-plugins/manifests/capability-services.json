@@ -10,6 +10,7 @@
   "operations": [
     {
       "name": "services.restart",
+      "effect_kind": "compensatable",
       "risk_floor": "low",
       "reversible": true,
       "supports_prepare": true,
@@ -25,6 +26,7 @@
     },
     {
       "name": "services.start",
+      "effect_kind": "compensatable",
       "risk_floor": "low",
       "reversible": true,
       "supports_prepare": true,
@@ -40,6 +42,7 @@
     },
     {
       "name": "services.stop",
+      "effect_kind": "compensatable",
       "risk_floor": "low",
       "reversible": true,
       "supports_prepare": true,

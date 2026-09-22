@@ -45,6 +45,7 @@ from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import canonical_operation_digest
 from a4diag.runtime import RuntimeFailure
 from a4diag.recovery import check_http
+from a4diag.repair_jobs import RepairJobResponse
 from a4diag.linux_probes import PROBE_OUTPUTS, parse_bound_probe_output, evaluate_probe_conditions
 from a4diag.redaction import redact
 from a4diag.settings import AgentSettings
@@ -115,7 +116,12 @@ class _RpcExecutorPort:
                 or claim.operation_digest != canonical_operation_digest(operation)
             ):
                 raise RuntimeFailure("ticket_context_mismatch")
-            restored[(claim.transaction_id, claim.step_id)] = claim
+            key = (claim.transaction_id, claim.step_id)
+            # Durable dispatch rows need not be phase ordered. Never replace
+            # an authenticated bound APPLY context with unbound PREPARE.
+            previous = restored.get(key)
+            if previous is None or claim.phase is not OperationPhase.PREPARE:
+                restored[key] = claim
         for key in tuple(self._contexts):
             if key[0] == self._transaction_id():
                 del self._contexts[key]
@@ -191,6 +197,7 @@ class _RpcExecutorPort:
         undo: dict[str, object] | None, claims: OperationTicketType,
         effect_digest: str,
         verify_restored: bool = False,
+        job_id: str | None = None,
     ) -> dict[str, object]:
         issued = int(self.clock())
         common = {
@@ -217,6 +224,7 @@ class _RpcExecutorPort:
                 binding=claims.binding,
                 authorization_kind=claims.authorization_kind,
                 authorization_id=claims.authorization_id,
+                job_id=job_id,
             )
         else:
             request = TargetRequest(
@@ -283,7 +291,7 @@ class _RpcExecutorPort:
         operation: Operation,
         marker: dict[str, object],
         ticket: str,
-    ) -> StepResult:
+    ) -> StepResult | RepairJobResponse:
         claims = self._claims(ticket)
         self._validate_claims(claims, target, step_id, operation, OperationPhase.APPLY)
         self._contexts[(claims.transaction_id, step_id)] = claims
@@ -296,7 +304,37 @@ class _RpcExecutorPort:
             _run(lambda: self._client(target).call("apply_typed", params, ticket=ticket)),
             "apply_typed",
         )
+        if isinstance(claims, OperationTicketV11):
+            return RepairJobResponse.model_validate(result)
         return self._step_result(result, "applied")
+
+    def query_job(self, target, step_id, operation, job_id, claims):
+        self._validate_claims(claims, target, step_id, operation, OperationPhase.APPLY)
+        if not isinstance(claims, OperationTicketV11):
+            raise RuntimeFailure('job_requires_v11')
+        envelope = self._envelope(target=target, operation=operation,
+            lifecycle=TargetLifecycleV11.QUERY_JOB, marker=None, undo=None, claims=claims,
+            effect_digest=effect_payload_digest({}), job_id=job_id)
+        result = self._target_result(_run(lambda: self._client(target).call('query_job_typed', {
+            'transaction_id': claims.transaction_id, 'step_id': step_id,
+            'operation': operation.model_dump(mode='json'), 'job_id': job_id, 'envelope': envelope,
+        })), 'query_job_typed')
+        from a4diag.repair_jobs import RepairJobResponse
+        return RepairJobResponse.model_validate(result)
+
+    def confirm_job(self, target, step_id, operation, job_id, ticket):
+        claims = self._claims(ticket)
+        self._validate_claims(claims, target, step_id, operation, OperationPhase.CONFIRM_JOB)
+        if not isinstance(claims, OperationTicketV11):
+            raise RuntimeFailure('job_requires_v11')
+        params = {**self._ticket_base(claims, operation), 'job_id': job_id}
+        params['envelope'] = self._envelope(target=target, operation=operation,
+            lifecycle=TargetLifecycleV11.CONFIRM_JOB, marker=None, undo=None, claims=claims,
+            effect_digest=effect_payload_digest({}), job_id=job_id)
+        result = self._target_result(_run(lambda: self._client(target).call(
+            'confirm_job_typed', params, ticket=ticket)), 'confirm_job_typed')
+        from a4diag.repair_jobs import RepairJobResponse
+        return RepairJobResponse.model_validate(result)
 
     def verify(
         self,

@@ -37,6 +37,8 @@ def test_transport_ssh_host_uses_strict_instance_configuration() -> None:
         "verify_typed",
         "undo_typed",
         "reconcile_typed",
+        "query_job_typed",
+        "confirm_job_typed",
     }
 
 

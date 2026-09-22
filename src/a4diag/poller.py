@@ -121,12 +121,16 @@ class RuntimePoller:
         poll_interval_seconds: int = 600,
         state_path: Path = Path("/var/lib/a4diag/poller.sqlite3"),
         report_root: Path = Path("/var/lib/a4diag/reports"),
+        repair_interval_seconds: float = 5,
     ) -> None:
         if max_concurrency != 2:
             raise ValueError("max_concurrency must equal 2")
         if poll_interval_seconds != 600:
             raise ValueError("poll_interval_seconds must equal 600")
         self._runtime = runtime
+        if not 0 < repair_interval_seconds <= 5:
+            raise ValueError('repair interval must be greater than zero and at most 5 seconds')
+        self._repair_interval_seconds = repair_interval_seconds
         self._alert_source = alert_source
         self._poll_interval_seconds = poll_interval_seconds
         self._state_path = Path(state_path)
@@ -215,9 +219,19 @@ class RuntimePoller:
         return claimed
 
     def process_queued_batch(self) -> int:
-        # Single-pass loop: unknown executions are resumed explicitly through
-        # the runtime, never replayed automatically.
-        return 0
+        return self.heartbeat()
+
+    def heartbeat(self) -> int:
+        """S2 scheduling seam: bounded existing-job observations, no model work."""
+        results = self._runtime.poll_repair_jobs()
+        for result in results:
+            report = dict(result.report)
+            report.setdefault('task_id', result.transaction_id)
+            report.setdefault('finished_at', datetime.now(timezone.utc).isoformat())
+            path = self._reports.write(report)
+            self._finish(result.transaction_id, result.status,
+                         {'transaction_id': result.transaction_id, 'report_path': str(path)})
+        return len(results)
 
     def run_forever(self, stop_event: threading.Event) -> None:
         polling_thread = threading.Thread(
@@ -226,13 +240,19 @@ class RuntimePoller:
             name="a4diag-runtime-poller",
             daemon=True,
         )
-        polling_thread.start()
+        if self._alert_source is not None:
+            polling_thread.start()
         try:
             while not stop_event.is_set():
-                stop_event.wait(1.0)
+                try:
+                    self.heartbeat()
+                except Exception as error:
+                    print(f'Repair heartbeat failed: {type(error).__name__}: {error}', file=sys.stderr, flush=True)
+                stop_event.wait(self._repair_interval_seconds)
         finally:
             stop_event.set()
-            polling_thread.join(timeout=5.0)
+            if polling_thread.ident is not None:
+                polling_thread.join(timeout=5.0)
 
     def _poll_loop(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():

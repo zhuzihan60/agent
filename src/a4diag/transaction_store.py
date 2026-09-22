@@ -268,6 +268,118 @@ class TransactionStore:
         finally:
             db.close()
 
+    def record_effect(self, transaction_id: str, step_id: str, effect) -> None:
+        from a4diag.repair_effects import RepairEffect
+        effect = RepairEffect.model_validate(effect)
+        db = self._connect()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            self._status_in_connection(db, transaction_id)
+            old = db.execute('SELECT snapshot FROM transaction_effects WHERE transaction_id=? AND step_id=?',
+                             (transaction_id, step_id)).fetchone()
+            if old is not None and RepairEffect.model_validate_json(old[0]).kind != effect.kind:
+                raise TransactionStoreError('effect_kind_changed')
+            db.execute('''INSERT INTO transaction_effects VALUES (?, ?, ?)
+                ON CONFLICT(transaction_id, step_id) DO UPDATE SET snapshot=excluded.snapshot''',
+                (transaction_id, step_id, effect.model_dump_json()))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def repair_effects(self, transaction_id: str):
+        from a4diag.repair_effects import RepairEffect
+        db = self._connect()
+        try:
+            return {row[0]: RepairEffect.model_validate_json(row[1]) for row in db.execute(
+                'SELECT step_id, snapshot FROM transaction_effects WHERE transaction_id=? ORDER BY step_id',
+                (transaction_id,))}
+        finally:
+            db.close()
+
+    def cancel_repair(self, transaction_id: str, *, now: int) -> None:
+        now = _validate_time(now, 'now')
+        db = self._connect()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            self._status_in_connection(db, transaction_id)
+            db.execute('INSERT OR IGNORE INTO repair_cancellations VALUES (?, ?)', (transaction_id, now))
+            db.commit()
+        finally:
+            db.close()
+
+    def repair_cancelled(self, transaction_id: str) -> bool:
+        db = self._connect()
+        try:
+            return db.execute('SELECT 1 FROM repair_cancellations WHERE transaction_id=?', (transaction_id,)).fetchone() is not None
+        finally:
+            db.close()
+
+    def resume_repair_execution(self, transaction_id: str, *, now: int) -> None:
+        """Resume only after every dispatched repair has known durable success."""
+        db = self._connect()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            if self._status_in_connection(db, transaction_id) is not TransactionStatus.EXECUTION_UNKNOWN:
+                raise InvalidTransitionError('repair_not_unknown')
+            pending = db.execute("SELECT 1 FROM effect_dispatches WHERE transaction_id=? AND status='dispatched'", (transaction_id,)).fetchone()
+            cancelled = db.execute('SELECT 1 FROM repair_cancellations WHERE transaction_id=?', (transaction_id,)).fetchone()
+            jobs = [RepairJob.model_validate_json(row[0]) for row in db.execute(
+                'SELECT snapshot FROM controller_repair_jobs WHERE transaction_id=?', (transaction_id,))]
+            if pending or cancelled or not jobs or any(j.state != 'succeeded' or j.changed is None for j in jobs):
+                raise InvalidTransitionError('repair_not_resolved')
+            db.execute("UPDATE transactions SET status='executing', updated_at=? WHERE transaction_id=?",
+                       (_validate_time(now, 'now'), transaction_id))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def repair_poll_candidates(self, *, after: str, limit: int) -> tuple[str, ...]:
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError('poll limit must be between 1 and 32')
+        db = self._connect()
+        try:
+            rows = db.execute('''SELECT DISTINCT j.transaction_id FROM controller_repair_jobs j
+                JOIN transactions t ON t.transaction_id=j.transaction_id
+                LEFT JOIN repair_cancellations c ON c.transaction_id=j.transaction_id
+                WHERE j.transaction_id > ? AND t.status IN ('executing', 'execution_unknown', 'verifying', 'rollback_running')
+                AND (j.state IN ('prepared', 'running', 'unknown') OR c.transaction_id IS NULL)
+                ORDER BY j.transaction_id LIMIT ?''', (after, limit)).fetchall()
+            return tuple(row[0] for row in rows)
+        finally:
+            db.close()
+
+    def workflow_guard(self, transaction_id: str, *, blocking: bool = True):
+        """Crash-released process coordination, never a resource reservation."""
+        from contextlib import contextmanager
+        import fcntl
+        import os
+        import stat
+        transaction_id = _validate_safe_id(transaction_id, 'transaction_id')
+
+        @contextmanager
+        def acquire():
+            path = Path(self._path).parent / ('.workflow-' + hashlib.sha256(transaction_id.encode()).hexdigest() + '.lock')
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                    raise TransactionStoreError('unsafe_workflow_lock')
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                except BlockingIOError:
+                    yield False
+                else:
+                    yield True
+            finally:
+                os.close(fd)
+        return acquire()
+
     def begin(
         self,
         transaction_id: str,
@@ -1452,6 +1564,11 @@ class TransactionStore:
 
 
 _SCHEMA = (
+    '''CREATE TABLE IF NOT EXISTS repair_cancellations (
+        transaction_id TEXT PRIMARY KEY REFERENCES transactions(transaction_id), cancelled_at INTEGER NOT NULL)''',
+    '''CREATE TABLE IF NOT EXISTS transaction_effects (
+        transaction_id TEXT NOT NULL REFERENCES transactions(transaction_id),
+        step_id TEXT NOT NULL, snapshot TEXT NOT NULL, PRIMARY KEY(transaction_id, step_id))''',
     """CREATE TABLE IF NOT EXISTS controller_repair_jobs (
         id TEXT PRIMARY KEY, transaction_id TEXT NOT NULL, step_id TEXT NOT NULL,
         target_id TEXT NOT NULL, state TEXT NOT NULL, snapshot TEXT NOT NULL,

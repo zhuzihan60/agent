@@ -86,9 +86,21 @@ class RepairStore:
         with self._transaction() as db:
             row = db.execute('SELECT * FROM repair_reservations WHERE id=?', (reservation_id,)).fetchone()
             job = self._job(db, job_id)
+            if (row is not None and job is not None and row['transaction_id'] == job['transaction_id']
+                and row['job_id'] == job_id and row['outcome'] == job['state']
+                and job['state'] in ('succeeded', 'failed', 'partial')):
+                return
             if row is None or job is None or row['transaction_id'] != job['transaction_id'] or row['job_id'] not in (None, job_id) or row['outcome'] is not None:
                 raise RepairLimitError('job_binding_mismatch')
             db.execute('UPDATE repair_reservations SET job_id=? WHERE id=?', (job_id, reservation_id))
+
+    def reservation_for(self, target_id: str, resource: str, transaction_id: str) -> str:
+        with self._transaction() as db:
+            row = db.execute('SELECT id FROM repair_reservations WHERE target_id=? AND resource=? AND transaction_id=?',
+                             (target_id, resource, transaction_id)).fetchone()
+            if row is None:
+                raise RepairLimitError('reservation_unavailable')
+            return row['id']
 
     def mark_started(self, reservation_id: str, now: int) -> None:
         with self._transaction() as db:

@@ -53,6 +53,7 @@ class OperationPhase(StrEnum):
     PREPARE = "prepare"
     APPLY = "apply"
     UNDO = "undo"
+    CONFIRM_JOB = "confirm_job"
 
 
 def _validate_safe_id(value: str, label: str) -> str:
@@ -158,7 +159,7 @@ class OperationTicketEnvelope(BaseModel):
 
 
 class OperationTicketRequest(OperationTicketEnvelope):
-    phase: OperationPhase = OperationPhase.APPLY
+    phase: Literal[OperationPhase.PREPARE, OperationPhase.APPLY, OperationPhase.UNDO] = OperationPhase.APPLY
     effect_payload_digest: str = EMPTY_EFFECT_PAYLOAD_DIGEST
     ttl_seconds: int = Field(default=30, ge=1, le=300)
 
@@ -169,7 +170,7 @@ class OperationTicketRequest(OperationTicketEnvelope):
 
 
 class OperationTicketExpectation(OperationTicketEnvelope):
-    phase: OperationPhase = OperationPhase.APPLY
+    phase: Literal[OperationPhase.PREPARE, OperationPhase.APPLY, OperationPhase.UNDO] = OperationPhase.APPLY
     effect_payload_digest: str = EMPTY_EFFECT_PAYLOAD_DIGEST
 
     @field_validator("effect_payload_digest")
@@ -252,7 +253,7 @@ class OperationTicket(BaseModel):
     capability: str
     action: str
     resource: str
-    phase: OperationPhase
+    phase: Literal[OperationPhase.PREPARE, OperationPhase.APPLY, OperationPhase.UNDO]
     parameters_digest: str
     operation_digest: str
     effect_payload_digest: str
