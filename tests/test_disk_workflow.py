@@ -109,6 +109,57 @@ def test_completed_stop_apply_reconstructed_port_queries_before_verify(deps_fact
     assert [r['lifecycle'] for r in requests].count('undo')==1
 
 
+@pytest.mark.parametrize('boundary',['initial_stop_saved','verifying','rollback_running'])
+def test_disk_owned_initial_and_terminal_crash_frontiers(deps_factory,tmp_path,monkeypatch,boundary):
+    from a4diag import repair_workflow
+    from a4diag.domain import StepResult
+    from a4diag.repair_jobs import RepairJob, RepairJobResponse
+    from test_repair_scheduler import runtime_for
+    from test_workflow_v3 import SimulatedCrash
+    deps=disk_deps(deps_factory,tmp_path)
+    executor=deps.plugins.executor
+    applied=[]
+    def apply(target,step,operation,marker,ticket):
+        applied.append(step)
+        claim=deps.tickets.inspect_for_recovery(ticket)
+        return RepairJobResponse(job=RepairJob(id=f'job-{step}',transaction_id='repair-1',step_id=step,
+            profile_digest=claim.binding.profile_digest,operation_digest=claim.operation_digest,
+            state='succeeded',changed=True,started_at=100,finished_at=100))
+    executor.apply=apply
+    executor.query_job=lambda target,step,*args:RepairJobResponse(job=next(
+        j for j in deps.transactions.repair_jobs('repair-1') if j.step_id==step))
+    original_record=repair_workflow.record_job
+    original_transition=deps.transactions.transition
+    tripped=[]
+    def record(*args,**kwargs):
+        result=original_record(*args,**kwargs)
+        if boundary=='initial_stop_saved' and not tripped:
+            tripped.append(True)
+            raise SimulatedCrash()
+        return result
+    def transition(tx,status,**kwargs):
+        result=original_transition(tx,status,**kwargs)
+        if status.value==boundary and not tripped:
+            tripped.append(True)
+            raise SimulatedCrash()
+        return result
+    monkeypatch.setattr(repair_workflow,'record_job',record)
+    monkeypatch.setattr(deps.transactions,'transition',transition)
+    if boundary=='rollback_running':
+        deps.plugins.collector.final_verify=lambda *a:StepResult(ok=False,status='http_failed')
+    with pytest.raises(SimulatedCrash):runtime_for(deps,tmp_path).handle(event())
+    if boundary=='initial_stop_saved':
+        checkpoint=build_graph(deps).get_state({'configurable':{'thread_id':'repair-1'}}).values
+        assert checkpoint['status']=='policy_allowed'
+        assert deps.transactions.get('repair-1').status.value=='executing'
+    resumed=runtime_for(deps,tmp_path).resume('repair-1')
+    expected='rollback_partial' if boundary=='rollback_running' else 'succeeded'
+    assert resumed.status==expected,resumed.report
+    assert applied==['0','1']
+    assert executor.calls.count('undo:0')==1
+    assert runtime_for(deps,tmp_path).resume('repair-1').status==expected
+
+
 @pytest.mark.parametrize('denial',['cancel','revoked','expired'])
 def test_disk_staged_current_denial_only_observes_and_retains_obligation(deps_factory,tmp_path,denial):
     from test_repair_workflow_transport import wire

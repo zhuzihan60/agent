@@ -158,6 +158,12 @@ class TargetSocketServer:
         key = serialization.load_pem_public_key(public_key_path.read_bytes())
         if not isinstance(key, Ed25519PublicKey):
             raise TypeError("target operation public key must be Ed25519")
+        self._key,self._replay_path,self._executor = key,Path(replay_path),None
+
+    def _initialize_executor(self):
+        if self._executor is not None:
+            return
+        key,replay_path=self._key,self._replay_path
         self._executor = TargetExecutor(
             verifier=TargetVerifier(
                 key, replay_store=SqliteReplayLedger(replay_path),
@@ -206,6 +212,10 @@ class TargetSocketServer:
                 route = helper_route(candidate['binding']['profile_id'])
                 if route is not None or candidate['operation']['capability'] != 'services':
                     raise ExecutorError('repair_helper_required')
+            from a4diag_target.disk_reservation import admission_preflight
+            admission_preflight(envelope,verifier=TargetVerifier(self._key,replay_store=None,clock=lambda:int(time.time())),
+                policy=self._load_policy(),identity_probe=lambda:target_fingerprint(self._identity_root))
+            self._initialize_executor()
             result = await self._executor.execute(envelope)
             return canonical_json_bytes(result)
         except (ValueError, OSError, ExecutorError) as error:

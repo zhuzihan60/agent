@@ -88,7 +88,30 @@ actual bytes, inodes, services and HTTP responses are measured. This is source
 and staged-runtime acceptance, not the later built-package/SSH platform matrix
 or real-model acceptance, and no release is asserted.
 
-Each PREPARE preallocates a protected per-transaction audit before cleanup.
+Installation provisions each disk helper with a protected audit sized for
+`max_files`, a persistent owner record, 8 MiB of state headroom and 32 inode
+tokens before any fault. The first signed stop PREPARE independently checks
+both current stop and cleanup grants and claims this reserve for its exact
+controller, target, transaction, plan and dependency. It persists ownership
+before releasing the fixed headroom budget for replay/job/restoration state.
+Cold target/helper constructors defer writable state opening until this
+authenticated preflight. Disk PREPARE fills the already allocated audit.
+
+Only one transaction can claim a helper reserve. Retries by that same owner
+cannot release another budget. Old installations without this reservation
+must be provisioned through the installer before accepting a new disk repair.
+Rearming is an explicit drained installation operation: it requires a terminal,
+nonambiguous cleanup job and independently verified original writer restoration,
+and retains the previous audit/owner evidence. Pending or uncertain transactions
+need manual recovery. The reserve is never replenished by an incoming request.
+
+On a shared filesystem, concurrent consumers can take released headroom;
+physical exclusivity after release is not guaranteed. If any required state
+write fails, the affected mutation remains blocked and unresolved ownership is
+retained. The live tests exhaust blocks and inodes with ordinary executor state,
+helper state and cache on the same ext4 filesystem; they require actual cache
+deletion beyond the released reserve to meet the configured capacity targets.
+
 Each unlink has a durable intent and completion slot. File identities are
 rechecked immediately before unlink; changed files are retained. Recovery
 uses `statvfs`, not logical bytes unlinked (an open file may retain all blocks).

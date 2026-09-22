@@ -65,6 +65,13 @@ class RepairHelper:
         key = serialization.load_pem_public_key(PUBLIC_KEY.read_bytes())
         if not isinstance(key, Ed25519PublicKey):
             raise ValueError('invalid_operation_key')
+        self._key = key
+        self.executor = None
+
+    def _initialize_executor(self):
+        if self.executor is not None:
+            return
+        key = self._key
         spec = self.binding.spec()
         jobs = JobStore(self.binding.state / 'repair-jobs.sqlite3')
         self.executor = TargetExecutor(
@@ -72,7 +79,7 @@ class RepairHelper:
             policy=current_policy, identity_probe=target_fingerprint, adapter=None,
             plugins={spec.capability: spec.plugin(self.binding.profile)})
         self.executor.configure_jobs(jobs, RepairStore(jobs.path),
-            SystemdJobLauncher(jobs.path, policy_path=POLICY, helper_id=helper_id))
+            SystemdJobLauncher(jobs.path, policy_path=POLICY, helper_id=self.binding.id))
 
     async def handle(self, payload: bytes, *, peer_uid: int) -> bytes:
         try:
@@ -89,6 +96,11 @@ class RepairHelper:
             if fresh != self.binding:
                 raise ExecutorError('helper_binding_changed')
             scope_request(fresh, request)
+            # Authenticate before opening writable SQLite state on cold start.
+            from a4diag_target.disk_reservation import admission_preflight
+            admission_preflight(envelope,verifier=TargetVerifier(self._key,replay_store=None,clock=lambda:int(time.time())),
+                policy=current_policy(),identity_probe=target_fingerprint)
+            self._initialize_executor()
             return canonical_json_bytes(await self.executor.execute(envelope))
         except (ValueError, OSError, ExecutorError) as error:
             return canonical_json_bytes({'ok': False, 'error': str(error), 'reason': str(error)})

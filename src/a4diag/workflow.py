@@ -1932,12 +1932,14 @@ def run_event(
         config = {"configurable": {"thread_id": transaction_id}}
         # The compiled disk runner owns its staged/finally recovery frontier.
         # Never pass a partial disk plan through legacy prepare-all recovery.
-        from a4diag.disk_workflow import is_disk_plan
+        from a4diag.disk_workflow import is_disk_plan, staged_transaction
         snapshot = graph.get_state(config)
-        if (dependencies is not None and is_disk_plan(snapshot.values)
-                and snapshot.values.get('status') == 'execution_unknown'):
-            graph.update_state(config, {'reconcile_attempted':False}, as_node='report')
-            return cast(AgentState, graph.invoke(None, config=config))
+        if dependencies is not None and is_disk_plan(snapshot.values):
+            with dependencies.transactions._connect() as db:
+                disk_owned = staged_transaction(db, transaction_id)
+            if disk_owned:
+                graph.update_state(config, {'status':'execution_unknown', 'reconcile_attempted':False}, as_node='report')
+                return cast(AgentState, graph.invoke(None, config=config))
         pending = None
         recovery_action = None
         recovery_error = None

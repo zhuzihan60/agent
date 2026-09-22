@@ -66,11 +66,14 @@ class DiskPlugin:
 
     async def dispatch(self, request):
         if request.lifecycle == 'prepare':
+            from a4diag_target.disk_reservation import reserved_audit
+            from a4diag_target.repair_install import load_binding
+            audit_id=reserved_audit(load_binding(self.profile.id).state,self.profile,request)
             proof = await asyncio.to_thread(self._proof, request)
             marker = await asyncio.to_thread(prepare_cleanup, self.limits, now_ns=time.time_ns())
             writer = dispatcher_writer(proof.writer_snapshot, self.limits.writer_unit)
             marker = prepare_audit(marker, self.limits, profile_id=self.profile.id,
-                request=request.model_dump(mode='json'), writer=json_value(writer))
+                request=request.model_dump(mode='json'), writer=json_value(writer),audit_id=audit_id)
             return PrepareResult(marker=json_value(asdict(marker)))
         marker = marker_from(request.marker)
         self._bound_header(request)

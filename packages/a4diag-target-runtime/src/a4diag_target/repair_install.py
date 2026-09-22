@@ -257,6 +257,11 @@ def ensure_drained(root: Path):
     for scope in scopes:
         if scope.is_symlink() or not scope.is_dir():
             raise ValueError('unprotected_helper_state')
+        if (scope/'disk-reservation').exists():
+            from a4diag_target.disk_reservation import control, _terminal_owner
+            with control(scope) as (_,_,value):
+                if value['owner'] is not None and not _terminal_owner(scope,value['owner'],ordinary/'repair-jobs.sqlite3'):
+                    raise ValueError('disk_reservation_requires_drain')
         path = scope / 'repair-jobs.sqlite3'
         if path.is_symlink():
             raise ValueError('unprotected_helper_state')
@@ -301,6 +306,9 @@ def install_helpers(source: dict, *, root: Path, peer_uid: int):
         scope.mkdir(mode=0o700, exist_ok=True)
         if scope.stat().st_mode & 0o077 or scope.stat().st_uid != 0:
             raise ValueError('unprotected_helper_state')
+        if binding.adapter == 'disk-cache':
+            from a4diag_target.disk_reservation import provision
+            provision(scope,binding.profile,service_database=root/'var/lib/a4diag-target/executor/repair-jobs.sqlite3')
         drop = units / f'a4diag-repair-helper@{binding.id}.service.d'
         drop.mkdir(parents=True, exist_ok=True)
         (drop / 'scope.conf').write_text(render_drop_in(binding))

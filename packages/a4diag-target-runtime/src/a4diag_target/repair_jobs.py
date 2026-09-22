@@ -32,6 +32,25 @@ def process_identity(pid: int) -> tuple[str, str] | None:
         return None
 
 
+def process_exited(pid: int, saved: tuple[str, str]) -> bool:
+    """Positive exit evidence only; an unavailable observation proves nothing."""
+    try:
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        if str(uuid.UUID(boot)) != boot:
+            return False
+        try:
+            record = Path(f'/proc/{pid}/stat').read_text()
+        except FileNotFoundError:
+            # Missing proc mount itself is not evidence about this process.
+            return Path('/proc/self/stat').is_file()
+        fields = record.rsplit(')', 1)[1].split()
+        if len(fields) < 20 or not fields[19].isdigit() or len(fields[0]) != 1:
+            return False
+        return fields[0] == 'Z' or (boot, fields[19]) != saved
+    except (OSError, IndexError, ValueError):
+        return False
+
+
 class JobStore:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -271,7 +290,7 @@ class JobStore:
             with self._transaction() as db:
                 row=db.execute('SELECT pid,boot_id,starttime,state FROM repair_jobs WHERE id=?',(job_id,)).fetchone()
                 return bool(row is not None and row['state']=='unknown' and row['pid'] is not None
-                    and process_identity(row['pid']) != (row['boot_id'],row['starttime']))
+                    and process_exited(row['pid'], (row['boot_id'],row['starttime'])))
 
 
 

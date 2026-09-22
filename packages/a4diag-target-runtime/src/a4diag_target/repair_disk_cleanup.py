@@ -39,15 +39,23 @@ def _state(marker):
     return STATE_ROOT/binding['profile_id'], binding['audit_id']+'.disk-audit'
 
 
-def prepare_audit(marker,limits,*,profile_id,request,writer):
-    marker=replace(marker,writer_stop_marker={'profile_id':profile_id,'audit_id':uuid.uuid4().hex})
+def prepare_audit(marker,limits,*,profile_id,request,writer,audit_id=None):
+    reserved=audit_id is not None
+    marker=replace(marker,writer_stop_marker={'profile_id':profile_id,'audit_id':audit_id or uuid.uuid4().hex})
     header={'marker':asdict(marker),'limits':asdict(limits),'request':request,'writer':writer}
     body=canonical_json_bytes(json_value(header),max_bytes=HEADER_SIZE-1)
     directory,name=_state(marker)
     with _open_root(str(directory)) as parent:
-        fd=os.open(name,os.O_CREAT|os.O_EXCL|os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+        fd=os.open(name,(0 if reserved else os.O_CREAT|os.O_EXCL)|os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
         try:
-            os.posix_fallocate(fd,0,HEADER_SIZE+SLOT_SIZE*len(marker.entries))
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            if reserved:
+                info=os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1 or info.st_mode&0o077
+                        or info.st_size!=HEADER_SIZE+SLOT_SIZE*limits.max_files or os.pread(fd,1,0)!=b'\0'):
+                    raise ValueError('disk_reserved_audit_unavailable')
+            else:
+                os.posix_fallocate(fd,0,HEADER_SIZE+SLOT_SIZE*len(marker.entries))
             if os.pwrite(fd,body+b'\n',0)!=len(body)+1:
                 raise OSError('short_audit_write')
             os.fsync(fd)
@@ -65,7 +73,8 @@ def audit_file(marker,limits):
         try:
             info=os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_nlink!=1
-                    or info.st_mode&0o077 or info.st_size!=HEADER_SIZE+SLOT_SIZE*len(marker.entries)):
+                    or info.st_mode&0o077 or info.st_size not in
+                    (HEADER_SIZE+SLOT_SIZE*len(marker.entries),HEADER_SIZE+SLOT_SIZE*limits.max_files)):
                 raise ValueError('unprotected_disk_audit')
             fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
             body=os.pread(fd,HEADER_SIZE,0).split(b'\n',1)[0]

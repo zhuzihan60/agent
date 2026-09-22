@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from a4diag.domain import Operation
 
 ID = r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'
 DIGEST = r'^[0-9a-f]{64}$'
@@ -18,11 +19,24 @@ class PreparationDependency(BaseModel):
     dependent_profile_digest: str = Field(pattern=DIGEST)
     dependent_operation_digest: str = Field(pattern=DIGEST)
     stop_job_id: str | None = Field(default=None, pattern=ID)
+    dependent_operation: Operation | None = None
+
+    @model_serializer(mode='wrap')
+    def serialize_dependency(self, handler):
+        value = handler(self)
+        if self.dependent_operation is None:
+            value.pop('dependent_operation', None)
+        return value
 
     @model_validator(mode='after')
     def distinct_steps(self):
         if self.stop_step_id == self.dependent_step_id:
             raise ValueError('preparation_dependency_steps_equal')
+        if self.dependent_operation is not None:
+            from a4diag.policy_engine import canonical_operation_digest
+            if ((self.dependent_operation.capability,self.dependent_operation.action) != ('disk','cleanup')
+                    or canonical_operation_digest(self.dependent_operation) != self.dependent_operation_digest):
+                raise ValueError('preparation_dependency_operation_mismatch')
         return self
 
     def identity(self):

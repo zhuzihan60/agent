@@ -42,7 +42,13 @@ class DiskJournal:
         dep = PreparationDependency(stop_step_id='0', stop_profile_id=bindings['0']['profile_id'],
             stop_profile_digest=bindings['0']['profile_digest'], stop_operation_digest=canonical_operation_digest(stop),
             dependent_step_id='1', dependent_profile_id=bindings['1']['profile_id'],
-            dependent_profile_digest=bindings['1']['profile_digest'], dependent_operation_digest=canonical_operation_digest(disk))
+            dependent_profile_digest=bindings['1']['profile_digest'], dependent_operation_digest=canonical_operation_digest(disk),
+            dependent_operation=disk)
+        if existing:
+            with self.db() as db:
+                prior=json.loads(db.execute('SELECT identity FROM disk_workflows WHERE transaction_id=?',(self.tx,)).fetchone()[0])
+            if 'dependent_operation' not in prior['dependency']:
+                dep=dep.model_copy(update={'dependent_operation':None})
         self.dependency = dep
         encoded = canonical_json_bytes({'plan':state['digest'], 'dependency':dep.identity()}).decode()
         with self.db() as db:
@@ -221,6 +227,8 @@ def run_disk_workflow(deps, state, *, target_for, ready):
             gate()
             transaction=store.begin(tx,target.id,state['digest'],expected_operations=tuple(
                 canonical_json_bytes(o.model_dump(mode='json')).decode() for o in plan.operations),now=clock())
+        if transaction.plan_digest != state['digest'] or transaction.target_id != plan.target_id:
+            raise ValueError('disk_workflow_identity_changed')
         if transaction.status in {TransactionStatus.SUCCEEDED,TransactionStatus.ROLLBACK_PARTIAL,TransactionStatus.FAILED}:
             return {'status':transaction.status.value}
         journal=DiskJournal(store,state,target)
@@ -281,10 +289,12 @@ def run_disk_workflow(deps, state, *, target_for, ready):
             journal.failure('business_verification_failed')
         failure=journal.row()['failure']
         if failure:
-            store.transition(tx,TransactionStatus.ROLLBACK_RUNNING,now=clock())
+            if store.get(tx).status is not TransactionStatus.ROLLBACK_RUNNING:
+                store.transition(tx,TransactionStatus.ROLLBACK_RUNNING,now=clock())
             store.transition(tx,TransactionStatus.ROLLBACK_PARTIAL,now=clock())
         else:
-            store.transition(tx,TransactionStatus.VERIFYING,now=clock())
+            if store.get(tx).status is not TransactionStatus.VERIFYING:
+                store.transition(tx,TransactionStatus.VERIFYING,now=clock())
             store.transition(tx,TransactionStatus.SUCCEEDED,now=clock())
         return {'status':'rollback_partial' if failure else 'succeeded', 'error':failure or '',
                 'recovery_result':business.model_dump(mode='json'), 'reconcile_attempted':True}

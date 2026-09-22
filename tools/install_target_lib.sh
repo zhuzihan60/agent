@@ -268,6 +268,11 @@ lines = [
 ]
 if roots:
     lines.append("ReadWritePaths=" + " ".join(sorted(roots)))
+from a4diag_target.repair_install import installation_plan
+disk_states = [str(binding.state) for binding in installation_plan(source, peer_uid=0)
+               if binding.adapter == "disk-cache"]
+if disk_states:
+    lines.append("ReadWritePaths=" + " ".join(sorted(disk_states)))
 if any(probe["kind"] in {"tcp", "dns"} for probe in policy["diagnostic_probes"]):
     lines.extend(["RestrictAddressFamilies=", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"])
 pathlib.Path(sys.argv[3]).write_text("\n".join(lines) + "\n", encoding="utf-8")

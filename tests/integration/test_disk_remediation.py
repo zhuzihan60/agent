@@ -60,7 +60,7 @@ def test_preallocated_audit_survives_own_filesystem_full(monkeypatch):
         assert result['removed_files']==1 and result['target_met']
 
 
-@pytest.mark.parametrize('fault',['blocks','inodes','http_failure','replacement','crash_before_unlink','crash_after_unlink','controller_disconnect','initially_inactive'])
+@pytest.mark.parametrize('fault',['blocks','inodes','http_failure','replacement','crash_before_unlink','crash_after_unlink','controller_disconnect','initially_inactive','reserve_blocks','reserve_inodes'])
 def test_production_signed_graph_ext4_writer_http(deps_factory, tmp_path,fault):
     import asyncio
     import hashlib
@@ -89,6 +89,8 @@ def test_production_signed_graph_ext4_writer_http(deps_factory, tmp_path,fault):
     from a4diag_target.server import target_fingerprint, probe_identity
     from a4diag_target.repair_helper import RepairHelper
     from a4diag_target.repair_install import HelperBinding
+    from a4diag_target.disk_reservation import provision
+    from a4diag_target.server import TargetSocketServer
     from a4diag_target.preparation_proof import SERVICE_JOB_DATABASE
     from a4diag_builtin_plugins.capability_common import LocalFileAdapter
     from a4diag_builtin_plugins.transport_common import build_transport_bindings, RunOutcome
@@ -114,6 +116,10 @@ def test_production_signed_graph_ext4_writer_http(deps_factory, tmp_path,fault):
     Path('/run/a4diag-target').mkdir(exist_ok=True)
     subprocess.run(['/usr/sbin/groupadd','-f','a4diag-target'],check=True)
     state=None
+    mounted=[]
+    reservation_case=fault.startswith('reserve_')
+    min_bytes=12*1024*1024 if reservation_case else 1048576
+    min_inodes=64 if reservation_case else 10
     job_ids=[]
     transaction='live-disk-'+token
     with disk_image() as cache:
@@ -154,14 +160,7 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
         subprocess.run(['systemctl','daemon-reload'],check=True)
         subprocess.run(['systemctl','start',unit],check=True)
         if fault=='initially_inactive':subprocess.run(['systemctl','stop',unit],check=True)
-        before=exhaust(cache,'inodes' if fault=='inodes' else 'blocks')
         check=RecoveryCheck(id='health',kind='http',resource=f'http://127.0.0.1:{port}/health',attempts=3)
-        for _ in range(30):
-            initial=check_http(check)
-            if initial.get('status')!='http_unavailable':break
-            time.sleep(.1)
-        assert not initial['ok'],initial
-        before.update(service=subprocess.run(['systemctl','is-active',unit],capture_output=True,text=True).stdout.strip(),http=initial)
         deps=disk_deps(deps_factory,tmp_path)
         now=int(time.time());deps.clock.value=now
         target=deps.settings.targets[0]
@@ -169,7 +168,7 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
         stop=stop.model_copy(update={'id':'stop-'+token,'resource':unit,'expires_at':now+600})
         disk=disk.model_copy(update={'id':'cache-'+token,'resource':str(cache),'expires_at':now+600,
             'constraints':disk.constraints.model_copy(update={'writer_unit':unit,'max_files':1024,
-                'max_bytes':64*1024*1024,'min_free_bytes':1048576,'min_free_inodes':10})})
+                'max_bytes':64*1024*1024,'min_free_bytes':min_bytes,'min_free_inodes':min_inodes})})
         target=target.model_copy(update={'repair_profiles':(stop,disk),'recovery_checks':(check,),
             'capabilities':(CapabilityGrant(name='services',actions=('stop',),resources=(unit,)),
                 CapabilityGrant(name='disk',actions=('cleanup',),resources=(str(cache),)))})
@@ -195,11 +194,39 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
         binding=HelperBinding(adapter='disk-cache',profile=disk,peer_uid=0)
         (etc/'repair-helpers').mkdir(mode=0o700,exist_ok=True)
         (etc/'repair-helpers'/f'{disk.id}.json').write_text(binding.model_dump_json())
+        if reservation_case:
+            for name,destination in [('ordinary',SERVICE_JOB_DATABASE.parent),('helpers',binding.state.parent)]:
+                source=cache.parent/name;source.mkdir(mode=0o700)
+                destination.mkdir(mode=0o700,parents=True,exist_ok=True)
+                subprocess.run(['mount','--bind',str(source),str(destination)],check=True)
+                mounted.append(destination)
         state=binding.state;state.parent.mkdir(mode=0o700,parents=True,exist_ok=True);state.mkdir(mode=0o700)
-        jobs=JobStore(SERVICE_JOB_DATABASE)
-        ordinary=TargetExecutor(verifier=TargetVerifier(key.public_key(),replay_store=SqliteReplayLedger(stage/'replay.db'),clock=lambda:int(time.time())),
-            policy=lambda:policy,identity_probe=target_fingerprint,adapter=LocalFileAdapter())
-        ordinary.configure_jobs(jobs,RepairStore(jobs.path),SystemdJobLauncher(jobs.path,policy_path=etc/'policy.json'))
+        # The actual installer API provisions before any fault or transaction.
+        provision(state,disk)
+        before=exhaust(cache,'inodes' if fault.endswith('inodes') else 'blocks')
+        if fault=='reserve_blocks':
+            # Exhaust the ext4 small-write remainder too, not only 1 MiB writes.
+            tail=cache/'filler-0000'
+            tail_fd=os.open(tail,os.O_WRONLY|os.O_APPEND)
+            try:
+                while True:
+                    try:os.write(tail_fd,b'x'*4096);os.fsync(tail_fd)
+                    except OSError:break
+            finally:os.close(tail_fd)
+            os.utime(tail,(time.time()-3600,)*2)
+            before['available_bytes']=os.statvfs(cache).f_bavail*os.statvfs(cache).f_frsize
+            assert before['available_bytes']==0
+        if reservation_case:
+            assert os.stat(state).st_dev==os.stat(SERVICE_JOB_DATABASE.parent).st_dev==os.stat(cache).st_dev
+        for _ in range(30):
+            initial=check_http(check)
+            if initial.get('status')!='http_unavailable':break
+            time.sleep(.1)
+        assert not initial['ok'],initial
+        before.update(service=subprocess.run(['systemctl','is-active',unit],capture_output=True,text=True).stdout.strip(),http=initial)
+        # Cold production constructors must not create SQLite/WAL/journal inodes
+        # until signed stop preflight has claimed its pre-fault reservation.
+        ordinary=TargetSocketServer()
         helper=RepairHelper(disk.id)
         requests=[]
         class Identity:
@@ -216,7 +243,7 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
                         candidate.write_bytes(b'new retained cache')
                 else:
                     try:
-                        result=await ordinary.execute(envelope)
+                        result=json.loads(await ordinary.handle(payload))
                     except Exception:
                         import traceback
                         traceback.print_exc()
@@ -280,6 +307,10 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
         assert evidence['after']['http']['ok']==(fault not in ('http_failure','crash_before_unlink','initially_inactive'))
         if fault!='crash_before_unlink':assert evidence['after']['available_bytes']>=1048576
         assert evidence['after']['free_inodes']>=10
+        if reservation_case:
+            assert deps.transactions.repair_jobs(transaction)[1].result['data']['removed_files']>0
+            assert evidence['after']['available_bytes']>=min_bytes
+            assert evidence['after']['free_inodes']>=min_inodes
         if fault.startswith('crash_'):
             cleanup=deps.transactions.repair_jobs(transaction)[1]
             assert cleanup.state=='partial' and cleanup.changed is None
@@ -302,15 +333,21 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
             subprocess.run(['systemctl','stop','a4diag-repair-'+job_id+'.service'],capture_output=True)
         subprocess.run(['systemctl','stop',unit],capture_output=True)
         unit_path.unlink(missing_ok=True)
+        for server,name in [(locals().get('ordinary'),'_executor'),(locals().get('helper'),'executor')]:
+            engine=getattr(server,name,None)
+            if engine is not None:
+                engine._verifier._replay_store._connection.close()
         if state and state.exists():shutil.rmtree(state)
         for path in (etc/'repair-helpers').glob('cache-'+token+'.json'):path.unlink()
         for p in etc.glob('*'):
             if p.is_file() and p not in saved:p.unlink()
         for p,body in saved.items():p.write_bytes(body)
-        if SERVICE_JOB_DATABASE.exists():
+        if SERVICE_JOB_DATABASE.exists() and not reservation_case:
             with sqlite3.connect(SERVICE_JOB_DATABASE) as db:
                 for table in ('writer_holds','repair_reservations','repair_jobs'):
                     db.execute(f'DELETE FROM {table} WHERE transaction_id=?',(transaction,))
+        for destination in reversed(mounted):
+            subprocess.run(['umount',str(destination)],check=True)
         if current.is_symlink() and current.resolve()==stage:current.unlink()
         shutil.rmtree(stage)
         subprocess.run(['systemctl','daemon-reload'],check=True)
