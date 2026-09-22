@@ -9,10 +9,12 @@ import struct
 import sys
 from collections.abc import Callable, Mapping
 from typing import BinaryIO
+from pathlib import Path
 
 MAX_FRAME_BYTES = 1_048_576
 EXECUTOR_SOCKET = "/run/a4diag-target/executor.sock"
 FIXED_COMMAND = "/usr/libexec/a4diag/a4diag-transport-helper"
+REPAIR_ROUTES = Path('/etc/a4diag-target/repair-routes.json')
 
 
 class HelperError(ValueError):
@@ -71,7 +73,21 @@ def run_helper(stdin: BinaryIO, stdout: BinaryIO, *, env: Mapping[str, str], con
             limit = requested_limit
     except (KeyError, TypeError, json.JSONDecodeError):
         pass
-    response = connector(EXECUTOR_SOCKET, request, limit)
+    destination = EXECUTOR_SOCKET
+    try:
+        signed_payload = json.loads(str(decoded.get('payload', '')))
+    except (ValueError, TypeError):
+        signed_payload = {}
+    if isinstance(signed_payload, dict) and signed_payload.get('protocol_version') == '1.1':
+        from a4diag_target.repair_install import helper_route
+        try:
+            route = helper_route(signed_payload['binding']['profile_id'], routes_path=REPAIR_ROUTES)
+            if route is None and signed_payload['operation']['capability'] != 'services':
+                raise ValueError('repair_route_required')
+            destination = route or EXECUTOR_SOCKET
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise HelperError('repair_route_unavailable') from exc
+    response = connector(destination, request, limit)
     if len(response) > limit:
         raise HelperError("response_too_large")
     parsed = json.loads(response, object_pairs_hook=_unique)

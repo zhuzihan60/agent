@@ -197,9 +197,16 @@ class TargetSocketServer:
                         max_bytes=MAX_FRAME_BYTES,
                     )
                 return canonical_json_bytes(read_identity(self._identity_root, value))
-            result = await self._executor.execute(
-                SignedTargetRequest.model_validate(value)
-            )
+            envelope = SignedTargetRequest.model_validate(value)
+            # Existing services retain their V11 executor path. Registered
+            # helper scopes cannot bypass isolation via this socket.
+            candidate = json.loads(envelope.payload)
+            if isinstance(candidate, dict) and candidate.get('protocol_version') == '1.1':
+                from a4diag_target.repair_install import helper_route
+                route = helper_route(candidate['binding']['profile_id'])
+                if route is not None or candidate['operation']['capability'] != 'services':
+                    raise ExecutorError('repair_helper_required')
+            result = await self._executor.execute(envelope)
             return canonical_json_bytes(result)
         except (ValueError, OSError, ExecutorError) as error:
             return canonical_json_bytes(

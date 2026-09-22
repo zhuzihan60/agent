@@ -82,9 +82,9 @@ try:
     value = json.loads(raw, object_pairs_hook=unique)
     allowed = {"protocol_version", "target_id", "ssh_public_key", "operation_public_key",
                "controller_key_fingerprint", "allowed_source_cidrs", "managed_resources",
-               "confirm_managed_resources", "diagnostic_probes"}
+               "confirm_managed_resources", "diagnostic_probes", "repair_profiles", "repair_helpers", "confirm_repair_helpers"}
     if type(value) is not dict or set(value) - allowed: fail("unknown configuration field")
-    required = allowed - {"confirm_managed_resources", "diagnostic_probes"}
+    required = allowed - {"confirm_managed_resources", "diagnostic_probes", "repair_profiles", "repair_helpers", "confirm_repair_helpers"}
     if not required <= set(value): fail("missing configuration field")
     if value["protocol_version"] != "1.0": fail("protocol_version must be 1.0")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value["target_id"]): fail("invalid target_id")
@@ -125,6 +125,18 @@ try:
             fail("package grants are unsupported by the hardened target executor")
     if resources and value.get("confirm_managed_resources") != "ENABLE":
         fail("nonempty managed_resources requires literal ENABLE")
+    profiles, helpers = value.get('repair_profiles', []), value.get('repair_helpers', [])
+    if type(profiles) is not list or type(helpers) is not list or len(profiles) > 64 or len(helpers) > 64:
+        fail('repair profiles/helpers must be bounded lists')
+    if helpers and not profiles:
+        fail('repair helpers require exact profile registrations')
+    if (profiles or helpers) and value.get('confirm_repair_helpers') != 'ENABLE':
+        fail('repair helpers require literal ENABLE')
+    for helper in helpers:
+        if type(helper) is not dict or set(helper) != {'profile_id', 'adapter'}:
+            fail('invalid repair helper')
+        if any(type(v) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', v) for v in helper.values()):
+            fail('invalid repair helper identifier')
     probes = value.get("diagnostic_probes", [])
     if type(probes) is not list or len(probes) > 8:
         fail("diagnostic_probes must be a list of at most 8 probes")
@@ -237,7 +249,8 @@ for item in resources:
 policy = {"target_id": source["target_id"], "target_fingerprint": sys.argv[4],
           "controller_key_fingerprint": source["controller_key_fingerprint"],
           "managed_roots": roots, "allowed_units": units, "allowed_packages": packages,
-          "diagnostic_probes": source.get("diagnostic_probes", [])}
+          "diagnostic_probes": source.get("diagnostic_probes", []),
+          "repair_profiles": source.get("repair_profiles", [])}
 policy = TargetPolicy.model_validate(policy).model_dump(mode="json")
 pathlib.Path(sys.argv[2]).write_text(json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 lines = [
@@ -281,6 +294,9 @@ install_target() {
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release version"
   destination="$TARGET_BASE/releases/$version"
   install -d -m 0755 "$TARGET_BASE/releases" "$TARGET_LIBEXEC" "$TARGET_SYSTEMD"
+  [ ! -L "$TARGET_BASE/.install.lock" ] || die "install lock must not be a symlink"
+  exec {target_install_lock}>"$TARGET_BASE/.install.lock"
+  flock -n "$target_install_lock" || die "another target installation is running"
   install -d -m 0750 "$TARGET_STATE"
   install -d -m 0700 "$TARGET_STATE/executor" "$TARGET_STATE/.ssh"
   if [ ! -d "$destination" ]; then
@@ -296,12 +312,54 @@ install_target() {
     touch "$destination/.runtime-ready"
   fi
   if [ "${A4DIAG_TARGET_INJECT_FAILURE:-}" = "before_switch" ]; then die "injected failure before switch"; fi
+  "$destination/venv/bin/python" -m a4diag_target.repair_install rollback "$TARGET_ROOT"
+  if [ "${A4DIAG_TARGET_SKIP_SYSTEMD:-0}" != "1" ]; then
+    install -d -m 0755 "${TARGET_ROOT}etc/sysusers.d"
+    install -m 0644 "$destination/systemd/sysusers.d/a4diag-target.conf" "${TARGET_ROOT}etc/sysusers.d/a4diag-target.conf"
+    systemd-sysusers a4diag-target.conf
+  fi
+  "$destination/venv/bin/python" -m a4diag_target.repair_install check "$TARGET_ROOT" "$config"
+  "$destination/venv/bin/python" -m a4diag_target.repair_install begin "$TARGET_ROOT" "$config"
+  TARGET_TRANSACTION_PYTHON="$destination/venv/bin/python"
+  rollback_target_install() {
+    local status="$?"
+    trap - EXIT
+    "$TARGET_TRANSACTION_PYTHON" -m a4diag_target.repair_install rollback "$TARGET_ROOT"
+    if [ "${A4DIAG_TARGET_SKIP_SYSTEMD:-0}" != "1" ]; then
+      systemctl daemon-reload
+      if [ -L "$TARGET_CURRENT" ] && [ -f "$TARGET_SYSTEMD/a4diag-target-executor.socket" ]; then
+        systemctl start a4diag-target-executor.socket
+      fi
+      for binding in "$TARGET_ETC"/repair-helpers/*.json; do
+        [ -f "$binding" ] || continue
+        systemctl enable --now "a4diag-repair-helper@$(basename "$binding" .json).socket"
+      done
+    fi
+    exit "$status"
+  }
+  trap rollback_target_install EXIT
+  # Stop dispatcher admission before checking durable jobs again. Existing
+  # independent workers are never killed by installer cleanup.
+  if [ "${A4DIAG_TARGET_SKIP_SYSTEMD:-0}" != "1" ]; then
+    systemctl stop a4diag-target-executor.socket a4diag-target-executor.service 2>/dev/null || [ ! -f "$TARGET_SYSTEMD/a4diag-target-executor.socket" ]
+    for binding in "$TARGET_ETC"/repair-helpers/*.json; do
+      [ -f "$binding" ] || continue
+      helper_id="$(basename "$binding" .json)"
+      [[ "$helper_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || die "invalid installed helper id"
+      systemctl stop "a4diag-repair-helper@$helper_id.socket" "a4diag-repair-helper@$helper_id.service"
+    done
+  fi
+  "$destination/venv/bin/python" -m a4diag_target.repair_install check "$TARGET_ROOT" "$config"
   write_configuration "$config" "$destination/venv/bin/python"
+  "$destination/venv/bin/python" -m a4diag_target.repair_install install "$TARGET_ROOT" "$config"
+  if [ "${A4DIAG_TARGET_INJECT_FAILURE:-}" = "after_configuration" ]; then die "injected failure after configuration"; fi
   ln -sfn "$destination" "$TARGET_CURRENT.tmp.$$"
   mv -Tf "$TARGET_CURRENT.tmp.$$" "$TARGET_CURRENT"
   install -m 0755 "$destination/venv/bin/a4diag-transport-helper" "$TARGET_LIBEXEC/a4diag-transport-helper"
   install -m 0644 "$destination/systemd/a4diag-target-executor.service" "$TARGET_SYSTEMD/a4diag-target-executor.service"
   install -m 0644 "$destination/systemd/a4diag-target-executor.socket" "$TARGET_SYSTEMD/a4diag-target-executor.socket"
+  install -m 0644 "$destination/systemd/a4diag-repair-helper@.service" "$TARGET_SYSTEMD/a4diag-repair-helper@.service"
+  install -m 0644 "$destination/systemd/a4diag-repair-helper@.socket" "$TARGET_SYSTEMD/a4diag-repair-helper@.socket"
   if [ "${A4DIAG_TARGET_SKIP_SYSTEMD:-0}" != "1" ]; then
     install -d -m 0755 "${TARGET_ROOT}etc/sysusers.d" "${TARGET_ROOT}etc/tmpfiles.d"
     install -m 0644 "$destination/systemd/sysusers.d/a4diag-target.conf" "${TARGET_ROOT}etc/sysusers.d/a4diag-target.conf"
@@ -313,18 +371,27 @@ install_target() {
     usermod --shell /bin/sh --password '*' a4diag-target
     # Stop both old units before recreating runtime paths. Older services
     # remove the directory on stop; an active socket may already be unlinked.
-    systemctl stop a4diag-target-executor.socket a4diag-target-executor.service
     systemd-tmpfiles --create a4diag-target.conf
     chown -R root:root "$TARGET_STATE/executor" "$TARGET_ETC"
     chown -R a4diag-target:a4diag-target "$TARGET_STATE/.ssh"
     systemctl daemon-reload
     systemctl enable --now a4diag-target-executor.socket
+    for binding in "$TARGET_ETC"/repair-helpers/*.json; do
+      [ -f "$binding" ] || continue
+      helper_id="$(basename "$binding" .json)"
+      systemctl enable --now "a4diag-repair-helper@$helper_id.socket"
+    done
   fi
+  "$destination/venv/bin/python" -m a4diag_target.repair_install commit "$TARGET_ROOT"
+  trap - EXIT
   log "installed restricted target runtime $version"
 }
 
 uninstall_target() {
   require_root
+  if [ -x "$TARGET_CURRENT/venv/bin/python" ]; then
+    "$TARGET_CURRENT/venv/bin/python" -m a4diag_target.repair_install drain "$TARGET_ROOT"
+  fi
   if [ -f "$TARGET_STATE/executor/replay.sqlite3" ]; then
     python3.11 - "$TARGET_STATE/executor/replay.sqlite3" <<'PY' || die "incomplete target transactions prevent uninstall"
 import sqlite3, sys
@@ -334,6 +401,23 @@ raise SystemExit(1 if count else 0)
 PY
   fi
   [ "${A4DIAG_TARGET_CONFIRM_UNINSTALL:-}" = "REMOVE" ] || die "set A4DIAG_TARGET_CONFIRM_UNINSTALL=REMOVE"
+  for binding in "$TARGET_ETC"/repair-helpers/*.json; do
+    [ -f "$binding" ] || continue
+    helper_id="$(basename "$binding" .json)"
+    [[ "$helper_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || die "invalid installed helper id"
+    systemctl stop "a4diag-repair-helper@$helper_id.socket" "a4diag-repair-helper@$helper_id.service"
+  done
+  if [ -x "$TARGET_CURRENT/venv/bin/python" ] && ! "$TARGET_CURRENT/venv/bin/python" -m a4diag_target.repair_install drain "$TARGET_ROOT"; then
+    for binding in "$TARGET_ETC"/repair-helpers/*.json; do
+      [ -f "$binding" ] || continue
+      systemctl start "a4diag-repair-helper@$(basename "$binding" .json).socket"
+    done
+    die "incomplete repair jobs prevent uninstall"
+  fi
+  for binding in "$TARGET_ETC"/repair-helpers/*.json; do
+    [ -f "$binding" ] || continue
+    systemctl disable "a4diag-repair-helper@$(basename "$binding" .json).socket"
+  done
   systemctl disable --now a4diag-target-executor.socket 2>/dev/null || true
   log "runtime disabled; state retained for audit"
 }

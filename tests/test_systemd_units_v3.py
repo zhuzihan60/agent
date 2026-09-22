@@ -23,6 +23,8 @@ EXPECTED_UNITS = frozenset(
         "a4diag-plugin@.socket",
         "a4diag-target-executor.service",
         "a4diag-target-executor.socket",
+        "a4diag-repair-helper@.service",
+        "a4diag-repair-helper@.socket",
     }
 )
 EXPECTED_SUPPORT_FILES = frozenset(

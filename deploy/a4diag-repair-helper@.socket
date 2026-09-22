@@ -1,0 +1,14 @@
+[Unit]
+Description=A4Diag repair helper socket %i
+ConditionPathExists=/etc/a4diag-target/repair-helpers/%i.json
+
+[Socket]
+ListenStream=/run/a4diag-target/repair-%i.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=a4diag-target
+RemoveOnStop=yes
+Backlog=16
+
+[Install]
+WantedBy=sockets.target

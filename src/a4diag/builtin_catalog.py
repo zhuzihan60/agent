@@ -31,6 +31,9 @@ EXPECTED_BUILTINS = frozenset(
         "transport-ssh",
     }
 )
+# Separate from the ten transport/model/capability plugin inventory. New repair
+# adapters require target code, sandbox rendering, and explicit installation.
+REPAIR_ADAPTER_IDS: frozenset[str] = frozenset()
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")

@@ -155,7 +155,7 @@ exit 0
     (release / "wheelhouse").mkdir(parents=True)
     (release / "systemd" / "sysusers.d").mkdir(parents=True)
     (release / "systemd" / "tmpfiles.d").mkdir(parents=True)
-    for name in ("a4diag-target-executor.service", "a4diag-target-executor.socket"):
+    for name in ("a4diag-target-executor.service", "a4diag-target-executor.socket", "a4diag-repair-helper@.service", "a4diag-repair-helper@.socket"):
         (release / "systemd" / name).write_text("[Unit]\n", encoding="utf-8")
     (release / "systemd" / "sysusers.d" / "a4diag-target.conf").write_text("u a4diag-target\n", encoding="utf-8")
     (release / "systemd" / "tmpfiles.d" / "a4diag-target.conf").write_text("d /run/a4diag-target\n", encoding="utf-8")
@@ -283,6 +283,15 @@ exit 0
     failed = subprocess.run(command, env=environment, check=False, capture_output=True, text=True)
     assert failed.returncode != 0
     assert os.readlink(target_root / "opt" / "a4diag-target" / "current") == before
+
+    old_policy = (target_root/'etc/a4diag-target/policy.json').read_bytes()
+    old_routes = (target_root/'etc/a4diag-target/repair-routes.json').read_bytes()
+    config.write_text(json.dumps(configuration()), encoding='utf-8')
+    environment['A4DIAG_TARGET_INJECT_FAILURE'] = 'after_configuration'
+    failed = subprocess.run(command, env=environment, check=False, capture_output=True, text=True)
+    assert failed.returncode != 0, 'configuration interruption must fail'
+    assert (target_root/'etc/a4diag-target/policy.json').read_bytes() == old_policy
+    assert (target_root/'etc/a4diag-target/repair-routes.json').read_bytes() == old_routes
 
     ledger = target_root / "var" / "lib" / "a4diag-target" / "executor" / "replay.sqlite3"
     connection = sqlite3.connect(ledger)

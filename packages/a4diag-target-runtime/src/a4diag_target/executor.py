@@ -50,6 +50,7 @@ class TargetExecutor:
         policy: TargetPolicy | Callable[[], TargetPolicy],
         identity_probe: Callable[[], str],
         adapter: TransportAdapter,
+        plugins: dict[str, object] | None = None,
     ) -> None:
         self._verifier = verifier
         if not isinstance(policy, TargetPolicy) and not callable(policy):
@@ -64,6 +65,8 @@ class TargetExecutor:
             "services": ServicesPlugin(transport=adapter),
             "packages": PackagesPlugin(transport=adapter),
         }
+        if plugins is not None:
+            self._plugins = dict(plugins)
 
     def configure_jobs(self, jobs: JobStore, limits: RepairStore,
                        launch: Callable[[str], None]) -> None:

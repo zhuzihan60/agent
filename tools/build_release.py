@@ -60,7 +60,8 @@ EXPECTED_SYSTEMD_UNITS = frozenset(
     }
 )
 EXPECTED_TARGET_SYSTEMD_UNITS = frozenset(
-    {"a4diag-target-executor.service", "a4diag-target-executor.socket"}
+    {"a4diag-target-executor.service", "a4diag-target-executor.socket",
+     "a4diag-repair-helper@.service", "a4diag-repair-helper@.socket"}
 )
 
 FORBIDDEN_RUNTIME_LITERALS = (

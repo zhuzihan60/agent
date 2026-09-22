@@ -235,7 +235,7 @@ class JobStore:
 
 
 async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapter,
-                  clock=lambda: int(time.time())) -> None:
+                  clock=lambda: int(time.time()), plugins=None, request_guard=None) -> None:
     """Claim once and execute only the persisted, locally authorized operation."""
     from a4diag_target.executor import TargetExecutor, ExecutorError
     from a4diag.repair_store import RepairStore
@@ -245,6 +245,8 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
     request = store.request(job_id)
     try:
         current = policy()
+        if request_guard is not None:
+            request_guard(request)
         if current.controller_key_fingerprint != store.controller_key(job_id):
             raise ExecutorError('controller_key_mismatch')
         if identity_probe() != request.target_fingerprint or current.target_fingerprint != request.target_fingerprint or current.target_id != request.target_id:
@@ -263,7 +265,7 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
     else:
         # Reuse the same closed plugin dispatch as the short-action executor.
         executor = TargetExecutor(verifier=None, policy=current,
-            identity_probe=identity_probe, adapter=adapter)
+            identity_probe=identity_probe, adapter=adapter, plugins=plugins)
         try:
             result = await executor._dispatch(executor._plugins[request.operation.capability], request)
             payload = result.model_dump(mode='json')
@@ -288,10 +290,11 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
 
 class SystemdJobLauncher:
     """A separate service/cgroup with the executor's fixed privilege sandbox."""
-    def __init__(self, store: Path, *, policy_path: Path, identity_root: Path = Path('/')):
+    def __init__(self, store: Path, *, policy_path: Path, identity_root: Path = Path('/'), helper_id: str | None = None):
         self.store = Path(store)
         self.policy_path = Path(policy_path)
         self.identity_root = Path(identity_root)
+        self.helper_id = helper_id
 
     def __call__(self, job_id: str) -> None:
         import subprocess
@@ -309,12 +312,22 @@ class SystemdJobLauncher:
             'MemoryMax=256M', 'TasksMax=32', 'LimitNOFILE=1024',
             'StandardOutput=null', 'StandardError=journal',
         )
+        if self.helper_id is not None:
+            from a4diag_target.repair_install import load_binding, sandbox_properties
+            binding = load_binding(self.helper_id)
+            if self.store != binding.state / 'repair-jobs.sqlite3':
+                raise RepairJobError('helper_store_mismatch')
+            properties = sandbox_properties(binding)
         argv = ['/usr/bin/systemd-run', '--quiet', '--collect',
             f'--unit=a4diag-repair-{job_id}.service', '--service-type=exec']
         argv.extend(f'--property={value}' for value in properties)
-        argv.extend(['/opt/a4diag-target/current/venv/bin/python', '-m', 'a4diag_target.repair_jobs',
-            '--store', str(self.store), '--job', job_id,
-            '--policy', str(self.policy_path), '--identity-root', str(self.identity_root)])
+        if self.helper_id is None:
+            argv.extend(['/opt/a4diag-target/current/venv/bin/python', '-m', 'a4diag_target.repair_jobs',
+                '--store', str(self.store), '--job', job_id,
+                '--policy', str(self.policy_path), '--identity-root', str(self.identity_root)])
+        else:
+            argv.extend(['/opt/a4diag-target/current/venv/bin/python', '-m', 'a4diag_target.repair_helper',
+                '--helper', self.helper_id, '--job', job_id])
         subprocess.run(argv, check=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
 
