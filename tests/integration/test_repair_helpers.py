@@ -85,6 +85,12 @@ class BoundedAdapter:
             evidence['outside_write']=True
         except OSError: evidence['outside_write']=False
         (root/'sandbox-evidence.json').write_text(json.dumps(evidence))
+        if (root/'hold-worker').exists():
+            (root/'worker-paused').touch()
+            deadline=time.monotonic()+45
+            while not (root/'release-worker').exists():
+                if time.monotonic()>deadline: raise RuntimeError('fixture release timeout')
+                time.sleep(.05)
         time.sleep(3)
         (root/'effect').write_text('bounded fixture effect')
         return CommandOutcome(returncode=0)
@@ -197,6 +203,12 @@ def test_installed_configuration_failures_preserve_authorization(installed_helpe
     before = {p:p.read_bytes() for p in paths}
     try:
         source = json.loads(original)
+        source.update(managed_resources=[{'capability':'services','resource':helper.profile.resource}],confirm_managed_resources='ENABLE')
+        helper.config.write_text(json.dumps(source))
+        denied = subprocess.run(helper.command,env=helper.env,capture_output=True,text=True,timeout=30)
+        assert denied.returncode != 0 and 'duplicate_helper_scope' in denied.stderr
+        assert all(p.read_bytes()==body for p,body in before.items())
+        source = json.loads(original)
         source['repair_helpers'][0]['adapter'] = 'unknown'
         helper.config.write_text(json.dumps(source))
         denied = subprocess.run(helper.command,env=helper.env,capture_output=True,text=True,timeout=30)
@@ -218,6 +230,48 @@ def test_installed_configuration_failures_preserve_authorization(installed_helpe
         assert helper.effects()==[]
     finally:
         helper.config.write_bytes(original)
+
+
+def test_live_uninstall_excludes_install_after_second_drain(installed_helper):
+    helper = installed_helper
+    gate = helper.config.parent/'uninstall-race'
+    gate.mkdir()
+    unit = f'a4diag-repair-helper@{helper.profile.id}.socket'
+    shim = gate/'systemctl'
+    shim.write_text(f'''#!{sys.executable}
+import os,sys,time
+from pathlib import Path
+gate=Path({str(gate)!r})
+if sys.argv[1:]==['disable',{unit!r}]:
+ (gate/'ready').touch()
+ deadline=time.monotonic()+30
+ while not (gate/'release').exists():
+  if time.monotonic()>deadline:raise SystemExit(91)
+  time.sleep(.02)
+os.execv('/usr/bin/systemctl',['/usr/bin/systemctl',*sys.argv[1:]])
+''')
+    shim.chmod(0o755)
+    policy = Path('/etc/a4diag-target/policy.json')
+    before = policy.read_bytes()
+    uninstalling = subprocess.Popen(helper.command[:2]+['uninstall'],
+        env={**helper.env,'PATH':str(gate)+':'+helper.env['PATH'],'A4DIAG_TARGET_CONFIRM_UNINSTALL':'REMOVE'},
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        deadline=time.monotonic()+15
+        while not (gate/'ready').exists() and time.monotonic()<deadline:time.sleep(.02)
+        assert (gate/'ready').exists(), 'uninstall did not reach disable after its second drain'
+        competing = subprocess.run(helper.command,env=helper.env,capture_output=True,text=True,timeout=15)
+        assert competing.returncode != 0 and 'another target installation is running' in competing.stderr
+        assert policy.read_bytes() == before
+        (gate/'release').touch()
+        out,err=uninstalling.communicate(timeout=15)
+        assert uninstalling.returncode == 0, out+err
+        assert subprocess.run(['systemctl','is-active',unit],capture_output=True).returncode != 0
+    finally:
+        (gate/'release').touch()
+        if uninstalling.poll() is None:uninstalling.communicate(timeout=15)
+        restored=subprocess.run(helper.command,env=helper.env,capture_output=True,text=True,timeout=30)
+        assert restored.returncode == 0, restored.stdout+restored.stderr
 
 
 def test_installed_helper_reloads_missing_invalid_symlink_and_fifo_policy(installed_helper):
@@ -288,14 +342,56 @@ def test_signed_scope_replay_revocation_and_independent_sandbox(installed_helper
     assert helper.send(invalid)['ok'] is False
     assert helper.effects()==[]
     request=helper.signed(L.APPLY,marker=marker)
-    response=helper.send(request)
-    assert 'job' in response, response
-    job_id=response['job']['id'];helper.workers.append(f'a4diag-repair-{job_id}.service')
-    # Stop the installed dispatcher. The worker must survive independently.
-    subprocess.run(['systemctl','stop',f'a4diag-repair-helper@{helper.profile.id}.service'],check=True)
-    # An upgrade cannot race an accepted worker, even when dispatcher is gone.
-    blocked=subprocess.run(helper.command,env=helper.env,capture_output=True,text=True,timeout=30)
-    assert blocked.returncode != 0 and 'repair_helpers_require_drain' in blocked.stderr
+    # Pause the actual installer immediately before its first helper stop:
+    # the first drain passed, but a real signed job can still be admitted.
+    gate = helper.config.parent/'drain-race'
+    gate.mkdir()
+    shim = gate/'systemctl'
+    stop_args = ['stop',f'a4diag-repair-helper@{helper.profile.id}.socket',f'a4diag-repair-helper@{helper.profile.id}.service']
+    shim.write_text(f'''#!{sys.executable}
+import os,sys,time
+from pathlib import Path
+gate=Path({str(gate)!r})
+if sys.argv[1:]=={stop_args!r}:
+ (gate/'ready').touch()
+ deadline=time.monotonic()+30
+ while not (gate/'release').exists():
+  if time.monotonic()>deadline:raise SystemExit(91)
+  time.sleep(.02)
+os.execv('/usr/bin/systemctl',['/usr/bin/systemctl',*sys.argv[1:]])
+''')
+    shim.chmod(0o755)
+    paths = [Path('/etc/a4diag-target/policy.json'), Path('/etc/a4diag-target/repair-routes.json'), Path('/etc/a4diag-target/repair-helpers')/(helper.profile.id+'.json')]
+    before = {p:p.read_bytes() for p in paths}
+    (helper.state/'hold-worker').touch()
+    (helper.state/'hold-worker').chmod(0o600)
+    installer = subprocess.Popen(helper.command,env={**helper.env,'PATH':str(gate)+':'+helper.env['PATH']},stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        deadline=time.monotonic()+15
+        while not (gate/'ready').exists() and time.monotonic()<deadline:time.sleep(.02)
+        assert (gate/'ready').exists(), 'installer did not reach first-drain/stop boundary'
+        response=helper.send(request)
+        assert 'job' in response, response
+        job_id=response['job']['id'];helper.workers.append(f'a4diag-repair-{job_id}.service')
+        deadline=time.monotonic()+10
+        while not (helper.state/'worker-paused').exists() and time.monotonic()<deadline:time.sleep(.02)
+        assert (helper.state/'worker-paused').exists()
+        (gate/'release').touch()
+        out,err=installer.communicate(timeout=20)
+        assert installer.returncode != 0 and 'repair_helpers_require_drain' in err, out+err
+        assert all(p.read_bytes()==body for p,body in before.items())
+        assert helper.relay(helper.signed(L.QUERY_JOB,job_id=job_id))['job']['state']=='running'
+        # A new installer process encounters the retained journal while the
+        # same worker remains active. Recovery must also preserve observation.
+        blocked=subprocess.run(helper.command,env=helper.env,capture_output=True,text=True,timeout=20)
+        assert blocked.returncode != 0 and 'repair_helpers_require_drain' in blocked.stderr
+        assert all(p.read_bytes()==body for p,body in before.items())
+        assert helper.relay(helper.signed(L.QUERY_JOB,job_id=job_id))['job']['state']=='running'
+    finally:
+        (gate/'release').touch()
+        (helper.state/'release-worker').touch()
+        (helper.state/'release-worker').chmod(0o600)
+        if installer.poll() is None:installer.communicate(timeout=20)
     deadline=time.monotonic()+15
     from a4diag_target.repair_jobs import JobStore
     jobs=JobStore(helper.state/'repair-jobs.sqlite3')

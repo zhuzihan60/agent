@@ -227,7 +227,11 @@ def installation_plan(source: dict, *, peer_uid: int):
     selections = source.get('repair_helpers', [])
     if (profiles or selections) and source.get('confirm_repair_helpers') != 'ENABLE':
         raise ValueError('repair_helpers_require_ENABLE')
-    return plan_helpers(profiles, selections, peer_uid=peer_uid)
+    bindings = plan_helpers(profiles, selections, peer_uid=peer_uid)
+    legacy_resources = {item['resource'] for item in source.get('managed_resources', [])}
+    if any(binding.profile.resource in legacy_resources for binding in bindings):
+        raise ValueError('duplicate_helper_scope')
+    return bindings
 
 
 def ensure_drained(root: Path):
@@ -365,14 +369,27 @@ def install_transaction(action, root: Path, source=None):
         payload = json.loads(journal.read_bytes())
         if set(payload['files']) != _install_paths(root, payload['ids']):
             raise ValueError('invalid_install_journal')
-        if root.resolve() == Path('/') and (root/'etc/systemd/system/a4diag-repair-helper@.socket').exists():
-            import subprocess
-            for helper_id in payload['ids']:
-                subprocess.run(['/usr/bin/systemctl', 'stop',
-                    f'a4diag-repair-helper@{helper_id}.socket',
-                    f'a4diag-repair-helper@{helper_id}.service'],
-                    check=True, capture_output=True, timeout=30)
-        ensure_drained(root)
+        managed_systemd = root.resolve() == Path('/') and (root/'etc/systemd/system/a4diag-repair-helper@.socket').exists()
+        try:
+            if managed_systemd:
+                import subprocess
+                for helper_id in payload['ids']:
+                    subprocess.run(['/usr/bin/systemctl', 'stop',
+                        f'a4diag-repair-helper@{helper_id}.socket',
+                        f'a4diag-repair-helper@{helper_id}.service'],
+                        check=True, capture_output=True, timeout=30)
+            ensure_drained(root)
+        except BaseException:
+            # An accepted worker forbids restoring the journal's old binding.
+            # Keep current artifacts and journal, but restore their observation
+            # sockets even when this is a new process recovering interruption.
+            if managed_systemd:
+                for helper_id in payload['ids']:
+                    if (root/f'etc/a4diag-target/repair-helpers/{helper_id}.json').is_file():
+                        subprocess.run(['/usr/bin/systemctl', 'start',
+                            f'a4diag-repair-helper@{helper_id}.socket'],
+                            check=True, capture_output=True, timeout=30)
+            raise
         for relative, saved in payload['files'].items():
             path = root / relative
             if saved is None:

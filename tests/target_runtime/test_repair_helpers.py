@@ -45,6 +45,21 @@ def test_scope_and_sandbox_are_derived_from_registered_code(monkeypatch):
         install.HelperBinding(adapter='bounded', profile=profile, peer_uid=123, state_directory='/tmp/shared')
 
 
+def test_installer_rejects_helper_overlap_with_v10_managed_resources(monkeypatch):
+    from a4diag_target import repair_install as install
+    from tests.target_runtime.test_repair_protocol import _profile
+    profile = _profile()
+    monkeypatch.setitem(install.ADAPTERS, 'bounded', install.AdapterSpec('services', lambda p: install.Sandbox(), lambda p: object()))
+    source = installation_config(repair_profiles=[profile.model_dump(mode='json')],
+        repair_helpers=[{'profile_id':profile.id,'adapter':'bounded'}],
+        confirm_repair_helpers='ENABLE', confirm_managed_resources='ENABLE',
+        managed_resources=[{'capability':'services','resource':profile.resource}])
+    with pytest.raises(ValueError, match='duplicate_helper_scope'):
+        install.installation_plan(source, peer_uid=123)
+    source['managed_resources'][0]['resource'] = 'other.service'
+    assert len(install.installation_plan(source, peer_uid=123)) == 1
+
+
 @pytest.mark.parametrize('path', ['/tmp/x y', '/tmp/%i', '/tmp/../etc', '/'])
 def test_sandbox_paths_reject_systemd_expansion(path):
     from a4diag_target.repair_install import Sandbox

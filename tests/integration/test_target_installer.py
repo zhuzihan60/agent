@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -292,6 +293,44 @@ exit 0
     assert failed.returncode != 0, 'configuration interruption must fail'
     assert (target_root/'etc/a4diag-target/policy.json').read_bytes() == old_policy
     assert (target_root/'etc/a4diag-target/repair-routes.json').read_bytes() == old_routes
+
+    # Pause uninstall after its second real drain, before it disables units.
+    # Install must fail on the shared lock instead of publishing concurrently.
+    runtime_python = target_root/'opt/a4diag-target/releases/1.0.0/venv/bin/python'
+    runtime_python.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+if [ "${A4DIAG_TEST_DRAIN_GATE:-}" != "" ] && [ "$*" = "-m a4diag_target.repair_install drain $A4DIAG_TARGET_ROOT" ]; then
+  "$A4DIAG_TEST_REAL_PYTHON" "$@"
+  count=0
+  [ ! -f "$A4DIAG_TEST_DRAIN_GATE/count" ] || read -r count < "$A4DIAG_TEST_DRAIN_GATE/count"
+  count=$((count+1))
+  echo "$count" > "$A4DIAG_TEST_DRAIN_GATE/count"
+  if [ "$count" = 2 ]; then
+    touch "$A4DIAG_TEST_DRAIN_GATE/ready"
+    while [ ! -f "$A4DIAG_TEST_DRAIN_GATE/release" ]; do sleep 0.02; done
+  fi
+  exit 0
+fi
+exec "$A4DIAG_TEST_REAL_PYTHON" "$@"
+''')
+    runtime_python.chmod(0o755)
+    gate = tmp_path/'uninstall-gate'
+    gate.mkdir()
+    unlocked_environment = {k:v for k,v in environment.items() if k != 'A4DIAG_TARGET_INJECT_FAILURE'}
+    uninstalling = subprocess.Popen(['bash',str(INSTALLER),'uninstall'],
+        env={**unlocked_environment,'A4DIAG_TARGET_CONFIRM_UNINSTALL':'REMOVE','A4DIAG_TEST_DRAIN_GATE':str(gate)},
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        deadline=time.monotonic()+15
+        while not (gate/'ready').exists() and time.monotonic()<deadline:time.sleep(.02)
+        assert (gate/'ready').exists(), 'uninstall did not reach second-drain boundary'
+        competing = subprocess.run(command,env=unlocked_environment,capture_output=True,text=True,timeout=15)
+        assert competing.returncode != 0 and 'another target installation is running' in competing.stderr
+        assert (target_root/'etc/a4diag-target/policy.json').read_bytes() == old_policy
+    finally:
+        (gate/'release').touch()
+        out,err=uninstalling.communicate(timeout=15)
+        assert uninstalling.returncode == 0, out+err
 
     ledger = target_root / "var" / "lib" / "a4diag-target" / "executor" / "replay.sqlite3"
     connection = sqlite3.connect(ledger)

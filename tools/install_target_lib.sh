@@ -17,6 +17,14 @@ require_root() {
   [ "${A4DIAG_TARGET_SKIP_ROOT:-0}" = "1" ] || [ "$(id -u)" -eq 0 ] || die "must run as root"
 }
 
+lock_target_install() {
+  [ ! -L "$TARGET_BASE" ] || die "protected install path must not be a symlink: $TARGET_BASE"
+  install -d -m 0755 "$TARGET_BASE"
+  [ ! -L "$TARGET_BASE/.install.lock" ] || die "install lock must not be a symlink"
+  exec {target_install_lock}>"$TARGET_BASE/.install.lock"
+  flock -n "$target_install_lock" || die "another target installation is running"
+}
+
 check_distro() {
   local file="${A4DIAG_TARGET_OS_RELEASE:-/etc/os-release}" id version
   [ -f "$file" ] || die "cannot read $file"
@@ -294,9 +302,7 @@ install_target() {
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release version"
   destination="$TARGET_BASE/releases/$version"
   install -d -m 0755 "$TARGET_BASE/releases" "$TARGET_LIBEXEC" "$TARGET_SYSTEMD"
-  [ ! -L "$TARGET_BASE/.install.lock" ] || die "install lock must not be a symlink"
-  exec {target_install_lock}>"$TARGET_BASE/.install.lock"
-  flock -n "$target_install_lock" || die "another target installation is running"
+  lock_target_install
   install -d -m 0750 "$TARGET_STATE"
   install -d -m 0700 "$TARGET_STATE/executor" "$TARGET_STATE/.ssh"
   if [ ! -d "$destination" ]; then
@@ -324,7 +330,9 @@ install_target() {
   rollback_target_install() {
     local status="$?"
     trap - EXIT
-    "$TARGET_TRANSACTION_PYTHON" -m a4diag_target.repair_install rollback "$TARGET_ROOT"
+    if ! "$TARGET_TRANSACTION_PYTHON" -m a4diag_target.repair_install rollback "$TARGET_ROOT"; then
+      log "configuration recovery did not complete; retaining recovery journal"
+    fi
     if [ "${A4DIAG_TARGET_SKIP_SYSTEMD:-0}" != "1" ]; then
       systemctl daemon-reload
       if [ -L "$TARGET_CURRENT" ] && [ -f "$TARGET_SYSTEMD/a4diag-target-executor.socket" ]; then
@@ -389,6 +397,7 @@ install_target() {
 
 uninstall_target() {
   require_root
+  lock_target_install
   if [ -x "$TARGET_CURRENT/venv/bin/python" ]; then
     "$TARGET_CURRENT/venv/bin/python" -m a4diag_target.repair_install drain "$TARGET_ROOT"
   fi
