@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
 import unicodedata
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import (
     BaseModel,
@@ -31,6 +32,17 @@ _PROTECTED_SERVICES = (
     "a4diag-target",
 )
 _MAX_UTC_EPOCH = 253_402_300_799
+
+if TYPE_CHECKING:
+    from a4diag.domain import Operation, RepairBinding
+
+
+class RepairAuthorizationError(ValueError):
+    """Stable fail-closed profile authorization error."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def _safe_id(value: str, label: str) -> str:
@@ -153,9 +165,59 @@ def profile_digest(profile: RepairProfile) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def authorize_profile(
+    profile: RepairProfile,
+    operation: Operation,
+    *,
+    now: int,
+    presented_digest: str,
+) -> RepairBinding:
+    """Bind one exact HIGH-risk operation to a current registered profile."""
+
+    from a4diag.domain import Operation, RepairBinding, Risk
+
+    if not isinstance(profile, RepairProfile):
+        raise RepairAuthorizationError("invalid_profile")
+    if not isinstance(operation, Operation):
+        raise RepairAuthorizationError("invalid_operation")
+    if type(now) is not int or now < 0:
+        raise RepairAuthorizationError("invalid_clock")
+    expected_digest = profile_digest(profile)
+    if (
+        not isinstance(presented_digest, str)
+        or not hmac.compare_digest(expected_digest, presented_digest)
+    ):
+        raise RepairAuthorizationError("profile_digest_mismatch")
+    if now >= profile.expires_at:
+        raise RepairAuthorizationError("profile_expired")
+    if operation.capability != profile.capability:
+        raise RepairAuthorizationError("profile_capability_mismatch")
+    if operation.resource != profile.resource:
+        raise RepairAuthorizationError("profile_resource_mismatch")
+    if operation.action not in profile.actions:
+        raise RepairAuthorizationError("profile_action_not_allowed")
+    if operation.model_risk is not Risk.HIGH:
+        raise RepairAuthorizationError("risk_downgrade")
+    if profile.capability == "services" and operation.parameters != {
+        "unit": profile.resource
+    }:
+        raise RepairAuthorizationError("profile_parameters_mismatch")
+    if operation.verify != {
+        "recovery_check_ids": list(profile.recovery_check_ids)
+    }:
+        raise RepairAuthorizationError("recovery_checks_mismatch")
+    return RepairBinding(
+        profile_id=profile.id,
+        profile_digest=expected_digest,
+        preconditions_digest=None,
+    )
+
+
 __all__ = [
+    "RepairAuthorizationError",
     "RepairProfile",
     "ServicesConstraints",
+    "authorize_profile",
     "profile_digest",
     "validate_repair_profiles",
 ]

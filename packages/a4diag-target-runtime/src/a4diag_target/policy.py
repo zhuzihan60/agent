@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import hmac
 import re
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from a4diag.domain import Operation, normalize_resource
+from a4diag.domain import Operation, RepairBinding, normalize_resource
 from a4diag.linux_probes import LinuxProbe
 from a4diag.repair_profiles import (
+    RepairAuthorizationError,
     RepairProfile,
+    authorize_profile,
     profile_digest,
     validate_repair_profiles,
 )
@@ -154,6 +157,35 @@ class TargetPolicy(BaseModel):
             raise PolicyDenied("profile_not_granted")
         if not hmac.compare_digest(profile_digest(profile), presented_digest):
             raise PolicyDenied("profile_digest_mismatch")
+        return profile
+
+    def authorize_repair(
+        self,
+        binding: RepairBinding,
+        operation: Operation,
+        *,
+        authorization_kind: Literal["one_shot", "standing"],
+        authorization_id: str,
+        now: int,
+    ) -> RepairProfile:
+        """Independently recheck a protocol 1.1 repair at execution time."""
+
+        try:
+            profile = self.require_repair_profile(
+                binding.profile_id, binding.profile_digest
+            )
+            authorize_profile(
+                profile,
+                operation,
+                now=now,
+                presented_digest=binding.profile_digest,
+            )
+        except RepairAuthorizationError as exc:
+            raise PolicyDenied(exc.code) from exc
+        if authorization_kind == "standing" and (
+            not profile.standing_authorization or authorization_id != profile.id
+        ):
+            raise PolicyDenied("standing_authorization_mismatch")
         return profile
 
     def authorize(self, operation: Operation) -> None:

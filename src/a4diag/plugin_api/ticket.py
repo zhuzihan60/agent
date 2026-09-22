@@ -10,20 +10,23 @@ import time
 import uuid
 from collections.abc import Callable, Mapping
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from a4diag.domain import (
     CanonicalPlanError,
     Operation,
+    RepairBinding,
     Risk,
     canonical_json_bytes,
 )
 from a4diag.policy_engine import (
     PolicyAuthorization,
+    RepairPolicyAuthorization,
     canonical_operation_digest,
     policy_authorization_is_authentic,
+    repair_policy_authorization_is_authentic,
 )
 
 
@@ -175,6 +178,69 @@ class OperationTicketExpectation(OperationTicketEnvelope):
         return _validate_digest(value, "effect_payload_digest")
 
 
+class OperationTicketEnvelopeV11(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.1"] = "1.1"
+    transaction_id: str
+    step_id: str
+    target_id: str
+    target_fingerprint: str
+    operation: Operation
+    plan_digest: str
+    risk: Literal[Risk.HIGH] = Risk.HIGH
+    binding: RepairBinding
+    authorization_kind: Literal["one_shot", "standing"]
+    authorization_id: str
+
+    @field_validator("transaction_id", "step_id", "authorization_id")
+    @classmethod
+    def validate_safe_ids(cls, value: str, info: object) -> str:
+        return _validate_safe_id(value, getattr(info, "field_name", "identifier"))
+
+    @field_validator("target_id")
+    @classmethod
+    def validate_target_id(cls, value: str) -> str:
+        return _validate_target_id(value)
+
+    @field_validator("target_fingerprint")
+    @classmethod
+    def validate_target_fingerprint(cls, value: str) -> str:
+        return _validate_fingerprint(value)
+
+    @field_validator("plan_digest")
+    @classmethod
+    def validate_plan_digest(cls, value: str) -> str:
+        return _validate_digest(value, "plan_digest")
+
+    @model_validator(mode="after")
+    def validate_high_operation(self) -> OperationTicketEnvelopeV11:
+        if self.operation.model_risk is not Risk.HIGH:
+            raise ValueError("repair operation must remain HIGH risk")
+        return self
+
+
+class OperationTicketRequestV11(OperationTicketEnvelopeV11):
+    phase: OperationPhase = OperationPhase.APPLY
+    effect_payload_digest: str = EMPTY_EFFECT_PAYLOAD_DIGEST
+    ttl_seconds: int = Field(default=30, ge=1, le=300)
+
+    @field_validator("effect_payload_digest")
+    @classmethod
+    def validate_effect_payload_digest(cls, value: str) -> str:
+        return _validate_digest(value, "effect_payload_digest")
+
+
+class OperationTicketExpectationV11(OperationTicketEnvelopeV11):
+    phase: OperationPhase = OperationPhase.APPLY
+    effect_payload_digest: str = EMPTY_EFFECT_PAYLOAD_DIGEST
+
+    @field_validator("effect_payload_digest")
+    @classmethod
+    def validate_effect_payload_digest(cls, value: str) -> str:
+        return _validate_digest(value, "effect_payload_digest")
+
+
 class OperationTicket(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -233,6 +299,66 @@ class OperationTicket(BaseModel):
         return self
 
 
+class OperationTicketV11(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.1"] = "1.1"
+    ticket_id: str
+    transaction_id: str
+    step_id: str
+    target_id: str
+    target_fingerprint: str
+    capability: str
+    action: str
+    resource: str
+    phase: OperationPhase
+    parameters_digest: str
+    operation_digest: str
+    effect_payload_digest: str
+    plan_digest: str
+    risk: Literal[Risk.HIGH] = Risk.HIGH
+    binding: RepairBinding
+    authorization_kind: Literal["one_shot", "standing"]
+    authorization_id: str
+    issued_at: int
+    expires_at: int
+
+    @field_validator("ticket_id", "transaction_id", "step_id", "authorization_id")
+    @classmethod
+    def validate_safe_ids(cls, value: str, info: object) -> str:
+        return _validate_safe_id(value, getattr(info, "field_name", "identifier"))
+
+    @field_validator("target_id")
+    @classmethod
+    def validate_target_id(cls, value: str) -> str:
+        return _validate_target_id(value)
+
+    @field_validator("target_fingerprint")
+    @classmethod
+    def validate_target_fingerprint(cls, value: str) -> str:
+        return _validate_fingerprint(value)
+
+    @field_validator(
+        "parameters_digest", "operation_digest", "effect_payload_digest", "plan_digest"
+    )
+    @classmethod
+    def validate_digests(cls, value: str, info: object) -> str:
+        return _validate_digest(value, getattr(info, "field_name", "digest"))
+
+    @model_validator(mode="after")
+    def validate_claims(self) -> OperationTicketV11:
+        if not 1 <= self.expires_at - self.issued_at <= 300:
+            raise ValueError("ticket lifetime must be between 1 and 300 seconds")
+        return self
+
+
+OperationTicketRequestType = OperationTicketRequest | OperationTicketRequestV11
+OperationTicketExpectationType = (
+    OperationTicketExpectation | OperationTicketExpectationV11
+)
+OperationTicketType = OperationTicket | OperationTicketV11
+
+
 class TicketIssuer:
     def __init__(
         self,
@@ -247,7 +373,7 @@ class TicketIssuer:
         self._clock = clock or _system_clock
         self._ticket_id_factory = ticket_id_factory or (lambda: uuid.uuid4().hex)
 
-    def inspect_for_recovery(self, token: str) -> OperationTicket:
+    def inspect_for_recovery(self, token: str) -> OperationTicketType:
         """Authenticate historical dispatch evidence for read-only recovery.
 
         This does not renew a ticket, consume it, or authorize an effect. The
@@ -261,11 +387,13 @@ class TicketIssuer:
 
     def issue(
         self,
-        request: OperationTicketRequest,
-        authorization: PolicyAuthorization | None,
+        request: OperationTicketRequestType,
+        authorization: PolicyAuthorization | RepairPolicyAuthorization | None,
     ) -> str:
+        if isinstance(request, OperationTicketRequestV11):
+            return self._issue_v11(request, authorization)
         if not isinstance(request, OperationTicketRequest):
-            raise TypeError("request must be OperationTicketRequest")
+            raise TypeError("request must be an operation ticket request")
         if not isinstance(
             authorization, PolicyAuthorization
         ) or not policy_authorization_is_authentic(
@@ -303,6 +431,49 @@ class TicketIssuer:
         signature = hmac.new(self._key, payload, hashlib.sha256).digest()
         return f"{_base64url_encode(payload)}.{_base64url_encode(signature)}"
 
+    def _issue_v11(
+        self,
+        request: OperationTicketRequestV11,
+        authorization: PolicyAuthorization | RepairPolicyAuthorization | None,
+    ) -> str:
+        if not isinstance(
+            authorization, RepairPolicyAuthorization
+        ) or not repair_policy_authorization_is_authentic(
+            authorization, self._authorization_key
+        ):
+            raise TicketError("invalid_authorization")
+        _verify_repair_policy_authorization_bindings(request, authorization)
+        issued_at = _read_clock(self._clock)
+        try:
+            parameters_digest = hashlib.sha256(
+                canonical_json_bytes(request.operation.parameters)
+            ).hexdigest()
+            claims = OperationTicketV11(
+                ticket_id=self._ticket_id_factory(),
+                transaction_id=request.transaction_id,
+                step_id=request.step_id,
+                target_id=request.target_id,
+                target_fingerprint=request.target_fingerprint,
+                capability=request.operation.capability,
+                action=request.operation.action,
+                resource=request.operation.resource,
+                phase=request.phase,
+                parameters_digest=parameters_digest,
+                operation_digest=canonical_operation_digest(request.operation),
+                effect_payload_digest=request.effect_payload_digest,
+                plan_digest=request.plan_digest,
+                binding=request.binding,
+                authorization_kind=request.authorization_kind,
+                authorization_id=request.authorization_id,
+                issued_at=issued_at,
+                expires_at=issued_at + request.ttl_seconds,
+            )
+            payload = canonical_json_bytes(claims.model_dump(mode="json"))
+        except (CanonicalPlanError, ValueError, TypeError) as error:
+            raise TicketError("invalid_request", str(error)) from error
+        signature = hmac.new(self._key, payload, hashlib.sha256).digest()
+        return f"{_base64url_encode(payload)}.{_base64url_encode(signature)}"
+
 
 class TicketVerifier:
     def __init__(
@@ -322,10 +493,12 @@ class TicketVerifier:
     def verify(
         self,
         token: str,
-        expected: OperationTicketExpectation,
-    ) -> OperationTicket:
-        if not isinstance(expected, OperationTicketExpectation):
-            raise TypeError("expected must be OperationTicketExpectation")
+        expected: OperationTicketExpectationType,
+    ) -> OperationTicketType:
+        if not isinstance(
+            expected, (OperationTicketExpectation, OperationTicketExpectationV11)
+        ):
+            raise TypeError("expected must be an operation ticket expectation")
         payload, signature = _decode_token(token)
         expected_signature = hmac.new(self._key, payload, hashlib.sha256).digest()
         if not hmac.compare_digest(signature, expected_signature):
@@ -338,7 +511,16 @@ class TicketVerifier:
         if now >= claims.expires_at:
             raise TicketError("expired")
 
-        _verify_bindings(claims, expected)
+        if isinstance(claims, OperationTicketV11) and isinstance(
+            expected, OperationTicketExpectationV11
+        ):
+            _verify_bindings_v11(claims, expected)
+        elif isinstance(claims, OperationTicket) and isinstance(
+            expected, OperationTicketExpectation
+        ):
+            _verify_bindings(claims, expected)
+        else:
+            raise TicketError("protocol_mismatch")
 
         if not self._replay_store.consume(claims.ticket_id):
             raise TicketError("replay")
@@ -414,7 +596,7 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _parse_canonical_claims(payload: bytes) -> OperationTicket:
+def _parse_canonical_claims(payload: bytes) -> OperationTicketType:
     try:
         value = json.loads(
             payload.decode("utf-8"),
@@ -424,7 +606,13 @@ def _parse_canonical_claims(payload: bytes) -> OperationTicket:
         )
         if type(value) is not dict:
             raise ValueError("ticket payload must be an object")
-        claims = OperationTicket.model_validate(value)
+        version = value.get("protocol_version", "1.0")
+        if version == "1.0":
+            claims: OperationTicketType = OperationTicket.model_validate(value)
+        elif version == "1.1":
+            claims = OperationTicketV11.model_validate(value)
+        else:
+            raise ValueError("unsupported ticket protocol version")
         canonical = canonical_json_bytes(claims.model_dump(mode="json"))
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError, CanonicalPlanError) as error:
         raise TicketError("invalid_claims", str(error)) from error
@@ -470,6 +658,46 @@ def _verify_bindings(
         raise TicketError("approval_mismatch")
 
 
+def _verify_bindings_v11(
+    claims: OperationTicketV11,
+    expected: OperationTicketExpectationV11,
+) -> None:
+    if claims.transaction_id != expected.transaction_id:
+        raise TicketError("transaction_mismatch")
+    if claims.step_id != expected.step_id:
+        raise TicketError("step_mismatch")
+    if (
+        claims.target_id != expected.target_id
+        or claims.target_fingerprint != expected.target_fingerprint
+    ):
+        raise TicketError("target_mismatch")
+    try:
+        operation_digest = canonical_operation_digest(expected.operation)
+    except CanonicalPlanError as error:
+        raise TicketError("operation_mismatch", str(error)) from error
+    if (
+        claims.capability != expected.operation.capability
+        or claims.action != expected.operation.action
+        or claims.resource != expected.operation.resource
+        or not hmac.compare_digest(claims.operation_digest, operation_digest)
+    ):
+        raise TicketError("operation_mismatch")
+    if not hmac.compare_digest(
+        claims.effect_payload_digest, expected.effect_payload_digest
+    ):
+        raise TicketError("effect_payload_mismatch")
+    if claims.phase is not expected.phase:
+        raise TicketError("phase_mismatch")
+    if not hmac.compare_digest(claims.plan_digest, expected.plan_digest):
+        raise TicketError("plan_mismatch")
+    if claims.binding != expected.binding:
+        raise TicketError("profile_mismatch")
+    if claims.authorization_kind != expected.authorization_kind:
+        raise TicketError("authorization_kind_mismatch")
+    if claims.authorization_id != expected.authorization_id:
+        raise TicketError("authorization_id_mismatch")
+
+
 def _verify_policy_authorization_bindings(
     request: OperationTicketRequest,
     authorization: PolicyAuthorization,
@@ -494,3 +722,28 @@ def _verify_policy_authorization_bindings(
         for authorized_digest in authorization.operation_digests
     ):
         raise TicketError("operation_not_authorized")
+
+
+def _verify_repair_policy_authorization_bindings(
+    request: OperationTicketRequestV11,
+    authorization: RepairPolicyAuthorization,
+) -> None:
+    if (
+        authorization.target_id != request.target_id
+        or authorization.target_fingerprint != request.target_fingerprint
+    ):
+        raise TicketError("authorization_target_mismatch")
+    if not hmac.compare_digest(authorization.plan_digest, request.plan_digest):
+        raise TicketError("authorization_plan_mismatch")
+    try:
+        digest = canonical_operation_digest(request.operation)
+    except CanonicalPlanError as error:
+        raise TicketError("invalid_request", str(error)) from error
+    if not hmac.compare_digest(authorization.operation_digest, digest):
+        raise TicketError("operation_not_authorized")
+    if authorization.binding != request.binding:
+        raise TicketError("authorization_profile_mismatch")
+    if authorization.authorization_kind != request.authorization_kind:
+        raise TicketError("authorization_kind_mismatch")
+    if authorization.authorization_id != request.authorization_id:
+        raise TicketError("authorization_id_mismatch")

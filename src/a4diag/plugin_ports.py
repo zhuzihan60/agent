@@ -27,8 +27,20 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from a4diag.domain import Operation, Plan, Risk, StepResult, TargetConfig, canonical_json_bytes, plan_digest
 from a4diag.plugin_api.manifest import PluginType
 from a4diag.plugin_client import PluginClient
-from a4diag.plugin_api.target_protocol import TargetLifecycle, TargetRequest, TargetSigner
-from a4diag.plugin_api.ticket import OperationPhase, OperationTicket, effect_payload_digest
+from a4diag.plugin_api.target_protocol import (
+    TargetLifecycle,
+    TargetLifecycleV11,
+    TargetRequest,
+    TargetRequestV11,
+    TargetSigner,
+)
+from a4diag.plugin_api.ticket import (
+    OperationPhase,
+    OperationTicket,
+    OperationTicketType,
+    OperationTicketV11,
+    effect_payload_digest,
+)
 from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import canonical_operation_digest
 from a4diag.runtime import RuntimeFailure
@@ -63,7 +75,7 @@ class _RpcExecutorPort:
     signer_resolver: Callable[[TargetConfig], TargetSigner]
     clock: Callable[[], int] = lambda: int(time.time())
     nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24)
-    _contexts: dict[tuple[str, str], OperationTicket] = field(default_factory=dict)
+    _contexts: dict[tuple[str, str], OperationTicketType] = field(default_factory=dict)
     _transaction: ContextVar[str | None] = ContextVar(
         "a4diag_rpc_transaction", default=None
     )
@@ -80,7 +92,7 @@ class _RpcExecutorPort:
         return transaction_id
 
     def restore_read_context(
-        self, target: TargetConfig, plan: Plan, claims: tuple[OperationTicket, ...]
+        self, target: TargetConfig, plan: Plan, claims: tuple[OperationTicketType, ...]
     ) -> None:
         """Bind authenticated durable dispatch claims without dispatching effects."""
         restored = {}
@@ -118,14 +130,22 @@ class _RpcExecutorPort:
         return client
 
     @staticmethod
-    def _claims(ticket: str) -> OperationTicket:
+    def _claims(ticket: str) -> OperationTicketType:
         try:
             if not isinstance(ticket, str) or ticket.count(".") != 1:
                 raise ValueError("malformed ticket")
             payload_segment = ticket.split(".", 1)[0]
             padded = payload_segment + "=" * ((4 - len(payload_segment) % 4) % 4)
             payload = base64.b64decode(padded, altchars=b"-_", validate=True)
-            claims = OperationTicket.model_validate_json(payload)
+            decoded = json.loads(payload)
+            if type(decoded) is not dict:
+                raise ValueError("ticket must be object")
+            model = (
+                OperationTicketV11
+                if decoded.get("protocol_version") == "1.1"
+                else OperationTicket
+            )
+            claims = model.model_validate(decoded)
             if canonical_json_bytes(claims.model_dump(mode="json")) != payload:
                 raise ValueError("noncanonical ticket")
             return claims
@@ -133,7 +153,7 @@ class _RpcExecutorPort:
             raise RuntimeFailure("ticket_context_invalid") from error
 
     def _validate_claims(
-        self, claims: OperationTicket, target: TargetConfig, step_id: str,
+        self, claims: OperationTicketType, target: TargetConfig, step_id: str,
         operation: Operation, phase: OperationPhase,
     ) -> None:
         if claims.target_id != target.id:
@@ -147,7 +167,9 @@ class _RpcExecutorPort:
             raise RuntimeFailure("ticket_context_mismatch")
 
     @staticmethod
-    def _ticket_base(claims: OperationTicket, operation: Operation) -> dict[str, object]:
+    def _ticket_base(
+        claims: OperationTicketType, operation: Operation
+    ) -> dict[str, object]:
         return {
             "transaction_id": claims.transaction_id,
             "step_id": claims.step_id,
@@ -156,27 +178,52 @@ class _RpcExecutorPort:
             "operation": operation.model_dump(mode="json"),
             "plan_digest": claims.plan_digest,
             "risk": claims.risk.value,
-            "approval_id": claims.approval_id,
+            "approval_id": (
+                claims.approval_id
+                if isinstance(claims, OperationTicket)
+                else claims.authorization_id
+            ),
         }
 
     def _envelope(
         self, *, target: TargetConfig, operation: Operation,
         lifecycle: TargetLifecycle, marker: dict[str, object] | None,
-        undo: dict[str, object] | None, claims: OperationTicket,
+        undo: dict[str, object] | None, claims: OperationTicketType,
         effect_digest: str,
         verify_restored: bool = False,
     ) -> dict[str, object]:
         issued = int(self.clock())
-        request = TargetRequest(
-            controller_id="a4diag-core", target_id=target.id,
-            target_fingerprint=claims.target_fingerprint,
-            transaction_id=self._transaction_id(), step_id=claims.step_id,
-            lifecycle=lifecycle, operation=operation, marker=marker, undo=undo,
-            verify_restored=verify_restored,
-            plan_digest=claims.plan_digest, effect_payload_digest=effect_digest,
-            risk=claims.risk, approval_id=claims.approval_id,
-            issued_at=issued, expires_at=issued + 30, nonce=self.nonce_factory(),
-        )
+        common = {
+            "controller_id": "a4diag-core",
+            "target_id": target.id,
+            "target_fingerprint": claims.target_fingerprint,
+            "transaction_id": self._transaction_id(),
+            "step_id": claims.step_id,
+            "operation": operation,
+            "marker": marker,
+            "undo": undo,
+            "verify_restored": verify_restored,
+            "plan_digest": claims.plan_digest,
+            "effect_payload_digest": effect_digest,
+            "risk": claims.risk,
+            "issued_at": issued,
+            "expires_at": issued + 30,
+            "nonce": self.nonce_factory(),
+        }
+        if isinstance(claims, OperationTicketV11):
+            request = TargetRequestV11(
+                **common,
+                lifecycle=TargetLifecycleV11(lifecycle.value),
+                binding=claims.binding,
+                authorization_kind=claims.authorization_kind,
+                authorization_id=claims.authorization_id,
+            )
+        else:
+            request = TargetRequest(
+                **common,
+                lifecycle=lifecycle,
+                approval_id=claims.approval_id,
+            )
         return self.signer_resolver(target).sign(request).model_dump(mode="json")
 
     @staticmethod
@@ -327,7 +374,9 @@ class _RpcExecutorPort:
         except ValueError as error:
             raise RuntimeFailure("plugin_result_invalid", "reconcile") from error
 
-    def _context(self, target: TargetConfig, step_id: str, operation: Operation) -> OperationTicket:
+    def _context(
+        self, target: TargetConfig, step_id: str, operation: Operation
+    ) -> OperationTicketType:
         claims = self._contexts.get((self._transaction_id(), step_id))
         if claims is None:
             raise RuntimeFailure("target_request_context_missing", step_id)

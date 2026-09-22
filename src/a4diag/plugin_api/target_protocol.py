@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from pydantic import BaseModel, ConfigDict, JsonValue, field_validator, model_validator
 
-from a4diag.domain import Operation, Risk, canonical_json_bytes
+from a4diag.domain import Operation, RepairBinding, Risk, canonical_json_bytes
 
 MAX_TARGET_REQUEST_BYTES = 1_048_576
 MAX_CLOCK_SKEW_SECONDS = 30
@@ -41,6 +41,16 @@ class TargetLifecycle(StrEnum):
     VERIFY = "verify"
     UNDO = "undo"
     RECONCILE = "reconcile"
+
+
+class TargetLifecycleV11(StrEnum):
+    PREPARE = "prepare"
+    APPLY = "apply"
+    VERIFY = "verify"
+    UNDO = "undo"
+    RECONCILE = "reconcile"
+    QUERY_JOB = "query_job"
+    CONFIRM_JOB = "confirm_job"
 
 
 class TargetRequest(BaseModel):
@@ -131,6 +141,105 @@ class TargetRequest(BaseModel):
         return self
 
 
+class TargetRequestV11(BaseModel):
+    """Protocol 1.1 repair request with mandatory authorization bindings."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.1"] = "1.1"
+    controller_id: str
+    target_id: str
+    target_fingerprint: str
+    transaction_id: str
+    step_id: str
+    lifecycle: TargetLifecycleV11
+    verify_restored: bool = False
+    operation: Operation
+    marker: dict[str, JsonValue] | None
+    undo: dict[str, JsonValue] | None
+    plan_digest: str
+    effect_payload_digest: str
+    risk: Risk
+    binding: RepairBinding
+    authorization_kind: Literal["one_shot", "standing"]
+    authorization_id: str
+    job_id: str | None = None
+    issued_at: int
+    expires_at: int
+    nonce: str
+
+    @field_validator("controller_id", "transaction_id", "step_id", "authorization_id")
+    @classmethod
+    def safe_id(cls, value: str) -> str:
+        if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
+            raise ValueError("unsafe request identifier")
+        return value
+
+    @field_validator("job_id")
+    @classmethod
+    def safe_job_id(cls, value: str | None) -> str | None:
+        if value is not None and not _SAFE_ID.fullmatch(value):
+            raise ValueError("unsafe job_id")
+        return value
+
+    @field_validator("target_id")
+    @classmethod
+    def safe_target(cls, value: str) -> str:
+        if not isinstance(value, str) or not _SAFE_TARGET.fullmatch(value):
+            raise ValueError("unsafe target identifier")
+        return value
+
+    @field_validator("target_fingerprint")
+    @classmethod
+    def safe_fingerprint(cls, value: str) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise ValueError("invalid target fingerprint")
+        return value
+
+    @field_validator("plan_digest", "effect_payload_digest")
+    @classmethod
+    def digest(cls, value: str) -> str:
+        if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+            raise ValueError("invalid digest")
+        return value
+
+    @field_validator("nonce")
+    @classmethod
+    def nonce_value(cls, value: str) -> str:
+        if not isinstance(value, str) or not _NONCE.fullmatch(value):
+            raise ValueError("invalid nonce")
+        return value
+
+    @field_validator("marker", "undo")
+    @classmethod
+    def bounded_json_object(
+        cls, value: dict[str, JsonValue] | None
+    ) -> dict[str, JsonValue] | None:
+        if value is not None:
+            canonical_json_bytes(value, max_bytes=262_144)
+        return value
+
+    @model_validator(mode="after")
+    def validate_window_and_authorization(self) -> TargetRequestV11:
+        if self.verify_restored and self.lifecycle is not TargetLifecycleV11.VERIFY:
+            raise ValueError("restoration verification requires VERIFY lifecycle")
+        if self.expires_at <= self.issued_at:
+            raise ValueError("expiry must follow issue time")
+        if self.expires_at - self.issued_at > MAX_REQUEST_LIFETIME_SECONDS:
+            raise ValueError("request lifetime exceeds limit")
+        if self.risk is not Risk.HIGH or self.operation.model_risk is not Risk.HIGH:
+            raise ValueError("repair authorization must remain HIGH risk")
+        job_lifecycle = self.lifecycle in {
+            TargetLifecycleV11.QUERY_JOB,
+            TargetLifecycleV11.CONFIRM_JOB,
+        }
+        if job_lifecycle and self.job_id is None:
+            raise ValueError("job_id is required for job lifecycle")
+        if not job_lifecycle and self.job_id is not None:
+            raise ValueError("job_id is only valid for job lifecycle")
+        return self
+
+
 class SignedTargetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -165,17 +274,25 @@ def _b64url_decode(value: str) -> bytes:
         raise TargetProtocolError("signature_invalid_encoding") from exc
 
 
+TargetRequestType = TargetRequest | TargetRequestV11
+
+
 class TargetSigner:
     def __init__(self, private_key: Ed25519PrivateKey) -> None:
         if not isinstance(private_key, Ed25519PrivateKey):
             raise TypeError("Ed25519 private key required")
         self._private_key = private_key
 
-    def sign(self, request: TargetRequest) -> SignedTargetRequest:
-        if not isinstance(request, TargetRequest):
-            raise TypeError("TargetRequest required")
+    def sign(self, request: TargetRequestType) -> SignedTargetRequest:
+        if not isinstance(request, (TargetRequest, TargetRequestV11)):
+            raise TypeError("TargetRequest or TargetRequestV11 required")
+        excluded = (
+            {"verify_restored"}
+            if isinstance(request, TargetRequest) and not request.verify_restored
+            else set()
+        )
         payload = canonical_json_bytes(
-            request.model_dump(mode="json", exclude={"verify_restored"} if not request.verify_restored else set()),
+            request.model_dump(mode="json", exclude=excluded),
             max_bytes=MAX_TARGET_REQUEST_BYTES,
         )
         return SignedTargetRequest(
@@ -192,6 +309,7 @@ class TargetVerifier:
         *,
         replay_store: NonceReplayStore,
         clock: Callable[[], int],
+        supported_versions: tuple[Literal["1.0", "1.1"], ...] = ("1.0", "1.1"),
     ) -> None:
         if not isinstance(public_key, Ed25519PublicKey):
             raise TypeError("Ed25519 public key required")
@@ -200,10 +318,17 @@ class TargetVerifier:
         self._public_key = public_key
         self._replay_store = replay_store
         self._clock = clock
+        if (
+            not supported_versions
+            or len(supported_versions) != len(set(supported_versions))
+            or any(value not in {"1.0", "1.1"} for value in supported_versions)
+        ):
+            raise TypeError("supported_versions must contain known unique versions")
+        self._supported_versions = supported_versions
 
     def verify(
         self, envelope: SignedTargetRequest, *, expected_target: str
-    ) -> TargetRequest:
+    ) -> TargetRequestType:
         if not isinstance(envelope, SignedTargetRequest):
             raise TargetProtocolError("envelope_invalid")
         try:
@@ -223,12 +348,23 @@ class TargetVerifier:
             raise TargetProtocolError("invalid_signature") from exc
 
         decoded = self._parse_unique_json(payload)
+        if type(decoded) is not dict:
+            raise TargetProtocolError("request_invalid")
+        version = decoded.get("protocol_version", "1.0")
+        if version not in self._supported_versions:
+            raise TargetProtocolError("unsupported_protocol_version")
+        request_model = TargetRequest if version == "1.0" else TargetRequestV11
         try:
-            request = TargetRequest.model_validate(decoded)
+            request = request_model.model_validate(decoded)
         except ValueError as exc:
             raise TargetProtocolError("request_invalid") from exc
+        excluded = (
+            {"verify_restored"}
+            if isinstance(request, TargetRequest) and "verify_restored" not in decoded
+            else set()
+        )
         canonical = canonical_json_bytes(
-            request.model_dump(mode="json", exclude={"verify_restored"} if "verify_restored" not in decoded else set()),
+            request.model_dump(mode="json", exclude=excluded),
             max_bytes=MAX_TARGET_REQUEST_BYTES,
         )
         if canonical != payload:
@@ -256,6 +392,12 @@ class TargetVerifier:
         if not consumed:
             raise TargetProtocolError("replay")
         return request
+
+    def now(self) -> int:
+        value = self._clock()
+        if type(value) is not int or value < 0:
+            raise TargetProtocolError("clock_invalid")
+        return value
 
     def record_result(self, nonce: str, result: object) -> None:
         recorder = getattr(self._replay_store, "record_result", None)
@@ -289,8 +431,11 @@ __all__ = [
     "NonceReplayStore",
     "SignedTargetRequest",
     "TargetLifecycle",
+    "TargetLifecycleV11",
     "TargetProtocolError",
     "TargetRequest",
+    "TargetRequestType",
+    "TargetRequestV11",
     "TargetSigner",
     "TargetVerifier",
 ]
