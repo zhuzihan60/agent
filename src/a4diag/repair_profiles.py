@@ -1,0 +1,161 @@
+"""Administrator-registered repair profiles shared by both trust boundaries."""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import unicodedata
+from typing import Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    ValidationInfo,
+    field_validator,
+)
+
+_SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_SERVICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,255}\.service$")
+_PROTECTED_SERVICES = (
+    "ssh",
+    "sshd",
+    "network",
+    "networkmanager",
+    "firewalld",
+    "nftables",
+    "libvirt",
+    "cron",
+    "crond",
+    "a4diag-target",
+)
+_MAX_UTC_EPOCH = 253_402_300_799
+
+
+def _safe_id(value: str, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string")
+    normalized = unicodedata.normalize("NFC", value)
+    if not _SAFE_ID.fullmatch(normalized):
+        raise ValueError(f"{label} must be a safe identifier")
+    return normalized
+
+
+def _reject_normalized_key_collisions(value: object) -> object:
+    if type(value) is not dict:
+        return value
+    keys: set[str] = set()
+    for key in value:
+        if type(key) is not str:
+            raise ValueError("constraint keys must be strings")
+        normalized = unicodedata.normalize("NFC", key)
+        if normalized in keys:
+            raise ValueError("constraint keys collide after NFC normalization")
+        keys.add(normalized)
+    return value
+
+
+class ServicesConstraints(BaseModel):
+    """Closed bounds understood by the currently registered systemd adapter."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    verification_window_seconds: int = Field(
+        default=60, ge=60, le=600, strict=True
+    )
+    sample_interval_seconds: int = Field(default=5, ge=1, le=5, strict=True)
+
+
+class RepairProfile(BaseModel):
+    """An exact, expiring grant selected by ID rather than created by a model."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str
+    target_id: str
+    capability: Literal["services"]
+    resource: str
+    actions: tuple[Literal["start", "restart"], ...] = Field(min_length=1)
+    constraints: ServicesConstraints
+    recovery_check_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+    cooldown_seconds: int = Field(default=600, ge=1, strict=True)
+    hourly_limit: int = Field(default=2, ge=1, strict=True)
+    expires_at: int = Field(ge=0, le=_MAX_UTC_EPOCH, strict=True)
+    standing_authorization: StrictBool = False
+
+    @field_validator("id", "target_id")
+    @classmethod
+    def validate_ids(cls, value: str, info: ValidationInfo) -> str:
+        return _safe_id(value, info.field_name)
+
+    @field_validator("resource")
+    @classmethod
+    def validate_resource(cls, value: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError("resource must be a string")
+        normalized = unicodedata.normalize("NFC", value)
+        if not _SERVICE.fullmatch(normalized):
+            raise ValueError("services resource must be an exact .service unit")
+        if normalized.casefold().startswith(_PROTECTED_SERVICES):
+            raise ValueError("protected service cannot be granted")
+        return normalized
+
+    @field_validator("constraints", mode="before")
+    @classmethod
+    def validate_constraint_keys(cls, value: object) -> object:
+        return _reject_normalized_key_collisions(value)
+
+    @field_validator("actions")
+    @classmethod
+    def validate_actions(
+        cls, values: tuple[Literal["start", "restart"], ...]
+    ) -> tuple[Literal["start", "restart"], ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("duplicate repair action")
+        return values
+
+    @field_validator("recovery_check_ids")
+    @classmethod
+    def validate_recovery_check_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(_safe_id(value, "recovery check id") for value in values)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("duplicate recovery check id")
+        return normalized
+
+
+def validate_repair_profiles(
+    profiles: tuple[RepairProfile, ...],
+    *,
+    target_id: str,
+    recovery_check_ids: set[str] | None,
+) -> None:
+    profile_ids = [profile.id for profile in profiles]
+    if len(profile_ids) != len(set(profile_ids)):
+        raise ValueError("duplicate repair profile id")
+    for profile in profiles:
+        if profile.target_id != target_id:
+            raise ValueError("repair profile target_id must match target id")
+        if recovery_check_ids is not None:
+            missing = set(profile.recovery_check_ids) - recovery_check_ids
+            if missing:
+                raise ValueError("repair profile references an unknown recovery check")
+
+
+def profile_digest(profile: RepairProfile) -> str:
+    """Return the digest of the fully defaulted canonical profile document."""
+
+    if not isinstance(profile, RepairProfile):
+        raise TypeError("profile must be a RepairProfile")
+    from a4diag.domain import canonical_json_bytes
+
+    canonical = canonical_json_bytes(profile.model_dump(mode="json"))
+    return hashlib.sha256(canonical).hexdigest()
+
+
+__all__ = [
+    "RepairProfile",
+    "ServicesConstraints",
+    "profile_digest",
+    "validate_repair_profiles",
+]

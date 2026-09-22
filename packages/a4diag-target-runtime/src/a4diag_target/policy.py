@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hmac
 import re
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from a4diag.domain import Operation, normalize_resource
 from a4diag.linux_probes import LinuxProbe
+from a4diag.repair_profiles import (
+    RepairProfile,
+    profile_digest,
+    validate_repair_profiles,
+)
 
 _SAFE_TARGET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
@@ -72,6 +78,7 @@ class TargetPolicy(BaseModel):
     allowed_units: tuple[str, ...] = ()
     allowed_packages: tuple[PackageGrant, ...] = ()
     diagnostic_probes: tuple[LinuxProbe, ...] = ()
+    repair_profiles: tuple[RepairProfile, ...] = ()
 
     @field_validator("diagnostic_probes")
     @classmethod
@@ -122,6 +129,11 @@ class TargetPolicy(BaseModel):
         for probe in self.diagnostic_probes:
             if probe.kind == "file":
                 self.authorize_file_read(probe.resource)
+        validate_repair_profiles(
+            self.repair_profiles,
+            target_id=self.target_id,
+            recovery_check_ids=None,
+        )
         return self
 
     def authorize_probe(self, probe_id: str) -> LinuxProbe:
@@ -131,6 +143,18 @@ class TargetPolicy(BaseModel):
         if probe.kind == "file":
             self.authorize_file_read(probe.resource)
         return probe
+
+    def require_repair_profile(
+        self, profile_id: str, presented_digest: str
+    ) -> RepairProfile:
+        profile = next(
+            (item for item in self.repair_profiles if item.id == profile_id), None
+        )
+        if profile is None:
+            raise PolicyDenied("profile_not_granted")
+        if not hmac.compare_digest(profile_digest(profile), presented_digest):
+            raise PolicyDenied("profile_digest_mismatch")
+        return profile
 
     def authorize(self, operation: Operation) -> None:
         if operation.capability == "files":

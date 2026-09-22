@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, f
 
 from a4diag.domain import CapabilityGrant, TargetConfig, TargetMode
 from a4diag.recovery import EvidenceSource, RecoveryCheck, validate_catalog
+from a4diag.repair_profiles import RepairProfile, validate_repair_profiles
 from a4diag.linux_probes import LinuxProbe, validate_probe_checks
 from a4diag.settings import (
     AgentSettings,
@@ -172,6 +173,7 @@ class TargetInit(BaseModel):
     notification_required: bool = False
     evidence_sources: tuple[EvidenceSource, ...] = Field(default=(), max_length=8)
     recovery_checks: tuple[RecoveryCheck, ...] = Field(default=(), max_length=8)
+    repair_profiles: tuple[RepairProfile, ...] = Field(default=(), max_length=64)
     diagnostic_probes: tuple[LinuxProbe, ...] = Field(default=(), max_length=8)
     minimum_confidence: float = Field(default=0.7, ge=0.0, le=1.0, allow_inf_nan=False)
 
@@ -238,6 +240,11 @@ class TargetInit(BaseModel):
     def validate_mode_fields(self) -> TargetInit:
         validate_catalog(self.evidence_sources, self.recovery_checks)
         validate_probe_checks(self.diagnostic_probes, self.evidence_sources, self.recovery_checks)
+        validate_repair_profiles(
+            self.repair_profiles,
+            target_id=self.id,
+            recovery_check_ids={check.id for check in self.recovery_checks},
+        )
         if self.mode is TargetMode.SSH:
             if self.host is None or self.port is None or self.user is None:
                 raise ValueError("ssh targets require host, port, and user")
@@ -502,6 +509,7 @@ class InitService:
                 notification_required=target.notification_required,
                 evidence_sources=target.evidence_sources,
                 recovery_checks=target.recovery_checks,
+                repair_profiles=target.repair_profiles,
                 diagnostic_probes=target.diagnostic_probes,
                 minimum_confidence=target.minimum_confidence,
             )

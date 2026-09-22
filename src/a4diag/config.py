@@ -18,6 +18,7 @@ import yaml
 
 from .domain import CapabilityGrant, TargetConfig, TargetMode  # re-export
 from .models import Target
+from .repair_profiles import RepairProfile, ServicesConstraints, profile_digest
 from .settings import AgentSettings, load_settings  # re-export
 
 __all__ = [
@@ -25,9 +26,12 @@ __all__ = [
     "CapabilityGrant",
     "Config",
     "EXPECTED_TARGET_KEYS",
+    "RepairProfile",
+    "ServicesConstraints",
     "TargetConfig",
     "TargetMode",
     "load_settings",
+    "profile_digest",
 ]
 
 

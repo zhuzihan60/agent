@@ -8,6 +8,7 @@ from enum import StrEnum
 
 from a4diag.recovery import EvidenceSource, RecoveryCheck, validate_catalog
 from a4diag.linux_probes import LinuxProbe, validate_probe_checks
+from a4diag.repair_profiles import RepairProfile, validate_repair_profiles
 
 from pydantic import (
     BaseModel,
@@ -192,6 +193,16 @@ class CapabilityGrant(BaseModel):
         return normalized
 
 
+class RepairBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    profile_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preconditions_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class TargetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -213,6 +224,7 @@ class TargetConfig(BaseModel):
     notification_required: bool = False
     evidence_sources: tuple[EvidenceSource, ...] = Field(default=(), max_length=8)
     recovery_checks: tuple[RecoveryCheck, ...] = Field(default=(), max_length=8)
+    repair_profiles: tuple[RepairProfile, ...] = Field(default=(), max_length=64)
     diagnostic_probes: tuple[LinuxProbe, ...] = Field(default=(), max_length=8)
     minimum_confidence: float = Field(default=0.7, ge=0.0, le=1.0, allow_inf_nan=False)
 
@@ -254,6 +266,11 @@ class TargetConfig(BaseModel):
     def validate_target(self) -> TargetConfig:
         validate_catalog(self.evidence_sources, self.recovery_checks)
         validate_probe_checks(self.diagnostic_probes, self.evidence_sources, self.recovery_checks)
+        validate_repair_profiles(
+            self.repair_profiles,
+            target_id=self.id,
+            recovery_check_ids={check.id for check in self.recovery_checks},
+        )
         if self.identity_ref != f"target/{self.id}":
             raise ValueError("identity_ref must equal target/{id}")
 
