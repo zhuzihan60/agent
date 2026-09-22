@@ -1,6 +1,6 @@
 # Linux 多类故障修复与 Jev 辅助：设计评审稿
 
-日期：2026-09-22。状态：待用户评审，尚未实现。
+日期：2026-09-22。状态：用户已确认设计；实施计划待评审，尚未实现。
 
 ## 1. 目标与首版环境
 
@@ -8,7 +8,7 @@
 
 成功标准是每类都有实际故障注入、真实执行与独立业务恢复验证；不以模型回答或命令退出码代替恢复证据。保留现有 SSH 身份校验、两端独立授权、签名操作票据、审计和重放保护。
 
-主机暂按此前测试环境设计：Ubuntu／Debian、systemd、APT，DNS 为 systemd-resolved，网络为 Netplan。用户明确要求容器不限于 Docker，并选择了“Podman 或 Kubernetes”；正在澄清需要其中一个还是两者。本稿列出三种适配器的完整边界，未把未答复的选项当成确认。首版不宣称支持 DNF 或 NetworkManager 写入。
+主机按此前测试环境设计：Ubuntu／Debian、systemd、APT，DNS 为 systemd-resolved，网络为 Netplan。用户要求容器不限于 Docker，并在包含三种适配器的设计稿后回复“确认，继续”。实施计划暂按 Docker、Podman、Kubernetes 三者纳入；这是对整体确认的范围解释，用户仍可缩小范围。首版不宣称支持 DNF 或 NetworkManager 写入。
 
 ## 2. 方案选择
 
@@ -70,13 +70,13 @@ prepare 在目标文件系统内有界扫描，只收集普通文件；不跨挂
 
 验收：退出、unhealthy、OOM 后退出、同名替换、重启无效、禁止容器和重复告警；真实 Docker 测试不能用模拟客户端替代。
 
-### 6.2 Podman（待确认纳入）
+### 6.2 Podman
 
 与 Docker 共用业务恢复约束，使用独立适配器。profile 精确登记运行用户 UID、容器 ID 与存储／运行时归属；rootful 和 rootless 分别授权，不能通过名称在多个用户之间搜索后任意操作。用户 helper 以登记 UID 运行，模型不能传入 UID、socket 路径或环境变量。
 
 独立容器支持 start／restart；由 systemd／Quadlet 管理的容器回到登记的 unit 恢复，避免和控制器竞争。首版不对 Pod 整组重启，也不删除存储卷。真实测试覆盖 rootful、rootless、错误 UID、同名不同用户、健康检查失败和 systemd 管理场景。
 
-### 6.3 Kubernetes（待确认纳入）
+### 6.3 Kubernetes
 
 首版限定 namespace 内明确登记的无状态 Deployment。绑定可信 API endpoint、集群凭据配置标识、namespace、Deployment UID 与 profile 摘要；更换同名工作负载需重新授权。集群端专用 adapter 持有最小权限 ServiceAccount，接受现有控制端签名票据；凭据不进入模型上下文，不使用 cluster-admin，不授权 Secret 读取、exec 或任意对象写入。
 
@@ -153,4 +153,4 @@ WSL 继续使用 D 盘，不填满 C 盘。普通 WSL 无法代表的 Netplan／
 
 ## 11. 评审结论
 
-本稿已检查：删除和包脚本不可逆性、Docker socket 权限、网络断线恢复、Jev 故障回退和新能力默认关闭均有明确行为。当前待用户确认首版环境并评审设计，然后编写实施计划；尚无产品代码修改。
+本稿已检查：删除和包脚本不可逆性、Docker socket 权限、网络断线恢复、Jev 故障回退和新能力默认关闭均有明确行为。用户已确认设计；下一阶段为实施计划评审与执行方式选择，尚无产品代码修改。
