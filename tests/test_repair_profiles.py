@@ -115,7 +115,7 @@ def test_constraint_keys_that_collide_after_unicode_normalization_are_rejected()
         {"recovery_check_ids": ("health", "health")},
         {"actions": ()},
         {"actions": ("restart", "restart")},
-        {"actions": ("stop",)},
+        {"actions": ("reload",)},
         {"expires_at": None},
         {"capability": "packages"},
         {"resource": "demo.service;id"},

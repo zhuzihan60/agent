@@ -88,7 +88,7 @@ class RepairProfile(BaseModel):
     target_id: str
     capability: Literal["services"]
     resource: str
-    actions: tuple[Literal["start", "restart"], ...] = Field(min_length=1)
+    actions: tuple[Literal["start", "restart", "stop"], ...] = Field(min_length=1)
     constraints: ServicesConstraints
     recovery_check_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
     cooldown_seconds: int = Field(default=600, ge=1, strict=True)
@@ -121,8 +121,8 @@ class RepairProfile(BaseModel):
     @field_validator("actions")
     @classmethod
     def validate_actions(
-        cls, values: tuple[Literal["start", "restart"], ...]
-    ) -> tuple[Literal["start", "restart"], ...]:
+        cls, values: tuple[Literal["start", "restart", "stop"], ...]
+    ) -> tuple[Literal["start", "restart", "stop"], ...]:
         if len(values) != len(set(values)):
             raise ValueError("duplicate repair action")
         return values

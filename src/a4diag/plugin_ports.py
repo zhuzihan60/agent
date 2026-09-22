@@ -222,6 +222,7 @@ class _RpcExecutorPort:
                 **common,
                 lifecycle=TargetLifecycleV11(lifecycle.value),
                 binding=claims.binding,
+                preparation_dependency=claims.preparation_dependency,
                 authorization_kind=claims.authorization_kind,
                 authorization_id=claims.authorization_id,
                 job_id=job_id,

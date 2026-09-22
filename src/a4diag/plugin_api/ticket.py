@@ -13,6 +13,7 @@ from enum import StrEnum
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
+from a4diag.preparation import PreparationContext
 
 from a4diag.domain import (
     CanonicalPlanError,
@@ -179,7 +180,7 @@ class OperationTicketExpectation(OperationTicketEnvelope):
         return _validate_digest(value, "effect_payload_digest")
 
 
-class OperationTicketEnvelopeV11(BaseModel):
+class OperationTicketEnvelopeV11(PreparationContext):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     protocol_version: Literal["1.1"] = "1.1"
@@ -300,7 +301,7 @@ class OperationTicket(BaseModel):
         return self
 
 
-class OperationTicketV11(BaseModel):
+class OperationTicketV11(PreparationContext):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     protocol_version: Literal["1.1"] = "1.1"
@@ -466,6 +467,7 @@ class TicketIssuer:
                 binding=request.binding,
                 authorization_kind=request.authorization_kind,
                 authorization_id=request.authorization_id,
+                preparation_dependency=request.preparation_dependency,
                 issued_at=issued_at,
                 expires_at=issued_at + request.ttl_seconds,
             )
@@ -693,6 +695,8 @@ def _verify_bindings_v11(
         raise TicketError("plan_mismatch")
     if claims.binding != expected.binding:
         raise TicketError("profile_mismatch")
+    if claims.preparation_dependency != expected.preparation_dependency:
+        raise TicketError('preparation_dependency_mismatch')
     if claims.authorization_kind != expected.authorization_kind:
         raise TicketError("authorization_kind_mismatch")
     if claims.authorization_id != expected.authorization_id:

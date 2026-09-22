@@ -44,6 +44,9 @@ class JobStore:
                 started_at INTEGER, finished_at INTEGER, request TEXT,
                 pid INTEGER, boot_id TEXT, starttime TEXT, controller_key TEXT,
                 UNIQUE(transaction_id, step_id))''')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(repair_jobs)')}
+            if 'signed_request' not in columns:
+                db.execute('ALTER TABLE repair_jobs ADD COLUMN signed_request TEXT')
 
     @contextmanager
     def _transaction(self):
@@ -91,7 +94,7 @@ class JobStore:
         with self._transaction() as db:
             return self._model(db.execute('SELECT * FROM repair_jobs WHERE id=?', (job_id,)).fetchone())
 
-    def bind_request(self, job_id, request, *, controller_key_fingerprint: str) -> None:
+    def bind_request(self, job_id, request, *, controller_key_fingerprint: str, envelope=None) -> None:
         payload = canonical_json_bytes(request.model_dump(mode='json')).decode()
         with self._transaction() as db:
             row = db.execute('SELECT request, controller_key FROM repair_jobs WHERE id=?', (job_id,)).fetchone()
@@ -103,6 +106,21 @@ class JobStore:
                     raise RepairJobError('job_binding_mismatch')
                 return
             db.execute('UPDATE repair_jobs SET request=?, controller_key=? WHERE id=?', (payload, controller_key_fingerprint, job_id))
+            if envelope is not None:
+                from a4diag.plugin_api.target_protocol import TargetRequestV11
+                if (envelope.key_fingerprint != controller_key_fingerprint
+                        or TargetRequestV11.model_validate_json(envelope.payload) != request):
+                    raise RepairJobError('job_binding_mismatch')
+                db.execute('UPDATE repair_jobs SET signed_request=? WHERE id=?',
+                           (envelope.model_dump_json(), job_id))
+
+    def signed_request(self, job_id):
+        from a4diag.plugin_api.target_protocol import SignedTargetRequest
+        with self._transaction() as db:
+            row = db.execute('SELECT signed_request FROM repair_jobs WHERE id=?', (job_id,)).fetchone()
+            if row is None or row[0] is None:
+                raise RepairJobError('job_signed_proof_missing')
+            return SignedTargetRequest.model_validate_json(row[0])
 
     def controller_key(self, job_id):
         with self._transaction() as db:
@@ -113,6 +131,12 @@ class JobStore:
 
     @staticmethod
     def _check_owner(original, request):
+        from a4diag.preparation import PreparationDependency
+        saved = original.get('preparation_dependency')
+        current = request.preparation_dependency
+        if (saved is None) != (current is None) or (saved is not None and
+                PreparationDependency.model_validate(saved).identity() != current.identity()):
+            raise RepairJobError('job_binding_mismatch')
         expected = (original['controller_id'], original['target_id'], original['target_fingerprint'],
             original['transaction_id'], original['step_id'], original['plan_digest'],
             original['binding']['profile_id'], original['binding']['profile_digest'],
@@ -132,6 +156,8 @@ class JobStore:
             if row['request'] is None:
                 raise RepairJobError('job_binding_missing')
             self._check_owner(json.loads(row['request']), request)
+            if request.preparation_dependency is not None and request.preparation_dependency.stop_job_id != job.id:
+                raise RepairJobError('job_binding_mismatch')
             if job.profile_digest != request.binding.profile_digest or job.operation_digest != canonical_operation_digest(request.operation):
                 raise RepairJobError('job_binding_mismatch')
             return job
@@ -240,10 +266,12 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
     from a4diag_target.executor import TargetExecutor, ExecutorError
     from a4diag.repair_store import RepairStore
     from a4diag_target.policy import PolicyDenied
+    from a4diag_target.repair_admission import admit_effect, EffectAdmissionRejected
     if not store.claim(job_id):
         return
     request = store.request(job_id)
-    try:
+
+    def current_authorization():
         current = policy()
         if request_guard is not None:
             request_guard(request)
@@ -259,6 +287,10 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
         TargetExecutor._verify_effect_digest(request)
         if request.marker is None:
             raise ExecutorError('marker_required')
+        return current
+
+    try:
+        current = current_authorization()
     except (ExecutorError, PolicyDenied, OSError, ValueError) as error:
         store.complete(job_id, state='failed', changed=False,
             result={'reason': str(error)}, now=clock())
@@ -266,8 +298,41 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
         # Reuse the same closed plugin dispatch as the short-action executor.
         executor = TargetExecutor(verifier=None, policy=current,
             identity_probe=identity_probe, adapter=adapter, plugins=plugins)
+        plugin = executor._plugins[request.operation.capability]
         try:
-            result = await executor._dispatch(executor._plugins[request.operation.capability], request)
+            admit_effect(plugin, request)
+        except EffectAdmissionRejected as error:
+            store.complete(job_id, state='failed', changed=False,
+                result={'reason':str(error)[:512], 'admission_rejected':True,
+                        'change_verified':True}, now=clock())
+            RepairStore(store.path).finish_job(job_id, 'failed')
+            return
+        try:
+            from a4diag.writer_holds import WriterHolds, stop_binding
+            from contextlib import nullcontext
+            import asyncio
+            holds = WriterHolds(RepairStore(store.path))
+            service = request.operation.capability == 'services'
+            started = time.monotonic()
+            wait = min(15, request.operation.timeout_seconds, max(0, request.expires_at-clock()))
+            with holds.resource_guard(request.target_id, request.operation.resource, wait_seconds=wait) if service else nullcontext():
+                # Admission may still own the short lease. Never act on auth
+                # cached before waiting, including a freshly revoked profile.
+                current_authorization()
+                if request.operation.capability == 'services':
+                    if request.preparation_dependency is None:
+                        holds.require_unheld(request.target_id, request.operation.resource)
+                    else:
+                        holds.require_owner(stop_binding(request), job_id=job_id)
+                        # Historical unsigned admissions are never stop proof.
+                        store.signed_request(job_id)
+                if service:
+                    remaining = request.operation.timeout_seconds-(time.monotonic()-started)
+                    if remaining <= 0:
+                        raise ExecutorError('worker_admission_budget_exceeded')
+                    result = await asyncio.wait_for(executor._dispatch(plugin, request), timeout=remaining)
+                else:
+                    result = await executor._dispatch(plugin, request)
             payload = result.model_dump(mode='json')
             changed = result.changed
             state = 'succeeded' if result.ok else 'partial'

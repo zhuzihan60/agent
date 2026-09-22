@@ -1332,7 +1332,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         try:
             from a4diag.repair_workflow import record_effect
             record_effect(deps, state, step_id, None)
-            response = deps.plugins.executor.apply(target, step_id, operation, marker, ticket)
+            from a4diag.writer_holds import controller_mutation_guard
+            with controller_mutation_guard(deps, state, target, operation, step_id, marker, ticket):
+                response = deps.plugins.executor.apply(target, step_id, operation, marker, ticket)
             from a4diag.repair_jobs import RepairJobResponse
             if isinstance(response, RepairJobResponse):
                 from a4diag.repair_workflow import record_job, job_result
@@ -1562,16 +1564,18 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 now=now(),
             )
             try:
-                result = StepResult.model_validate(
-                    deps.plugins.executor.undo(
-                        target,
-                        step_id,
-                        operation,
-                        marker,
-                        operation.undo,
-                        ticket,
+                from a4diag.writer_holds import controller_mutation_guard
+                with controller_mutation_guard(deps, state, target, operation, step_id, marker, ticket):
+                    result = StepResult.model_validate(
+                        deps.plugins.executor.undo(
+                            target,
+                            step_id,
+                            operation,
+                            marker,
+                            operation.undo,
+                            ticket,
+                        )
                     )
-                )
             except Exception as error:
                 deps.transactions.record_result(
                     state["transaction_id"],

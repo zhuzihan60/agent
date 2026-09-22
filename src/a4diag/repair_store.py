@@ -26,6 +26,11 @@ class RepairStore:
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS repair_resource_lock
                 ON repair_reservations(target_id, resource) WHERE outcome IS NULL''')
             db.execute('CREATE TABLE IF NOT EXISTS repair_clock (id INTEGER PRIMARY KEY CHECK(id=1), highwater INTEGER NOT NULL)')
+            db.execute('''CREATE TABLE IF NOT EXISTS writer_holds (
+                id INTEGER PRIMARY KEY, target_id TEXT NOT NULL, resource TEXT NOT NULL,
+                transaction_id TEXT NOT NULL, binding TEXT NOT NULL, job_id TEXT,
+                undo_succeeded INTEGER NOT NULL DEFAULT 0, restored INTEGER NOT NULL DEFAULT 0)''')
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS writer_hold_resource ON writer_holds(target_id,resource) WHERE restored=0')
 
     def _connect(self):
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -118,6 +123,10 @@ class RepairStore:
             if row['outcome'] is not None:
                 if row['outcome'] != outcome:
                     raise RepairLimitError('outcome_mismatch')
+                return
+            held = db.execute('SELECT 1 FROM writer_holds WHERE target_id=? AND resource=? AND restored=0',
+                              (row['target_id'], row['resource'])).fetchone()
+            if held is not None:
                 return
             if row['job_id'] is not None:
                 job = self._job(db, row['job_id'])

@@ -79,7 +79,8 @@ def plan_authorization(deps, state, target, plan, *, now, require_approval=True)
     return decision, profiles, approval, standing
 
 
-def issue_repair_ticket(deps, state, target, operation, step_id, phase, fields, *, now):
+def issue_repair_ticket(deps, state, target, operation, step_id, phase, fields, *, now,
+                        preparation_dependency=None):
     from a4diag.plugin_api.ticket import OperationTicketRequestV11, effect_payload_digest
     if deps.transactions.repair_cancelled(state['transaction_id']):
         raise PermissionError('repair_cancelled')
@@ -97,6 +98,7 @@ def issue_repair_ticket(deps, state, target, operation, step_id, phase, fields, 
         target_id=target.id, target_fingerprint=plan.target_fingerprint, operation=operation,
         phase=phase, plan_digest=state['digest'], binding=authorization.binding,
         authorization_kind=authorization.authorization_kind, authorization_id=authorization.authorization_id,
+        preparation_dependency=preparation_dependency,
         effect_payload_digest=effect_payload_digest(fields), ttl_seconds=deps.ticket_ttl_seconds)
     return deps.tickets.issue(request, authorization)
 
@@ -115,6 +117,8 @@ def record_job(deps, state, response, *, now):
     operation = Plan.model_validate(state['plan']).operations[int(job.step_id)]
     reservation = store.reservation_for(state['target_id'], operation.resource, state['transaction_id'])
     store.bind_job(reservation, job.id)
+    from a4diag.writer_holds import bind_controller_stop_job
+    bind_controller_stop_job(deps, state, job)
     if job.state in TERMINAL_JOB_STATES and job.changed is not None:
         store.finish(reservation, job.state)
     record_effect(deps, state, job.step_id, job.changed)

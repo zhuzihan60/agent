@@ -22,6 +22,8 @@ from a4diag.domain import canonical_json_bytes
 from a4diag.policy_engine import canonical_operation_digest
 from a4diag.repair_jobs import RepairJobResponse, TERMINAL_JOB_STATES
 from a4diag.repair_store import RepairStore, RepairLimitError
+from a4diag.writer_holds import WriterHolds, stop_binding
+from contextlib import nullcontext
 from a4diag_target.repair_jobs import JobStore, RepairJobError
 from a4diag_builtin_plugins.capability_common import (
     CapabilityApplyParams,
@@ -109,12 +111,32 @@ class TargetExecutor:
         if plugin is None:
             raise ExecutorError("capability_not_wired")
         try:
-            if isinstance(request, TargetRequestV11) and request.lifecycle in {
-                TargetLifecycleV11.APPLY, TargetLifecycleV11.QUERY_JOB, TargetLifecycleV11.CONFIRM_JOB,
-            }:
-                result = await self._dispatch_job(policy, request)
-            else:
-                result = await self._dispatch(plugin, request)
+            dep = getattr(request, 'preparation_dependency', None)
+            guarded = (request.operation.capability == 'services' and
+                       (request.lifecycle in ('apply', 'undo') or request.verify_restored
+                        or (dep is not None and request.lifecycle in ('verify', 'reconcile'))))
+            holds = WriterHolds(self._limits) if self._limits is not None else None
+            if guarded and dep is not None and holds is None:
+                raise ExecutorError('job_store_required')
+            with holds.resource_guard(request.target_id, request.operation.resource) if guarded and holds else nullcontext():
+                if guarded and holds:
+                    if dep is None:
+                        holds.require_unheld(request.target_id, request.operation.resource)
+                    elif request.lifecycle != 'apply':
+                        self._validate_finalizer(request, holds)
+                if isinstance(request, TargetRequestV11) and request.lifecycle in {
+                    TargetLifecycleV11.APPLY, TargetLifecycleV11.QUERY_JOB, TargetLifecycleV11.CONFIRM_JOB,
+                }:
+                    result = await self._dispatch_job(policy, request, envelope=envelope)
+                else:
+                    if guarded and holds and dep is not None and request.lifecycle == 'undo':
+                        holds.record_undo(stop_binding(request), job_id=dep.stop_job_id, succeeded=False)
+                    result = await self._dispatch(plugin, request)
+                    if guarded and holds and dep is not None:
+                        if request.lifecycle == 'undo':
+                            holds.record_undo(stop_binding(request), job_id=dep.stop_job_id, succeeded=result.ok)
+                        elif request.verify_restored and result.ok:
+                            holds.restored(stop_binding(request), job_id=dep.stop_job_id)
         except ExecutorError:
             raise
         except (RepairJobError, RepairLimitError) as exc:
@@ -132,6 +154,28 @@ class TargetExecutor:
             raise ExecutorError("result_record_failed") from exc
         return payload
 
+    def _validate_finalizer(self, request, holds):
+        dep = request.preparation_dependency
+        if self._jobs is None:
+            raise ExecutorError('job_store_required')
+        hold = holds.require_owner(stop_binding(request), job_id=dep.stop_job_id,
+                                   allow_restored=request.verify_restored)
+        original = self._jobs.request(dep.stop_job_id)
+        authenticated = self._verifier.inspect_for_proof(self._jobs.signed_request(dep.stop_job_id),
+                                                       expected_target=request.target_id)
+        job = self._jobs.get(dep.stop_job_id)
+        if (authenticated != original or original.lifecycle != 'apply'
+                or stop_binding(original) != stop_binding(request)
+                or request.undo != (original.operation.undo if request.lifecycle == 'undo' else None)
+                or request.authorization_kind != original.authorization_kind
+                or request.authorization_id != original.authorization_id
+                or job.state != 'succeeded' or job.changed is None or job.result.get('ok') is not True
+                or job.operation_digest != canonical_operation_digest(original.operation)
+                or job.profile_digest != original.binding.profile_digest):
+            raise ExecutorError('writer_hold_binding_mismatch')
+        if request.verify_restored and not hold['undo_succeeded']:
+            raise ExecutorError('writer_restore_not_dispatched')
+
     def _lookup_job(self, request):
         if self._jobs is None:
             raise ExecutorError('lifecycle_not_wired')
@@ -140,12 +184,14 @@ class TargetExecutor:
         except RepairJobError as exc:
             raise ExecutorError(exc.code) from exc
 
-    async def _dispatch_job(self, policy, request):
+    async def _dispatch_job(self, policy, request, *, envelope):
         if self._jobs is None or self._limits is None or self._launch is None:
             raise ExecutorError('job_store_required' if request.lifecycle is TargetLifecycleV11.APPLY else 'lifecycle_not_wired')
         if request.lifecycle is not TargetLifecycleV11.APPLY:
             job = self._lookup_job(request)
             if request.lifecycle is TargetLifecycleV11.CONFIRM_JOB:
+                if WriterHolds(self._limits).get(request.target_id, request.operation.resource):
+                    raise ExecutorError('writer_hold_unresolved')
                 if job.state not in TERMINAL_JOB_STATES:
                     raise ExecutorError('job_not_terminal')
                 # Recover a crash between terminal persistence and release.
@@ -169,7 +215,8 @@ class TargetExecutor:
         profile = policy.require_repair_profile(request.binding.profile_id, request.binding.profile_digest)
         job = self._jobs.ensure(request.transaction_id, request.step_id,
             canonical_operation_digest(request.operation), profile_digest=request.binding.profile_digest)
-        self._jobs.bind_request(job.id, request, controller_key_fingerprint=policy.controller_key_fingerprint)
+        self._jobs.bind_request(job.id, request, controller_key_fingerprint=policy.controller_key_fingerprint,
+                                envelope=envelope)
         self._verifier.record_job(request, job.id)
         if job.state != 'prepared':
             return RepairJobResponse(job=job)
@@ -178,6 +225,8 @@ class TargetExecutor:
             request.transaction_id, now, profile.cooldown_seconds, profile.hourly_limit)
         self._limits.bind_job(reservation, job.id)
         self._limits.mark_started(reservation, now)
+        if request.preparation_dependency is not None and request.operation.capability == 'services':
+            WriterHolds(self._limits).protect(stop_binding(request), job_id=job.id)
         launch_failed = False
         with self._jobs.launching(job.id):
             if self._jobs.start(job.id, now=now):

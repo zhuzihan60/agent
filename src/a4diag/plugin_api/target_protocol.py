@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from pydantic import BaseModel, ConfigDict, JsonValue, field_validator, model_validator
 
 from a4diag.domain import Operation, RepairBinding, Risk, canonical_json_bytes
+from a4diag.preparation import PreparationContext
 
 MAX_TARGET_REQUEST_BYTES = 1_048_576
 MAX_CLOCK_SKEW_SECONDS = 30
@@ -141,7 +142,7 @@ class TargetRequest(BaseModel):
         return self
 
 
-class TargetRequestV11(BaseModel):
+class TargetRequestV11(PreparationContext):
     """Protocol 1.1 repair request with mandatory authorization bindings."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -326,9 +327,10 @@ class TargetVerifier:
             raise TypeError("supported_versions must contain known unique versions")
         self._supported_versions = supported_versions
 
-    def verify(
+    def inspect_for_proof(
         self, envelope: SignedTargetRequest, *, expected_target: str
     ) -> TargetRequestType:
+        """Authenticate historical evidence only; confers no effect authority."""
         if not isinstance(envelope, SignedTargetRequest):
             raise TargetProtocolError("envelope_invalid")
         try:
@@ -371,6 +373,11 @@ class TargetVerifier:
             raise TargetProtocolError("noncanonical_payload")
         if not _SAFE_TARGET.fullmatch(expected_target) or request.target_id != expected_target:
             raise TargetProtocolError("target_mismatch")
+        return request
+
+    def verify(self, envelope: SignedTargetRequest, *, expected_target: str) -> TargetRequestType:
+        request = self.inspect_for_proof(envelope, expected_target=expected_target)
+        payload = envelope.payload.encode('utf-8')
         now = int(self._clock())
         if request.issued_at > now + MAX_CLOCK_SKEW_SECONDS:
             raise TargetProtocolError("issued_in_future")

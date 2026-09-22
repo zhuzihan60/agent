@@ -322,6 +322,7 @@ class _TransportTicketedEffectParams(TicketedEffectParams):
             plan_digest=self.plan_digest,
             risk=self.risk,
             binding=request.binding,
+            preparation_dependency=request.preparation_dependency,
             authorization_kind=request.authorization_kind,
             authorization_id=request.authorization_id,
         )

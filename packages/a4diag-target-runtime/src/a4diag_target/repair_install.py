@@ -237,11 +237,13 @@ def installation_plan(source: dict, *, peer_uid: int):
 def ensure_drained(root: Path):
     """Conservative installation gate: no automatic kill, resume, or unlock."""
     directory = root / 'var/lib/a4diag-target/repair-helpers'
-    if not directory.exists():
-        return
     if directory.is_symlink():
         raise ValueError('unprotected_helper_state')
-    for scope in directory.iterdir():
+    scopes = list(directory.iterdir()) if directory.exists() else []
+    ordinary = root / 'var/lib/a4diag-target/executor'
+    if ordinary.exists():
+        scopes.append(ordinary)
+    for scope in scopes:
         if scope.is_symlink() or not scope.is_dir():
             raise ValueError('unprotected_helper_state')
         path = scope / 'repair-jobs.sqlite3'
@@ -250,6 +252,9 @@ def ensure_drained(root: Path):
         if path.exists():
             with sqlite3.connect(f'{path.as_uri()}?mode=ro', uri=True) as db:
                 if db.execute("SELECT count(*) FROM repair_jobs WHERE state NOT IN ('succeeded', 'failed', 'partial', 'cancelled')").fetchone()[0]:
+                    raise ValueError('repair_helpers_require_drain')
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if 'writer_holds' in tables and db.execute('SELECT 1 FROM writer_holds WHERE restored=0 LIMIT 1').fetchone():
                     raise ValueError('repair_helpers_require_drain')
 
 
