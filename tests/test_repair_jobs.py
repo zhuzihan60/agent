@@ -102,3 +102,25 @@ def test_controller_job_references_persist_and_reject_foreign_or_stale_result(tm
     assert store.pending_repair_jobs() == ()
     with pytest.raises(TransactionStoreError):
         store.record_repair_job(job, target_id='demo', profile_digest='b'*64, now=104)
+
+
+def test_foreign_job_id_collision_preserves_original_pending_owner(tmp_path):
+    from a4diag.transaction_store import TransactionStore, PreparedStep, TransactionStoreError
+    from a4diag.repair_jobs import RepairJob
+    from a4diag.policy_engine import canonical_operation_digest
+    from a4diag.domain import Operation, canonical_json_bytes
+    operation = Operation(capability='services', action='restart', resource='web.service',
+        parameters={'unit':'web.service'}, model_risk='high', verify={}, undo=None)
+    store = TransactionStore(tmp_path / 'controller.db')
+    for tx, target in (('tx1', 'demo'), ('tx2', 'other')):
+        store.begin(tx, target, 'd'*64, now=100)
+        store.record_prepared(tx, [PreparedStep('0', canonical_json_bytes(operation.model_dump(mode='json')).decode(), '{}', '{}')], now=100)
+    original = RepairJob(id='same-job-id', transaction_id='tx1', step_id='0',
+        profile_digest='b'*64, operation_digest=canonical_operation_digest(operation), state='running', started_at=100)
+    store.record_repair_job(original, target_id='demo', profile_digest='b'*64, now=101)
+    foreign = original.model_copy(update={'transaction_id':'tx2'})
+    with pytest.raises(TransactionStoreError, match='job_binding_mismatch'):
+        store.record_repair_job(foreign, target_id='other', profile_digest='b'*64, now=102)
+    assert store.pending_repair_jobs() == (('demo', original),)
+    assert store.repair_jobs('tx1') == (original,)
+    assert store.repair_jobs('tx2') == ()

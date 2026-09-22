@@ -149,7 +149,7 @@ class TargetExecutor:
                 # finish_job rechecks the exact persisted reservation binding.
                 self._limits.finish_job(job.id, job.state)
             else:
-                job = self._jobs.reconcile(job.id)
+                job = self._reconcile_job(job.id)
                 if job.state == 'unknown':
                     original = self._jobs.request(job.id)
                     try:
@@ -175,13 +175,22 @@ class TargetExecutor:
             request.transaction_id, now, profile.cooldown_seconds, profile.hourly_limit)
         self._limits.bind_job(reservation, job.id)
         self._limits.mark_started(reservation, now)
-        if self._jobs.start(job.id, now=now):
-            try:
-                self._launch(job.id)
-            except Exception:
-                # The manager might have accepted the unit despite a lost reply.
-                self._jobs.reconcile(job.id)
+        launch_failed = False
+        with self._jobs.launching(job.id):
+            if self._jobs.start(job.id, now=now):
+                try:
+                    self._launch(job.id)
+                except Exception:
+                    launch_failed = True
+        if launch_failed:
+            # The manager might have accepted the unit despite a lost reply.
+            self._reconcile_job(job.id)
         return RepairJobResponse(job=self._jobs.get(job.id))
+
+    def _reconcile_job(self, job_id):
+        probe = getattr(self._launch, 'worker_identity', None)
+        return self._jobs.reconcile(job_id,
+            startup_probe=(lambda: probe(job_id)) if callable(probe) else None)
 
     def _current_policy(self) -> TargetPolicy:
         policy = (

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -157,12 +158,50 @@ class JobStore:
             return db.execute("UPDATE repair_jobs SET pid=?, boot_id=?, starttime=? WHERE id=? AND state='running' AND pid IS NULL",
                 (os.getpid(), *identity, job_id)).rowcount == 1
 
-    def reconcile(self, job_id: str) -> RepairJob:
+    @contextmanager
+    def _launch_lock(self, job_id: str, *, blocking: bool):
+        """A kernel-held launch lease disappears on launcher death, not time."""
+        import fcntl
+        if not re.fullmatch(r'[0-9a-f]{32}', job_id):
+            raise RepairJobError('invalid_job_id')
+        descriptor = os.open(self.path.parent / f'.repair-launch-{job_id}',
+            os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            except BlockingIOError:
+                yield False
+            else:
+                yield True
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def launching(self, job_id: str):
+        # Acquire before committing running; queries cannot misclassify the
+        # gap before systemd accepts the unit. This is not the resource lock.
+        with self._launch_lock(job_id, blocking=True):
+            yield
+
+    def reconcile(self, job_id: str, *, startup_probe=None) -> RepairJob:
+        with self._launch_lock(job_id, blocking=False) as acquired:
+            if not acquired:
+                return self.get(job_id)
+            return self._reconcile_unlocked(job_id, startup_probe=startup_probe)
+
+    def _reconcile_unlocked(self, job_id: str, *, startup_probe) -> RepairJob:
         with self._transaction() as db:
             row = db.execute('SELECT * FROM repair_jobs WHERE id=?', (job_id,)).fetchone()
             job = self._model(row)
             if job.state == 'running':
                 live = process_identity(row['pid']) if row['pid'] is not None else None
+                if row['pid'] is None and startup_probe is not None:
+                    # systemd-run acknowledges exec, before Python's DB claim.
+                    # Probe the fixed root-managed unit while holding the launch
+                    # lease, then independently check boot ID and PID starttime.
+                    startup = startup_probe()
+                    if startup is not None and process_identity(startup[0]) == startup[1:]:
+                        return job
                 if live is None or live != (row['boot_id'], row['starttime']):
                     db.execute("UPDATE repair_jobs SET state='unknown', changed=NULL, result=? WHERE id=? AND state='running'",
                         ('{"reason":"worker_unobserved"}', job_id))
@@ -227,9 +266,16 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
             identity_probe=identity_probe, adapter=adapter)
         try:
             result = await executor._dispatch(executor._plugins[request.operation.capability], request)
-            state = 'succeeded' if result.ok else ('partial' if result.changed else 'failed')
-            store.complete(job_id, state=state, changed=result.changed,
-                result=result.model_dump(mode='json'), now=clock())
+            payload = result.model_dump(mode='json')
+            changed = result.changed
+            state = 'succeeded' if result.ok else 'partial'
+            if not result.ok and not result.changed:
+                # A nonzero command can follow a successful stop/write. The
+                # legacy adapter's default False is not no-change evidence.
+                state, changed = 'unknown', None
+                payload.update(changed=None, change_verified=False)
+            store.complete(job_id, state=state, changed=changed,
+                result=payload, now=clock())
         except Exception:
             # An exception cannot prove whether the effect happened.
             if store.get(job_id).state == 'running':
@@ -248,7 +294,6 @@ class SystemdJobLauncher:
         self.identity_root = Path(identity_root)
 
     def __call__(self, job_id: str) -> None:
-        import re
         import subprocess
         if not re.fullmatch(r'[0-9a-f]{32}', job_id):
             raise RepairJobError('invalid_job_id')
@@ -272,6 +317,21 @@ class SystemdJobLauncher:
             '--policy', str(self.policy_path), '--identity-root', str(self.identity_root)])
         subprocess.run(argv, check=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15)
+
+    def worker_identity(self, job_id: str) -> tuple[int, str, str] | None:
+        """Only the exact protected systemd unit can attest unclaimed startup."""
+        import subprocess
+        if not re.fullmatch(r'[0-9a-f]{32}', job_id):
+            raise RepairJobError('invalid_job_id')
+        try:
+            response = subprocess.run(['/usr/bin/systemctl', 'show',
+                f'a4diag-repair-{job_id}.service', '--property=MainPID', '--value'],
+                check=True, capture_output=True, text=True, timeout=5)
+            pid = int(response.stdout.strip())
+            identity = process_identity(pid) if pid > 0 else None
+            return None if identity is None else (pid, *identity)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
 
 
 def main() -> int:

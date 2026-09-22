@@ -9,6 +9,70 @@ from a4diag.plugin_api.target_protocol import TargetLifecycleV11
 import asyncio
 
 
+def _paused_worker(path, policy_json, job_id, ready, proceed):
+    from a4diag_target.repair_jobs import JobStore, run_job
+    from a4diag_target.policy import TargetPolicy
+    from tests.target_runtime.test_repair_protocol import RecordingServicesAdapter
+    ready.set()
+    if not proceed.wait(20):
+        return
+    asyncio.run(run_job(JobStore(path), job_id, policy=lambda:TargetPolicy.model_validate_json(policy_json),
+        identity_probe=lambda:FINGERPRINT, adapter=RecordingServicesAdapter(), clock=lambda:151))
+
+
+@pytest.mark.parametrize('worker_crashed', (False, True))
+def test_signed_query_distinguishes_paused_startup_from_dead_worker(prepared_repair, tmp_path, worker_crashed):
+    import multiprocessing
+    from a4diag_target.repair_jobs import process_identity
+    from a4diag.repair_store import RepairLimitError
+    jobs, limits, launches = _wire(prepared_repair, tmp_path)
+    ctx = multiprocessing.get_context('spawn')
+    ready, proceed = ctx.Event(), ctx.Event()
+    class PausedLauncher:
+        process = None
+        def __call__(self, job_id):
+            self.process = ctx.Process(target=_paused_worker, args=(jobs.path,
+                prepared_repair.executor._current_policy().model_dump_json(), job_id, ready, proceed))
+            self.process.start()
+            assert ready.wait(10)
+        def worker_identity(self, job_id):
+            identity = process_identity(self.process.pid)
+            return None if identity is None else (self.process.pid, *identity)
+    launcher = PausedLauncher()
+    prepared_repair.executor.configure_jobs(jobs, limits, launcher)
+    try:
+        response = asyncio.run(prepared_repair.executor.execute(prepared_repair.signer.sign(_apply(prepared_repair))))
+        if worker_crashed:
+            launcher.process.terminate()
+            launcher.process.join(10)
+        request = _request(prepared_repair.profile, TargetLifecycleV11.QUERY_JOB,
+            'nonce-paused-worker-query', job_id=response['job']['id'])
+        queried = asyncio.run(prepared_repair.executor.execute(prepared_repair.signer.sign(request)))
+        assert queried['job']['state'] == ('unknown' if worker_crashed else 'running')
+        if worker_crashed:
+            with pytest.raises(RepairLimitError, match='resource_busy'):
+                limits.reserve('demo', 'demo.service', 'tx-other', 9999, 600, 2)
+        else:
+            proceed.set()
+            launcher.process.join(10)
+            assert launcher.process.exitcode == 0
+            assert jobs.get(response['job']['id']).state == 'succeeded'
+    finally:
+        if launcher.process is not None and launcher.process.is_alive():
+            launcher.process.terminate()
+            launcher.process.join(10)
+
+
+def test_launch_lock_distinguishes_active_launch_from_unobserved_gap(tmp_path):
+    from a4diag_target.repair_jobs import JobStore
+    jobs = JobStore(tmp_path/'jobs.db')
+    job = jobs.ensure('tx1', '0', 'a'*64, profile_digest='b'*64)
+    with jobs.launching(job.id):
+        assert jobs.start(job.id, now=100)
+        assert jobs.reconcile(job.id).state == 'running'
+    assert jobs.reconcile(job.id).state == 'unknown'
+
+
 def test_duplicate_job_reuses_identity_and_requires_exact_digests(tmp_path):
     from a4diag_target.repair_jobs import JobStore, RepairJobError
     path = tmp_path / 'jobs.db'
@@ -181,6 +245,32 @@ def test_worker_rejects_rotated_controller_key_before_effect(prepared_repair, tm
         identity_probe=lambda:FINGERPRINT, adapter=adapter, clock=lambda:151))
     assert jobs.get(result['job']['id']).state == 'failed'
     assert adapter.effect_calls == []
+
+
+def test_failed_restart_after_stop_is_unknown_and_cannot_release(prepared_repair, tmp_path):
+    from a4diag_target.repair_jobs import run_job
+    from a4diag_builtin_plugins.capability_common import CommandOutcome
+    from a4diag.repair_store import RepairLimitError
+    class StoppedThenFailed:
+        active = True
+        async def run_command(self, argv, *, timeout_seconds, output_limit_bytes):
+            assert argv == ['/usr/bin/systemctl', 'restart', 'demo.service']
+            self.active = False
+            return CommandOutcome(returncode=1, stderr='start failed after stop')
+    jobs, limits, launches = _wire(prepared_repair, tmp_path)
+    result = asyncio.run(prepared_repair.executor.execute(prepared_repair.signer.sign(_apply(prepared_repair))))
+    adapter = StoppedThenFailed()
+    asyncio.run(run_job(jobs, result['job']['id'], policy=prepared_repair.executor._current_policy,
+        identity_probe=lambda:FINGERPRINT, adapter=adapter, clock=lambda:151))
+    job = jobs.get(result['job']['id'])
+    assert adapter.active is False
+    assert job.state == 'unknown'
+    assert job.changed is None
+    assert job.result['changed'] is None
+    with pytest.raises(RepairLimitError, match='job_not_terminal'):
+        limits.finish_job(job.id, 'failed')
+    with pytest.raises(RepairLimitError, match='resource_busy'):
+        limits.reserve('demo', 'demo.service', 'next-tx', 9999, 600, 2)
 
 
 def test_target_enforces_registered_cooldown_after_terminal_job(prepared_repair, tmp_path):

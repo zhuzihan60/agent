@@ -230,6 +230,9 @@ class TransactionStore:
             step = db.execute('SELECT operation_json FROM transaction_steps WHERE transaction_id=? AND step_id=?', (job.transaction_id, job.step_id)).fetchone()
             if tx is None or tx[0] != target_id or step is None or profile_digest != job.profile_digest or hashlib.sha256(step[0].encode()).hexdigest() != job.operation_digest:
                 raise TransactionStoreError('job_binding_mismatch')
+            owner = db.execute('SELECT transaction_id, step_id, target_id FROM controller_repair_jobs WHERE id=?', (job.id,)).fetchone()
+            if owner is not None and tuple(owner) != (job.transaction_id, job.step_id, target_id):
+                raise TransactionStoreError('job_binding_mismatch')
             previous = db.execute('SELECT snapshot, observed_at FROM controller_repair_jobs WHERE transaction_id=? AND step_id=?', (job.transaction_id, job.step_id)).fetchone()
             if previous is not None:
                 old = RepairJob.model_validate_json(previous[0])
@@ -237,7 +240,9 @@ class TransactionStore:
                     raise TransactionStoreError('job_binding_mismatch')
                 if now < previous[1] or (old.state in TERMINAL_JOB_STATES and old != job) or (old.state == 'unknown' and job.state in ('prepared', 'running')):
                     raise TransactionStoreError('stale_job_snapshot')
-            db.execute('INSERT OR REPLACE INTO controller_repair_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            db.execute('''INSERT INTO controller_repair_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(transaction_id, step_id) DO UPDATE SET
+                state=excluded.state, snapshot=excluded.snapshot, observed_at=excluded.observed_at''',
                 (job.id, job.transaction_id, job.step_id, target_id, job.state,
                  job.model_dump_json(), now, job.profile_digest))
             db.commit()
