@@ -34,6 +34,8 @@ from a4diag.report import (
 )
 from a4diag.settings import AgentSettings, load_settings
 from a4diag.transaction_store import TransactionStore
+from a4diag.repair_store import RepairStore
+from a4diag.repair_jobs import RepairJob, RepairJobResponse
 from a4diag.workflow import (
     PluginPorts,
     WorkflowDependencies,
@@ -120,6 +122,7 @@ class Runtime:
         self._recoverable = tuple(recoverable)
         self._read_only = False
         self._registered_ids = frozenset(target.id for target in settings.targets)
+        self._repair_store = RepairStore(transactions.path)
 
     # -- read-only surface -------------------------------------------------
 
@@ -150,6 +153,24 @@ class Runtime:
     @property
     def recoverable(self) -> tuple[str, ...]:
         return self._recoverable
+
+    @property
+    def repair_store(self) -> RepairStore:
+        return self._repair_store
+
+    @property
+    def pending_repair_jobs(self) -> tuple[tuple[str, RepairJob], ...]:
+        """Durable references for the repair workflow's signed query/reconcile."""
+        return self._deps.transactions.pending_repair_jobs()
+
+    def record_repair_job(self, response: object, *, target_id: str,
+                          profile_digest: str, now: int) -> RepairJob:
+        job = RepairJobResponse.model_validate(response).job
+        if target_id not in self._registered_ids:
+            raise RuntimeFailure('target_not_registered')
+        self._deps.transactions.record_repair_job(job, target_id=target_id,
+            profile_digest=profile_digest, now=now)
+        return job
 
     # -- event handling ----------------------------------------------------
 

@@ -24,13 +24,15 @@ def server(root: Path) -> TargetSocketServer:
     instance = object.__new__(TargetSocketServer)
     instance._identity_root = root / "identity"
     instance._diagnostic_root = root
-    instance._policy = TargetPolicy(
+    policy = TargetPolicy(
         target_id="host", target_fingerprint="sha256:" + "a" * 64,
         controller_key_fingerprint="sha256:" + "b" * 64,
         managed_roots=("/srv/demo",),
         diagnostic_probes=(LinuxProbe(id="config", kind="file", resource="/srv/demo/config"),
                            LinuxProbe(id="memory", kind="memory", resource="host")),
     )
+    instance._policy_path = root / 'policy.json'
+    instance._policy_path.write_text(policy.model_dump_json(), encoding='utf-8')
     return instance
 
 
@@ -101,10 +103,10 @@ def test_probe_survives_production_transport_helper_and_server(tmp_path, monkeyp
             host="example.com", port=22, user="a4diag", identity_file="/etc/key", known_hosts="/etc/known_hosts"))
     result = asyncio.run(transport.read(ReadParams(kind="probe", probe_id="config")))
     assert result.ok is True
-    assert parse_bound_probe_output(target._policy.diagnostic_probes[0], result.stdout) == data
+    assert parse_bound_probe_output(target._load_policy().diagnostic_probes[0], result.stdout) == data
     assert result.data == {"kind": "probe", "truncated": False}
     assert runner.calls[0][1] == {"method": "read", "kind": "probe", "probe_id": "config", "limit": 65536}
-    assert seen == [(tmp_path, target._policy.diagnostic_probes[0])]
+    assert seen == [(tmp_path, target._load_policy().diagnostic_probes[0])]
 
 
 @pytest.mark.parametrize("data", [{"exists": True}, {"exists": "true", "mode": 0, "size_bytes": 0, "sha256": ""}, {"exists": False, "mode": 0, "size_bytes": 0, "sha256": "", "secret": "value"}])
@@ -138,7 +140,7 @@ def test_actual_file_probe_through_transport(tmp_path):
     (folder / "config").chmod(0o640)
     result = asyncio.run(LocalTransport(runner=RelayRunner(server(tmp_path))).read(ReadParams(kind="probe", probe_id="config")))
     assert result.ok and not result.data["truncated"]
-    assert parse_bound_probe_output(server(tmp_path)._policy.diagnostic_probes[0], result.stdout)["mode"] == 0o640
+    assert parse_bound_probe_output(server(tmp_path)._load_policy().diagnostic_probes[0], result.stdout)["mode"] == 0o640
 
 
 def test_transport_rejects_truncated_probe_response():

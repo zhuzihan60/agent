@@ -408,6 +408,12 @@ class TargetVerifier:
         ).hexdigest()
         recorder(nonce, digest, now=int(self._clock()))
 
+    def record_job(self, request: TargetRequestV11, job_id: str) -> None:
+        recorder = getattr(self._replay_store, 'record_job', None)
+        if callable(recorder):
+            recorder(request.nonce, job_id, transaction_id=request.transaction_id,
+                step_id=request.step_id)
+
     @staticmethod
     def _parse_unique_json(payload: bytes) -> object:
         def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:

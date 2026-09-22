@@ -765,6 +765,17 @@ class BaseTransport:
             result = json.loads(outcome.stdout)
             if type(result) is not dict:
                 raise ValueError("result must be object")
+            if isinstance(request, TargetRequestV11) and request.lifecycle.value == 'apply':
+                from a4diag.repair_jobs import RepairJobResponse
+                from a4diag.policy_engine import canonical_operation_digest
+                if outcome.stdout_truncated or len(outcome.stdout.encode()) > request.operation.output_limit_bytes:
+                    raise ValueError('job response too large')
+                job = RepairJobResponse.model_validate(result).job
+                if (job.transaction_id, job.step_id, job.profile_digest, job.operation_digest) != (
+                    request.transaction_id, request.step_id, request.binding.profile_digest,
+                    canonical_operation_digest(request.operation),
+                ):
+                    raise ValueError('job response binding mismatch')
         except (json.JSONDecodeError, ValueError):
             return TransportResult(ok=False, status=TransportStatus.FAILED, reason="helper_result_invalid")
         return TransportResult(

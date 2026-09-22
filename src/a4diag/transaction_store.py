@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 from collections.abc import Sequence
@@ -9,6 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from a4diag.domain import CanonicalPlanError, canonical_json_bytes
+from a4diag.repair_jobs import RepairJob, TERMINAL_JOB_STATES
 
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -211,6 +213,55 @@ class TransactionStore:
             busy_timeout_ms, "busy_timeout_ms"
         )
         self._initialize()
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def record_repair_job(self, job: RepairJob, *, target_id: str,
+                          profile_digest: str, now: int) -> None:
+        """Persist a target snapshot only against the controller's frozen step."""
+        job = RepairJob.model_validate(job.model_dump())
+        now = _validate_time(now, 'now')
+        db = self._connect()
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            tx = db.execute('SELECT target_id FROM transactions WHERE transaction_id=?', (job.transaction_id,)).fetchone()
+            step = db.execute('SELECT operation_json FROM transaction_steps WHERE transaction_id=? AND step_id=?', (job.transaction_id, job.step_id)).fetchone()
+            if tx is None or tx[0] != target_id or step is None or profile_digest != job.profile_digest or hashlib.sha256(step[0].encode()).hexdigest() != job.operation_digest:
+                raise TransactionStoreError('job_binding_mismatch')
+            previous = db.execute('SELECT snapshot, observed_at FROM controller_repair_jobs WHERE transaction_id=? AND step_id=?', (job.transaction_id, job.step_id)).fetchone()
+            if previous is not None:
+                old = RepairJob.model_validate_json(previous[0])
+                if (old.id, old.operation_digest, old.profile_digest) != (job.id, job.operation_digest, job.profile_digest):
+                    raise TransactionStoreError('job_binding_mismatch')
+                if now < previous[1] or (old.state in TERMINAL_JOB_STATES and old != job) or (old.state == 'unknown' and job.state in ('prepared', 'running')):
+                    raise TransactionStoreError('stale_job_snapshot')
+            db.execute('INSERT OR REPLACE INTO controller_repair_jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (job.id, job.transaction_id, job.step_id, target_id, job.state,
+                 job.model_dump_json(), now, job.profile_digest))
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def repair_jobs(self, transaction_id: str) -> tuple[RepairJob, ...]:
+        db = self._connect()
+        try:
+            rows = db.execute('SELECT snapshot FROM controller_repair_jobs WHERE transaction_id=? ORDER BY step_id', (transaction_id,)).fetchall()
+            return tuple(RepairJob.model_validate_json(row[0]) for row in rows)
+        finally:
+            db.close()
+
+    def pending_repair_jobs(self) -> tuple[tuple[str, RepairJob], ...]:
+        db = self._connect()
+        try:
+            rows = db.execute("SELECT target_id, snapshot FROM controller_repair_jobs WHERE state IN ('prepared', 'running', 'unknown') ORDER BY transaction_id, step_id").fetchall()
+            return tuple((row[0], RepairJob.model_validate_json(row[1])) for row in rows)
+        finally:
+            db.close()
 
     def begin(
         self,
@@ -1396,6 +1447,12 @@ class TransactionStore:
 
 
 _SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS controller_repair_jobs (
+        id TEXT PRIMARY KEY, transaction_id TEXT NOT NULL, step_id TEXT NOT NULL,
+        target_id TEXT NOT NULL, state TEXT NOT NULL, snapshot TEXT NOT NULL,
+        observed_at INTEGER NOT NULL, profile_digest TEXT NOT NULL,
+        UNIQUE(transaction_id, step_id),
+        FOREIGN KEY(transaction_id, step_id) REFERENCES transaction_steps(transaction_id, step_id))""",
     """
     CREATE TABLE IF NOT EXISTS transactions (
         transaction_id TEXT PRIMARY KEY,

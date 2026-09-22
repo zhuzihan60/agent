@@ -19,6 +19,10 @@ from a4diag.plugin_api.target_protocol import (
 )
 from a4diag.plugin_api.ticket import effect_payload_digest
 from a4diag.domain import canonical_json_bytes
+from a4diag.policy_engine import canonical_operation_digest
+from a4diag.repair_jobs import RepairJobResponse, TERMINAL_JOB_STATES
+from a4diag.repair_store import RepairStore, RepairLimitError
+from a4diag_target.repair_jobs import JobStore, RepairJobError
 from a4diag_builtin_plugins.capability_common import (
     CapabilityApplyParams,
     CapabilityPrepareParams,
@@ -52,11 +56,20 @@ class TargetExecutor:
             raise TypeError("policy must be TargetPolicy or a policy provider")
         self._policy_source = policy
         self._identity_probe = identity_probe
+        self._jobs = None
+        self._limits = None
+        self._launch = None
         self._plugins = {
             "files": FilesPlugin(transport=adapter),
             "services": ServicesPlugin(transport=adapter),
             "packages": PackagesPlugin(transport=adapter),
         }
+
+    def configure_jobs(self, jobs: JobStore, limits: RepairStore,
+                       launch: Callable[[str], None]) -> None:
+        if jobs.path.resolve() != limits.path.resolve():
+            raise ValueError('jobs and reservations must share a database')
+        self._jobs, self._limits, self._launch = jobs, limits, launch
 
     async def execute(self, envelope: SignedTargetRequest) -> dict[str, Any]:
         policy = self._current_policy()
@@ -76,7 +89,12 @@ class TargetExecutor:
             raise ExecutorError("target_identity_unavailable") from exc
         if current_identity != policy.target_fingerprint:
             raise ExecutorError("target_identity_mismatch")
-        if isinstance(request, TargetRequestV11):
+        job_query = isinstance(request, TargetRequestV11) and request.lifecycle is TargetLifecycleV11.QUERY_JOB
+        if job_query:
+            # Signature, target identity and persisted ownership are all required.
+            # Only observation of this exact job survives grant revocation.
+            self._lookup_job(request)
+        elif isinstance(request, TargetRequestV11):
             self._authorize_repair(policy, request)
         else:
             try:
@@ -88,17 +106,82 @@ class TargetExecutor:
         if plugin is None:
             raise ExecutorError("capability_not_wired")
         try:
-            result = await self._dispatch(plugin, request)
+            if isinstance(request, TargetRequestV11) and request.lifecycle in {
+                TargetLifecycleV11.APPLY, TargetLifecycleV11.QUERY_JOB, TargetLifecycleV11.CONFIRM_JOB,
+            }:
+                result = await self._dispatch_job(policy, request)
+            else:
+                result = await self._dispatch(plugin, request)
         except ExecutorError:
             raise
+        except (RepairJobError, RepairLimitError) as exc:
+            raise ExecutorError(exc.code) from exc
         except Exception as exc:
             raise ExecutorError("capability_failed") from exc
         payload = result.model_dump(mode="json")
+        try:
+            canonical_json_bytes(payload, max_bytes=request.operation.output_limit_bytes)
+        except ValueError as exc:
+            raise ExecutorError('result_too_large') from exc
         try:
             self._verifier.record_result(request.nonce, payload)
         except Exception as exc:
             raise ExecutorError("result_record_failed") from exc
         return payload
+
+    def _lookup_job(self, request):
+        if self._jobs is None:
+            raise ExecutorError('lifecycle_not_wired')
+        try:
+            return self._jobs.lookup(request)
+        except RepairJobError as exc:
+            raise ExecutorError(exc.code) from exc
+
+    async def _dispatch_job(self, policy, request):
+        if self._jobs is None or self._limits is None or self._launch is None:
+            raise ExecutorError('job_store_required' if request.lifecycle is TargetLifecycleV11.APPLY else 'lifecycle_not_wired')
+        if request.lifecycle is not TargetLifecycleV11.APPLY:
+            job = self._lookup_job(request)
+            if request.lifecycle is TargetLifecycleV11.CONFIRM_JOB:
+                if job.state not in TERMINAL_JOB_STATES:
+                    raise ExecutorError('job_not_terminal')
+                # Recover a crash between terminal persistence and release.
+                # finish_job rechecks the exact persisted reservation binding.
+                self._limits.finish_job(job.id, job.state)
+            else:
+                job = self._jobs.reconcile(job.id)
+                if job.state == 'unknown':
+                    original = self._jobs.request(job.id)
+                    try:
+                        observation = await self._dispatch(self._plugins[original.operation.capability],
+                            original.model_copy(update={'lifecycle': TargetLifecycleV11.RECONCILE}))
+                        detail = observation.model_dump(mode='json')
+                    except Exception:
+                        detail = {'state': 'unknown', 'reason': 'target_observation_unavailable'}
+                    # Observed service state is evidence, not proof that an
+                    # unobserved worker completed. Never release or retry it.
+                    job = self._jobs.complete(job.id, state='unknown', changed=None,
+                        result={**job.result, 'target_observation': detail}, now=self._verifier.now())
+            return RepairJobResponse(job=job)
+        profile = policy.require_repair_profile(request.binding.profile_id, request.binding.profile_digest)
+        job = self._jobs.ensure(request.transaction_id, request.step_id,
+            canonical_operation_digest(request.operation), profile_digest=request.binding.profile_digest)
+        self._jobs.bind_request(job.id, request, controller_key_fingerprint=policy.controller_key_fingerprint)
+        self._verifier.record_job(request, job.id)
+        if job.state != 'prepared':
+            return RepairJobResponse(job=job)
+        now = self._verifier.now()
+        reservation = self._limits.reserve(request.target_id, profile.resource,
+            request.transaction_id, now, profile.cooldown_seconds, profile.hourly_limit)
+        self._limits.bind_job(reservation, job.id)
+        self._limits.mark_started(reservation, now)
+        if self._jobs.start(job.id, now=now):
+            try:
+                self._launch(job.id)
+            except Exception:
+                # The manager might have accepted the unit despite a lost reply.
+                self._jobs.reconcile(job.id)
+        return RepairJobResponse(job=self._jobs.get(job.id))
 
     def _current_policy(self) -> TargetPolicy:
         policy = (
