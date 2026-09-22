@@ -635,7 +635,12 @@ class TransactionStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             status = self._status_in_connection(connection, transaction_id)
-            if status is not expected_state:
+            from a4diag.disk_workflow import staged_transaction
+            disk_stage = (status is TransactionStatus.EXECUTING and
+                ((effect_phase is EffectPhase.PREPARE and step_id == '1') or
+                 (effect_phase is EffectPhase.UNDO and step_id == '0')) and
+                staged_transaction(connection, transaction_id))
+            if status is not expected_state and not disk_stage:
                 raise InvalidTransitionError(
                     f"cannot dispatch {effect_phase.value} while transaction is {status.value}"
                 )
@@ -733,7 +738,10 @@ class TransactionStore:
             status = self._status_in_connection(
                 connection, dispatch["transaction_id"]
             )
-            if status not in {
+            from a4diag.disk_workflow import staged_transaction
+            disk_stage = (status is TransactionStatus.EXECUTING and step.step_id == '1'
+                and staged_transaction(connection, dispatch['transaction_id']))
+            if not disk_stage and status not in {
                 TransactionStatus.PREPARING,
                 TransactionStatus.EXECUTION_UNKNOWN,
             }:
@@ -881,6 +889,10 @@ class TransactionStore:
                 connection, dispatch["transaction_id"]
             )
             allowed_states = set(_RESULT_TRANSACTION_STATES[phase])
+            from a4diag.disk_workflow import staged_transaction
+            if (phase == 'undo' and dispatch['step_id'] == '0'
+                    and staged_transaction(connection, dispatch['transaction_id'])):
+                allowed_states.add(TransactionStatus.EXECUTING)
             if phase == EffectPhase.UNDO.value:
                 allowed_states.add(TransactionStatus.EXECUTION_UNKNOWN)
             if transaction_status not in allowed_states:

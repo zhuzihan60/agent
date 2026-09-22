@@ -1,10 +1,9 @@
 # Read-only disk candidate preparation
 
-The target runtime contains the D1a candidate scanner. No production disk
-capability or helper adapter is registered yet. This code does not stop a
-service, delete files, restore a writer, or claim capacity recovery. Disk
-profiles, authenticated stop history, durable writer reservations, staged
-execution and finally compensation remain prerequisite integration work.
+The target runtime's candidate scanner remains read-only. The registered
+`disk-cache` helper integrates it with authenticated stop history, bounded
+cleanup and verified writer restoration; see [disk workflow](repair-disk.md).
+Calling the scanner alone grants no cleanup authority.
 
 `prepare_cleanup(DiskLimits, now_ns=...)` checks an already stopped writer,
 scans candidates, then checks the writer again. Its `DiskMarker` deliberately
@@ -19,8 +18,8 @@ The supported boundary is deliberately narrow:
 - The administrator selects an exact cache root and an exact nonprotected
   `.service` unit. Every root ancestor, cache directory and candidate file is
   root-owned and not writable by group or other users. Privileged administrators
-  remain trusted; these checks cannot exclude another root process. Future
-  profile integration must establish the registered sole-writer relationship.
+  remain trusted; these checks cannot exclude another root process. Registered
+  profiles establish the sole-writer relationship.
 - The service must be loaded, inactive/dead, with no process, control process,
   pending systemd job, populated cgroup, delegation or dynamic/nonroot user.
   `KillMode=control-group`, `SendSIGKILL=yes`, `Restart=no` and
@@ -35,9 +34,9 @@ The supported boundary is deliberately narrow:
 
 The only diagnostic command is a fixed `/usr/bin/systemctl show` property query,
 with a clean environment, a five-second timeout and 16 KiB per output stream.
-It issues no mutation. Real systemd formatting was inspected in the disposable
-Linux lab; service-state test fixtures represent read-only observations, not
-an autonomous stop/cleanup/restoration test.
+It issues no mutation. The integrated helper's signed stop, real ext4 cleanup,
+writer restoration and HTTP acceptance are described in the
+[disk workflow](repair-disk.md). Scanner-only fixtures remain read-only tests.
 
 Directory traversal opens each level with `O_NOFOLLOW`, retains ancestor FDs,
 and rechecks names and ownership. The final candidate traversal also checks each

@@ -114,7 +114,7 @@ class ServicesPlugin(BaseCapabilityPlugin):
         outcome = await self._run(service_action_argv(marker.action, marker.unit), params)
         if outcome.returncode != 0:
             return EffectResult(ok=False, changed=False, reason="command_failed")
-        return EffectResult(ok=True, changed=True)
+        return EffectResult(ok=True, changed=not (marker.action == 'stop' and marker.prior.active_state == 'inactive'))
 
     async def undo(
         self, params: CapabilityUndoParams, invocation: object | None = None

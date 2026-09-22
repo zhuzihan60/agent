@@ -16,7 +16,7 @@ def test_empty_profiles_install_no_write_helpers(tmp_path):
 
 def test_registry_defaults_closed():
     from a4diag_target.repair_install import ADAPTERS, plan_helpers
-    assert ADAPTERS == {}
+    assert set(ADAPTERS) == {'disk-cache'}
     assert plan_helpers([], [], peer_uid=123) == ()
     with pytest.raises(ValueError, match='adapter_not_registered'):
         plan_helpers([], [{'profile_id': 'web', 'adapter': 'shell'}], peer_uid=123)

@@ -32,6 +32,8 @@ class DiskLimits:
     writer_unit: str
 
     def __post_init__(self):
+        from a4diag.repair_profiles import validate_cache_root
+        validate_cache_root(self.root)
         if (not isinstance(self.root, str) or not _PATH.fullmatch(self.root)
                 or len(self.root) > 1024 or len(self.root.split('/')) > 33
                 or any(p in ('.', '..') for p in self.root.split('/'))
@@ -69,6 +71,7 @@ class DiskMarker:
     writer_stop_marker: dict | None
     initial_free_bytes: int
     initial_free_inodes: int
+    directories: tuple = ()
 
 
 def entry_unchanged(entry: DiskEntry, current: os.stat_result) -> bool:
@@ -241,7 +244,8 @@ def _scan_candidates(limits: DiskLimits, *, now_ns: int) -> DiskMarker:
             raise ValueError('cache_changed') from error
         marker = DiskMarker(root_info.st_dev, root_info.st_ino,
                             tuple(sorted(entries, key=lambda entry: entry.relative_path)), None,
-                            initial.f_bavail * initial.f_frsize, initial.f_favail)
+                            initial.f_bavail * initial.f_frsize, initial.f_favail,
+                            tuple((name, sig[0], sig[1]) for name, sig in sorted(directory_bindings.items())))
     return marker
 
 
@@ -371,3 +375,8 @@ def prepare_cleanup(limits: DiskLimits, *, now_ns: int) -> DiskMarker:
     if before != _writer_snapshot(limits.writer_unit):
         raise ValueError('writer_boundary_unproven')
     return marker
+
+
+def apply_cleanup(marker: DiskMarker, limits: DiskLimits) -> dict:
+    from a4diag_target.repair_disk_cleanup import apply_cleanup as apply
+    return apply(marker, limits)

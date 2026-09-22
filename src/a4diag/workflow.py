@@ -837,6 +837,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         }
 
     def prepare(state: AgentState) -> AgentState:
+        from a4diag.disk_workflow import is_disk_plan, run_disk_workflow
+        if is_disk_plan(state):
+            return run_disk_workflow(deps, state, target_for=target_for, ready=decision_readiness)
         transaction_id = state["transaction_id"]
 
         def invalid_durable_evidence(error: str) -> AgentState:
@@ -1256,6 +1259,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         }
 
     def apply_step(state: AgentState) -> AgentState:
+        from a4diag.disk_workflow import is_disk_plan, run_disk_workflow
+        if is_disk_plan(state):
+            return run_disk_workflow(deps, state, target_for=target_for, ready=decision_readiness)
         if state.get("status") == "execution_unknown":
             return reconcile_unknown(state)
 
@@ -1924,6 +1930,14 @@ def run_event(
             raise ValueError("resume requires transaction_id")
         bind_transaction(transaction_id)
         config = {"configurable": {"thread_id": transaction_id}}
+        # The compiled disk runner owns its staged/finally recovery frontier.
+        # Never pass a partial disk plan through legacy prepare-all recovery.
+        from a4diag.disk_workflow import is_disk_plan
+        snapshot = graph.get_state(config)
+        if (dependencies is not None and is_disk_plan(snapshot.values)
+                and snapshot.values.get('status') == 'execution_unknown'):
+            graph.update_state(config, {'reconcile_attempted':False}, as_node='report')
+            return cast(AgentState, graph.invoke(None, config=config))
         pending = None
         recovery_action = None
         recovery_error = None

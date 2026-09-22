@@ -88,8 +88,14 @@ class AdapterSpec:
     plugin: Callable[[RepairProfile], object]
 
 
-# Deliberately empty until concrete adapters supply reviewed registrations.
-ADAPTERS: dict[str, AdapterSpec] = {}
+def _disk_plugin(profile):
+    from a4diag_target.disk_plugin import DiskPlugin
+    return DiskPlugin(profile)
+
+
+ADAPTERS: dict[str, AdapterSpec] = {
+    'disk-cache': AdapterSpec('disk', lambda p: Sandbox(write_paths=(p.resource,)), _disk_plugin),
+}
 if set(ADAPTERS) != set(REPAIR_ADAPTER_IDS):
     raise RuntimeError('repair_adapter_catalog_mismatch')
 
@@ -181,6 +187,11 @@ def plan_helpers(profiles, selections, *, peer_uid: int) -> tuple[HelperBinding,
             raise ValueError('helper_profile_missing')
         if profile.id in seen_ids or profile.resource in seen_resources:
             raise ValueError('duplicate_helper_scope')
+        if profile.capability == 'disk' and not any(
+            p.capability == 'services' and p.resource == profile.constraints.writer_unit
+            and 'stop' in p.actions for p in profiles
+        ):
+            raise ValueError('disk_writer_stop_profile_required')
         binding = HelperBinding(adapter=selection['adapter'], profile=profile, peer_uid=peer_uid)
         if binding.spec().sandbox(profile).run_uid != 0:
             # C2 must add protected per-UID policy/store access before enabling
@@ -252,6 +263,8 @@ def ensure_drained(root: Path):
         if path.exists():
             with sqlite3.connect(f'{path.as_uri()}?mode=ro', uri=True) as db:
                 if db.execute("SELECT count(*) FROM repair_jobs WHERE state NOT IN ('succeeded', 'failed', 'partial', 'cancelled')").fetchone()[0]:
+                    raise ValueError('repair_helpers_require_drain')
+                if db.execute("SELECT 1 FROM repair_jobs WHERE state='partial' AND changed IS NULL AND json_extract(request,'$.operation.capability')='disk' LIMIT 1").fetchone():
                     raise ValueError('repair_helpers_require_drain')
                 tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if 'writer_holds' in tables and db.execute('SELECT 1 FROM writer_holds WHERE restored=0 LIMIT 1').fetchone():

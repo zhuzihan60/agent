@@ -15,6 +15,7 @@ from pydantic import (
     StrictBool,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -79,6 +80,37 @@ class ServicesConstraints(BaseModel):
     sample_interval_seconds: int = Field(default=5, ge=1, le=5, strict=True)
 
 
+def validate_cache_root(value: str) -> str:
+    if (not re.fullmatch(r'/(?:[A-Za-z0-9._+@:-]+/)*[A-Za-z0-9._+@:-]+', value)
+            or len(value) > 1024 or len(value.split('/')) > 33
+            or any(p in ('.', '..') for p in value.split('/'))
+            or value in ('/var', '/var/cache', '/opt', '/srv', '/home', '/tmp')
+            or value.split('/')[1] in ('etc','proc','sys','dev','usr','bin','sbin','boot','run')):
+        raise ValueError('invalid_cache_root')
+    protected=('/root','/var/lib/a4diag','/var/lib/a4diag-target','/var/lib/dpkg','/var/lib/systemd',
+               '/opt/a4diag','/opt/a4diag-target')
+    if any(value==p or value.startswith(p+'/') or p.startswith(value+'/') for p in protected):
+        raise ValueError('protected_cache_root')
+    return value
+
+
+class DiskConstraints(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    writer_unit: str
+    min_age_seconds: int = Field(ge=1, le=315360000, strict=True)
+    max_files: int = Field(ge=1, le=1024, strict=True)
+    max_bytes: int = Field(ge=1, le=1 << 40, strict=True)
+    min_free_bytes: int = Field(ge=0, le=1 << 50, strict=True)
+    min_free_inodes: int = Field(ge=0, le=1 << 40, strict=True)
+
+    @field_validator('writer_unit')
+    @classmethod
+    def validate_writer(cls, value):
+        if not _SERVICE.fullmatch(value) or value.casefold().startswith(_PROTECTED_SERVICES):
+            raise ValueError('invalid_writer_unit')
+        return value
+
+
 class RepairProfile(BaseModel):
     """An exact, expiring grant selected by ID rather than created by a model."""
 
@@ -86,10 +118,10 @@ class RepairProfile(BaseModel):
 
     id: str
     target_id: str
-    capability: Literal["services"]
+    capability: Literal["services", "disk"]
     resource: str
-    actions: tuple[Literal["start", "restart", "stop"], ...] = Field(min_length=1)
-    constraints: ServicesConstraints
+    actions: tuple[Literal["start", "restart", "stop", "cleanup"], ...] = Field(min_length=1)
+    constraints: ServicesConstraints | DiskConstraints
     recovery_check_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
     cooldown_seconds: int = Field(default=600, ge=1, strict=True)
     hourly_limit: int = Field(default=2, ge=1, strict=True)
@@ -103,15 +135,26 @@ class RepairProfile(BaseModel):
 
     @field_validator("resource")
     @classmethod
-    def validate_resource(cls, value: str) -> str:
+    def validate_resource(cls, value: str, info: ValidationInfo) -> str:
         if not isinstance(value, str):
             raise ValueError("resource must be a string")
         normalized = unicodedata.normalize("NFC", value)
+        if info.data.get('capability') == 'disk':
+            return validate_cache_root(normalized)
         if not _SERVICE.fullmatch(normalized):
             raise ValueError("services resource must be an exact .service unit")
         if normalized.casefold().startswith(_PROTECTED_SERVICES):
             raise ValueError("protected service cannot be granted")
         return normalized
+
+    @model_validator(mode='after')
+    def check_capability_shape(self):
+        if self.capability == 'disk':
+            if self.actions != ('cleanup',) or not isinstance(self.constraints, DiskConstraints):
+                raise ValueError('invalid_disk_profile')
+        elif 'cleanup' in self.actions or not isinstance(self.constraints, ServicesConstraints):
+            raise ValueError('invalid_service_profile')
+        return self
 
     @field_validator("constraints", mode="before")
     @classmethod
@@ -202,6 +245,8 @@ def authorize_profile(
         "unit": profile.resource
     }:
         raise RepairAuthorizationError("profile_parameters_mismatch")
+    if profile.capability == 'disk' and operation.parameters != {}:
+        raise RepairAuthorizationError('profile_parameters_mismatch')
     if operation.verify != {
         "recovery_check_ids": list(profile.recovery_check_ids)
     }:

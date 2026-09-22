@@ -3,10 +3,11 @@
 The default installation has no repair profiles, no repair helper sockets, and
 `new_write_helpers_enabled: []` in its installer output and
 `/etc/a4diag-target/repair-self-check.json`. Existing 1.0 install configuration
-remains accepted. The production repair adapter registry is deliberately empty:
-this foundation does not implement disk, container, APT, or network repairs.
+remains accepted. The production registry now includes the explicitly selected
+`disk-cache` adapter; see [disk workflow](repair-disk.md). Container, APT and
+network repair adapters are not yet registered.
 
-An administrator enables a future registered adapter with `repair_profiles`,
+An administrator enables a registered adapter with `repair_profiles`,
 `repair_helpers: [{"profile_id": "...", "adapter": "..."}]`, and literal
 `confirm_repair_helpers: "ENABLE"`. Every profile must have exactly one compiled
 adapter for a new helper scope; existing service profiles may retain their
@@ -52,7 +53,7 @@ launch workers. A worker cannot start an unrelated unrestricted unit.
 Concrete capability tasks extend `a4diag_target.repair_install.ADAPTERS` with an
 `AdapterSpec(capability, sandbox, plugin)` and add the same ID to
 `a4diag.builtin_catalog.REPAIR_ADAPTER_IDS`. This registry is independent of the
-ten built-in plugin manifests. The sandbox callback accepts the exact validated
+built-in plugin manifests. The sandbox callback accepts the exact validated
 RepairProfile and returns `Sandbox(write_paths, socket_paths, run_uid)`; the
 plugin factory returns the bounded lifecycle implementation used in both
 dispatcher and worker. Future tasks also extend the currently closed profile

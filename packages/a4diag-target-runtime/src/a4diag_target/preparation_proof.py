@@ -63,7 +63,7 @@ def _record(job_id):
         raise ValueError('stop_proof_unavailable') from error
 
 
-def read_stop_proof(request: TargetRequestV11, *, verifier, current_policy, writer_unit: str) -> StopProof:
+def _read_stop_records(request: TargetRequestV11, *, verifier, current_policy, writer_unit: str) -> StopProof:
     """Historical signature inspection never authorizes a fresh effect."""
     request = TargetRequestV11.model_validate(request.model_dump())
     dep = request.preparation_dependency
@@ -97,5 +97,10 @@ def read_stop_proof(request: TargetRequestV11, *, verifier, current_policy, writ
     marker = ServiceMarker.model_validate(original.marker)
     if marker.unit != writer_unit or marker.action != 'stop':
         raise ValueError('stop_proof_marker_mismatch')
-    snapshot = _writer_snapshot(writer_unit)
-    return StopProof(job.id, original, json.loads(canonical_json_bytes(original.marker)), snapshot)
+    return StopProof(job.id, original, json.loads(canonical_json_bytes(original.marker)), ())
+
+
+def read_stop_proof(request: TargetRequestV11, *, verifier, current_policy, writer_unit: str) -> StopProof:
+    """Authenticate protected history AND independently inspect current writer."""
+    proof = _read_stop_records(request, verifier=verifier, current_policy=current_policy, writer_unit=writer_unit)
+    return StopProof(proof.job_id, proof.original, proof.marker, _writer_snapshot(writer_unit))

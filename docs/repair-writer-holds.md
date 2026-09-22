@@ -71,8 +71,8 @@ inspection, never for new execution.
 The disk adapter must retain the scanner's bounded before/after writer and
 filesystem checks and construct its final marker from this authenticated proof.
 The reader is evidence, not authority for deletion or restoration. The staged
-prepare frontier, finally scheduling, disk adapter registration and deletion are
-the subsequent integrated disk deliverable.
+prepare frontier, finally scheduling, disk adapter registration and deletion
+are implemented by the [integrated disk workflow](repair-disk.md).
 
 ## Unavailable effects
 
@@ -81,4 +81,4 @@ raise `EffectAdmissionRejected` before its effect method is invoked. The worker
 then records a normal bound failed job with verified `changed=false`. The hook
 must be read-only. Request fields cannot create this evidence. Once effect
 invocation begins, failures/exception/default `changed=false` retain the existing
-uncertain-result rules. No preparation-only mode or successful cleanup is added.
+uncertain-result rules. This hook does not itself authorize cleanup.

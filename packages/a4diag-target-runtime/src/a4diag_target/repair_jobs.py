@@ -263,6 +263,16 @@ class JobStore:
             raise RepairJobError('result_too_large')
         return candidate
 
+    def claimed_worker_exited(self, job_id):
+        """A known claimed worker identity is gone; unclaimed starts stay unknown."""
+        with self._launch_lock(job_id, blocking=False) as acquired:
+            if not acquired:
+                return False
+            with self._transaction() as db:
+                row=db.execute('SELECT pid,boot_id,starttime,state FROM repair_jobs WHERE id=?',(job_id,)).fetchone()
+                return bool(row is not None and row['state']=='unknown' and row['pid'] is not None
+                    and process_identity(row['pid']) != (row['boot_id'],row['starttime']))
+
 
 
 async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapter,

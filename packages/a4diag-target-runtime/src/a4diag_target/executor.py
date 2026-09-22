@@ -190,6 +190,8 @@ class TargetExecutor:
         if request.lifecycle is not TargetLifecycleV11.APPLY:
             job = self._lookup_job(request)
             if request.lifecycle is TargetLifecycleV11.CONFIRM_JOB:
+                if request.operation.capability == 'disk' and job.changed is None:
+                    raise ExecutorError('disk_audit_manual_recovery_required')
                 if WriterHolds(self._limits).get(request.target_id, request.operation.resource):
                     raise ExecutorError('writer_hold_unresolved')
                 if job.state not in TERMINAL_JOB_STATES:
@@ -201,6 +203,14 @@ class TargetExecutor:
                 job = self._reconcile_job(job.id)
                 if job.state == 'unknown':
                     original = self._jobs.request(job.id)
+                    if original.operation.capability == 'disk':
+                        recovered=self._plugins['disk'].recover_dead_worker(original,self._jobs,job.id)
+                        if recovered is not None:
+                            job=self._jobs.complete(job.id,state='partial',changed=recovered['changed'],
+                                result=recovered,now=self._verifier.now())
+                            if job.changed is not None:
+                                self._limits.finish_job(job.id,'partial')
+                            return RepairJobResponse(job=job)
                     try:
                         observation = await self._dispatch(self._plugins[original.operation.capability],
                             original.model_copy(update={'lifecycle': TargetLifecycleV11.RECONCILE}))
@@ -220,6 +230,8 @@ class TargetExecutor:
         self._verifier.record_job(request, job.id)
         if job.state != 'prepared':
             return RepairJobResponse(job=job)
+        if request.operation.capability == 'disk':
+            await self._plugins['disk'].admit_dispatch(request)
         now = self._verifier.now()
         reservation = self._limits.reserve(request.target_id, profile.resource,
             request.transaction_id, now, profile.cooldown_seconds, profile.hourly_limit)
@@ -302,6 +314,11 @@ class TargetExecutor:
         }
 
     async def _dispatch(self, plugin: object, request: TargetRequestType) -> Any:
+        if request.operation.capability == 'disk':
+            from a4diag_target.disk_plugin import DiskPlugin
+            if not isinstance(plugin, DiskPlugin) or not isinstance(request, TargetRequestV11):
+                raise ExecutorError('disk_helper_required')
+            return await plugin.dispatch(request)
         base = self._base(request)
         if request.lifecycle in {TargetLifecycle.PREPARE, TargetLifecycleV11.PREPARE}:
             return await plugin.prepare(CapabilityPrepareParams(**base))

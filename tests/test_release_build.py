@@ -201,13 +201,14 @@ class ReleaseBuildContractTests(unittest.TestCase):
             builtin_index = json.loads(
                 (output / "builtin-plugins" / "builtin-index.json").read_text("utf-8")
             )
-            self.assertEqual(len(builtin_index["plugins"]), 10)
+            self.assertEqual(len(builtin_index["plugins"]), 11)
             self.assertEqual(
                 {entry["name"] for entry in builtin_index["plugins"]},
                 {
                     "capability-files",
                     "capability-packages",
                     "capability-services",
+                    "capability-disk",
                     "model-openai-compatible",
                     "notification-cli",
                     "notification-flashduty",
