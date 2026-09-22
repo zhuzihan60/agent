@@ -136,6 +136,7 @@ def _scan_candidates(limits: DiskLimits, *, now_ns: int) -> DiskMarker:
     if type(now_ns) is not int or now_ns < 0:
         raise ValueError('invalid_clock')
     entries = []
+    directory_bindings = {}
     encoded_bytes = 512
     scanned = logical_bytes = 0
     cutoff = now_ns - limits.min_age_seconds * 1_000_000_000
@@ -153,6 +154,7 @@ def _scan_candidates(limits: DiskLimits, *, now_ns: int) -> DiskMarker:
                 raise ValueError('unsafe_cache_entry')
             if depth > MAX_SCAN_DEPTH:
                 raise ValueError('preparation_budget_exceeded')
+            directory_bindings[prefix] = _directory_signature(before)
             with os.scandir(fd) as directory:
                 for item in directory:
                     scanned += 1
@@ -200,20 +202,41 @@ def _scan_candidates(limits: DiskLimits, *, now_ns: int) -> DiskMarker:
 
         try:
             walk(root_fd, '', 0)
+            def check_directory(fd, prefix):
+                current = os.fstat(fd)
+                if not _trusted_directory(current):
+                    raise ValueError('unsafe_cache_entry')
+                if current.st_dev != root_info.st_dev or _mount_id(fd) != root_mount:
+                    raise ValueError('cache_mount_boundary')
+                if _directory_signature(current) != directory_bindings.get(prefix):
+                    raise ValueError('cache_changed')
+
             # A second bounded FD walk catches file modifications which do not
-            # change directory metadata. No candidate file is opened for I/O.
+            # change directory metadata, and preserves the first pass's exact
+            # directory trust/identity and mount boundary at every component.
             for entry in entries:
                 parts = entry.relative_path.split('/')
                 parent = os.dup(root_fd)
+                prefix = ''
                 try:
+                    check_directory(parent, prefix)
                     for part in parts[:-1]:
                         child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
                         os.close(parent)
                         parent = child
-                    if not entry_unchanged(entry, os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)):
-                        raise ValueError('cache_changed')
+                        prefix += part + '/'
+                        check_directory(parent, prefix)
+                    candidate_fd = os.open(parts[-1], os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                    try:
+                        if _mount_id(candidate_fd) != root_mount:
+                            raise ValueError('cache_mount_boundary')
+                        if not entry_unchanged(entry, os.fstat(candidate_fd)):
+                            raise ValueError('cache_changed')
+                    finally:
+                        os.close(candidate_fd)
                 finally:
                     os.close(parent)
+            check_directory(root_fd, '')
         except OSError as error:
             raise ValueError('cache_changed') from error
         marker = DiskMarker(root_info.st_dev, root_info.st_ino,
@@ -227,6 +250,7 @@ _WRITER_REQUIRED = {
     'MainPID': '0', 'ControlPID': '0', 'KillMode': 'control-group',
     'Delegate': 'no', 'Restart': 'no', 'TriggeredBy': '', 'WantedBy': '',
     'RequiredBy': '', 'UpheldBy': '', 'BoundBy': '', 'ConsistsOf': '',
+    'OnFailureOf': '', 'OnSuccessOf': '',
     'DynamicUser': 'no', 'RemainAfterExit': 'no', 'SendSIGKILL': 'yes', 'Job': '',
 }
 _WRITER_PROPERTIES = (*_WRITER_REQUIRED, 'Id', 'ControlGroup', 'UnitFileState',

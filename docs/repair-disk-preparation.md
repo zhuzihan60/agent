@@ -27,7 +27,8 @@ The supported boundary is deliberately narrow:
   `RemainAfterExit=no` are required. A nonempty cgroup must expose a bounded
   cgroup-v2 `cgroup.events` with `populated 0`.
 - Only disabled/static units are accepted. Reported socket/timer/path triggers,
-  reverse dependency activation and upheld units are refused. Unit fragments
+  reverse dependency activation (including `OnFailureOf` and `OnSuccessOf`)
+  and upheld units are refused. Unit fragments
   and drop-ins must be protected regular files. Missing, duplicate, oversized
   or unsupported diagnostic properties fail closed. This is not general
   support for all systemd service configurations.
@@ -39,7 +40,10 @@ Linux lab; service-state test fixtures represent read-only observations, not
 an autonomous stop/cleanup/restoration test.
 
 Directory traversal opens each level with `O_NOFOLLOW`, retains ancestor FDs,
-and rechecks names and ownership. Candidates must be singly linked regular
+and rechecks names and ownership. The final candidate traversal also checks each
+directory against its saved first-pass identity/metadata, ownership, permissions
+and mount identity, and rechecks the leaf's mount through an `O_PATH` FD.
+Candidates must be singly linked regular
 files. Device and Linux mount identities reject nested mounts, including bind
 mounts on the same filesystem. Saved inode/device/size/mtime/ctime bindings are
 rechecked after scanning; the later apply stage must check them again before

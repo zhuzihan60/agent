@@ -208,7 +208,8 @@ def writer_output(cache_root, **changes):
                   SubState='dead', MainPID='0', ControlPID='0', ControlGroup='',
                   KillMode='control-group', Delegate='no', Restart='no',
                   TriggeredBy='', WantedBy='', RequiredBy='', UpheldBy='', BoundBy='',
-                  ConsistsOf='', UnitFileState='disabled', FragmentPath=str(unit_file),
+                  ConsistsOf='', OnFailureOf='', OnSuccessOf='',
+                  UnitFileState='disabled', FragmentPath=str(unit_file),
                   DropInPaths='', User='root', DynamicUser='no', RemainAfterExit='no',
                   SendSIGKILL='yes', Job='')
     values.update(changes)
@@ -294,6 +295,67 @@ def test_fixed_diagnostic_process_bounds_are_enforced(monkeypatch, script):
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', process)
     with pytest.raises(ValueError, match='writer_boundary_unproven'):
         repair_disk._systemctl_show('cache-worker.service')
+
+
+@pytest.mark.parametrize('property_name', ['OnFailureOf', 'OnSuccessOf'])
+@pytest.mark.parametrize('state', ['activation_route', 'unsupported'])
+def test_reverse_outcome_activation_must_be_queried_and_excluded(cache_root, monkeypatch, property_name, state):
+    from a4diag_target import repair_disk
+    output = writer_output(cache_root, **{property_name: 'other.service'})
+    if state == 'unsupported':
+        output = output.replace(f'{property_name}=other.service\n', '')
+    original = asyncio.create_subprocess_exec
+    async def process(*argv, **kwargs):
+        # A real systemctl show only returns requested, supported properties.
+        # Simulating that boundary exposes an omitted query, not just a parser.
+        requested = set(argv[-1].removeprefix('--property=').split(','))
+        selected = ''.join(line + '\n' for line in output.splitlines()
+                           if line.partition('=')[0] in requested)
+        return await original(sys.executable, '-c',
+                              'import sys; sys.stdout.write(sys.argv[1])', selected, **kwargs)
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', process)
+    with pytest.raises(ValueError, match='writer_boundary_unproven'):
+        repair_disk.prepare_cleanup(limits(cache_root), now_ns=time.time_ns())
+
+
+@pytest.mark.parametrize('change', ['writable_directory', 'directory_bind_mount', 'file_bind_mount'])
+def test_final_traversal_rejects_changed_trust_or_mount(cache_root, monkeypatch, change):
+    from a4diag_target import repair_disk
+    nested = cache_root / 'nested'
+    nested.mkdir()
+    old_file(nested / 'old')
+    root_identity = (cache_root.stat().st_dev, cache_root.stat().st_ino)
+    original = os.scandir
+    mounted = []
+    class ChangeAfterRootScan:
+        def __init__(self, fd):
+            self.fd = fd
+            self.iterator = original(fd)
+        def __enter__(self):
+            return self.iterator.__enter__()
+        def __exit__(self, *args):
+            self.iterator.__exit__(*args)
+            info = os.fstat(self.fd)
+            if (info.st_dev, info.st_ino) != root_identity:
+                return
+            if change == 'writable_directory':
+                nested.chmod(0o777)
+            else:
+                target = nested if change == 'directory_bind_mount' else nested / 'old'
+                # Binding a path onto itself preserves dev/ino and all saved
+                # file metadata while changing its mount identity.
+                subprocess.run(['/usr/bin/mount', '--bind', str(target), str(target)],
+                               check=True, capture_output=True)
+                mounted.append(target)
+    monkeypatch.setattr(repair_disk.os, 'scandir', ChangeAfterRootScan)
+    try:
+        expected = 'unsafe_cache_entry' if change == 'writable_directory' else 'cache_mount_boundary'
+        with pytest.raises(ValueError, match=expected):
+            scan(cache_root)
+    finally:
+        monkeypatch.setattr(repair_disk.os, 'scandir', original)
+        for target in reversed(mounted):
+            subprocess.run(['/usr/bin/umount', str(target)], check=True, capture_output=True)
 
 
 @pytest.mark.parametrize('change', ['size', 'mtime', 'hardlink', 'fifo'])
