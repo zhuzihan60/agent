@@ -27,4 +27,5 @@ where = ["src"]
 addopts = "--strict-markers"
 markers = [
   "live_t11: tests that intentionally exercise the isolated t_11 sandbox",
+  "privileged_linux: requires root, trusted root-owned paths, or a private mount namespace",
 ]

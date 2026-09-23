@@ -253,6 +253,7 @@ def test_held_writer_blocks_foreign_cross_version_mutations(stopped_writer, vers
     assert stopped.adapter.effect_calls == effects
 
 
+@pytest.mark.privileged_linux
 def test_read_only_stop_proof_checks_signature_context_and_current_unit(stopped_writer, monkeypatch):
     from a4diag_target import preparation_proof
     from a4diag.plugin_api.target_protocol import TargetVerifier

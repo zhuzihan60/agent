@@ -107,6 +107,7 @@ def test_ordinary_socket_cannot_bypass_isolated_helper(monkeypatch):
     assert calls == []
 
 
+@pytest.mark.privileged_linux
 def test_interrupted_install_journal_survives_process_exit(tmp_path):
     from a4diag_target.repair_install import install_transaction
     root = tmp_path / 'root'
