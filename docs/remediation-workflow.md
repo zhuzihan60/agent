@@ -66,8 +66,9 @@ belongs to N2.
 Registered `start`, `restart`, `reset-failed`, `reset-failed-start` and
 `reset-failed-restart` plans require at least three consecutive failed business
 samples spanning ten seconds before PREPARE. Unknown evidence, healthy units,
-and activating/deactivating units do not qualify. A live PID plus failed HTTP
-is anomaly evidence; it does not establish why the application stopped
+and activating/deactivating units do not qualify. A busy controller HTTP probe
+pool is unavailable evidence and cannot qualify a service for repair. A live PID
+plus failed HTTP is anomaly evidence; it does not establish why the application stopped
 responding. Legacy unprofiled service operations and disk writer stops retain
 their existing flow.
 
@@ -97,8 +98,9 @@ holding a 60-second RPC open. A relapse stops recovery without another restart.
 
 The total budget starts at the first preflight observation and includes
 eligibility, effect execution and post-observation. It defaults to 300 seconds;
-explicitly longer configured windows use `max(300, window + 120)`, bounded by
-the existing maximum 600-second window to at most 720 seconds. The first
+explicitly longer windows in the selected bound profiles use
+`max(300, window + 120)`, bounded by the existing maximum 600-second window to
+at most 720 seconds. The first
 admission freezes the deadline. Process/boot restarts discard sample
 continuity, but retain the original deadline and consumed budget. A config
 change cannot extend it. Backward/discontinuous clocks fail conservatively.

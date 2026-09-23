@@ -654,6 +654,9 @@ class _RpcCollectorPort:
         for check in checks:
             if check.kind == 'http':
                 result = check_http(check.model_copy(update={'timeout_seconds':min(check.timeout_seconds,remaining())}))
+                if result.get('status') == 'http_probe_busy':
+                    # Controller capacity says nothing about the target's health.
+                    raise ValueError('http_probe_busy')
             elif check.kind == 'service_active':
                 current = before if check.resource == operation.resource else fault(check.resource)
                 result = {'ok':current.active_state=='active','status':current.active_state}

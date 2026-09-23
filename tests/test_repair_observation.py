@@ -153,7 +153,7 @@ def test_default_core_stops_on_relapse_without_new_mutation(deps_factory,tmp_pat
     assert not any(call.startswith('undo') for call in deps.plugins.executor.calls)
 
 
-@pytest.mark.parametrize('change',['removed','replaced_checks','read_denied'])
+@pytest.mark.parametrize('change',['removed','replaced_checks','read_denied','replacement_profile'])
 def test_accepted_service_observation_survives_profile_revocation(deps_factory,tmp_path,monkeypatch,change):
     from dataclasses import replace
     from test_repair_scheduler import runtime_for
@@ -166,9 +166,19 @@ def test_accepted_service_observation_survives_profile_revocation(deps_factory,t
     changed_target=original_target.model_copy(update={'repair_profiles':()})
     if change=='replaced_checks':
         changed_target=changed_target.model_copy(update={'recovery_checks':(original_target.recovery_checks[0].model_copy(update={'resource':'other.service'}),)})
+    if change=='replacement_profile':
+        from a4diag.domain import TargetConfig
+        check=original_target.recovery_checks[0].model_copy(update={'id':'health-v2','resource':'other.service'})
+        profile=original_target.repair_profiles[0].model_copy(update={'recovery_check_ids':('health-v2',)})
+        changed_target=TargetConfig.model_validate({**original_target.model_dump(mode='json'),
+            'repair_profiles':(profile,), 'recovery_checks':(check,), 'write_enabled':False,
+            'capabilities':()})
     original_health=deps.plugins.collector.service_health
     def read(target,*args,**kwargs):
         assert target.recovery_checks==original_target.recovery_checks
+        if change=='replacement_profile':
+            assert target.repair_profiles==original_target.repair_profiles
+            assert target.write_enabled is False and target.capabilities==()
         if change=='read_denied':raise PermissionError('unit_not_granted')
         return original_health(target,*args,**kwargs)
     deps.plugins.collector.service_health=read
@@ -176,7 +186,91 @@ def test_accepted_service_observation_survives_profile_revocation(deps_factory,t
     resumed=runtime_for(replace(deps,settings=settings,policy=PolicyEngine(settings,deps.registry,authorization_key=POLICY_KEY)),tmp_path)
     for value in range(116,173,4):
         ticks[0]=float(value);result=resumed.poll_repair_jobs()[0]
-        if change=='read_denied':break
+        if result.status!='service_observing':break
     assert result.status==('rollback_unknown' if change=='read_denied' else 'succeeded')
     assert deps.plugins.executor.apply_count==1
     assert not any(call.startswith('undo') for call in deps.plugins.executor.calls)
+
+
+@pytest.mark.parametrize('http_status',['http_probe_busy','http_timeout','http_unavailable','http_unhealthy'])
+def test_http_preflight_distinguishes_local_probe_exhaustion(deps_factory,tmp_path,monkeypatch,http_status):
+    from dataclasses import replace
+    import json
+    import a4diag.repair_verification as verification
+    import a4diag.plugin_ports as ports
+    from a4diag.policy_engine import PolicyEngine
+    from a4diag.recovery import RecoveryCheck
+    from test_repair_workflow import repair_deps,event
+    from test_repair_scheduler import runtime_for
+    from test_workflow_v3 import POLICY_KEY
+    from test_service_fault_evidence import RAW
+    deps=repair_deps(deps_factory,tmp_path)
+    target=deps.settings.targets[0].model_copy(update={'recovery_checks':(
+        RecoveryCheck(id='health',kind='http',resource='http://127.0.0.1:12345/health'),)})
+    settings=deps.settings.model_copy(update={'targets':(target,)})
+    ticks=[100.]
+    monkeypatch.setattr(verification,'monotonic',lambda:ticks[0])
+    monkeypatch.setattr(verification,'wall_time',lambda:1000.+ticks[0])
+    checked=[]
+    def http(check):
+        checked.append(check)
+        return {'ok':False,'status':http_status}
+    monkeypatch.setattr(ports,'check_http',http)
+    class Client:
+        async def call(self,method,params):
+            if method=='verify_identity':return {'ok':True,'data':{'fingerprint':'machine-1'}}
+            values=dict(line.split('=',1) for line in RAW.splitlines())
+            return {'ok':True,'data':{'truncated':False},'stdout':json.dumps({**values,'LoadState':'loaded'})}
+    collector=ports._RpcCollectorPort(deps.registry,lambda target:Client())
+    monkeypatch.setattr(ports._RpcCollectorPort,'_client',lambda self,target:Client())
+    deps.plugins.collector.service_health=collector.service_health
+    deps=replace(deps,settings=settings,service_observer=None,
+        policy=PolicyEngine(settings,deps.registry,authorization_key=POLICY_KEY))
+    runtime=runtime_for(deps,tmp_path)
+    result=runtime.handle(event())
+    for value in (104.,108.,112.,116.):
+        ticks[0]=value
+        results=runtime.poll_repair_jobs()
+        if results:result=results[0]
+    assert checked
+    if http_status=='http_probe_busy':
+        assert 'prepare' not in deps.plugins.executor.calls
+        assert deps.plugins.executor.apply_count==0
+        data=verification.ServiceObservations(deps.transactions.path).load('repair-1')
+        assert data['samples']=={}
+        assert result.status=='failed' and 'service_evidence_unavailable' in result.report['error']
+    else:
+        assert 'prepare' in deps.plugins.executor.calls
+        assert deps.plugins.executor.apply_count==1
+
+
+@pytest.mark.parametrize('selected,expected_budget',[('short',300),('long',720)])
+def test_initial_budget_uses_only_exact_bound_profile(deps_factory,tmp_path,monkeypatch,selected,expected_budget):
+    from test_repair_workflow import repair_deps
+    from a4diag.domain import TargetConfig
+    from a4diag.repair_profiles import profile_digest
+    from a4diag_builtin_plugins.capability_services import parse_service_fault_snapshot
+    from test_service_fault_evidence import RAW
+    import a4diag.repair_verification as verification
+    deps=repair_deps(deps_factory,tmp_path)
+    target=deps.settings.targets[0];base=target.repair_profiles[0]
+    profiles=tuple(base.model_copy(update={'id':name,'constraints':base.constraints.model_copy(
+        update={'verification_window_seconds':window})}) for name,window in [('short',60),('long',600)])
+    target=TargetConfig.model_validate({**target.model_dump(mode='json'),'repair_profiles':profiles})
+    bound=next(p for p in profiles if p.id==selected)
+    state={'transaction_id':'bound-budget','plan':deps.plugins.model.plan_result.model_dump(mode='json'),
+        'repair_bindings':{'0':{'profile_id':bound.id,'profile_digest':profile_digest(bound)}}}
+    ticks=[100.]
+    monkeypatch.setattr(verification,'monotonic',lambda:ticks[0])
+    monkeypatch.setattr(verification,'wall_time',lambda:1000.+ticks[0])
+    deps.plugins.collector.service_health=lambda *args,**kwargs:(parse_service_fault_snapshot(RAW,100),False,{})
+    _,data=verification.observe_services(deps,state,target,'preflight')
+    assert data['deadline']==1100.+expected_budget
+    ticks[0]=110.
+    # A new controller process and replacement catalog cannot renew the budget.
+    monkeypatch.setattr(verification,'_PROCESS','replacement-process')
+    changed=target.model_copy(update={'repair_profiles':()})
+    deps.plugins.collector.service_health=lambda *args,**kwargs:(parse_service_fault_snapshot(RAW,100),True,{})
+    _,resumed=verification.observe_services(deps,state,changed,'post')
+    assert resumed['deadline']==data['deadline']
+    assert resumed['remaining_budget']<=expected_budget-10

@@ -98,8 +98,17 @@ def observe_services(deps, state, target, phase):
     from a4diag.repair_profiles import RepairProfile, profile_digest
     from a4diag.domain import TargetConfig
     store = ServiceObservations(deps.transactions.path)
-    budget = max([300]+[p.constraints.verification_window_seconds+120 for p in target.repair_profiles
-                        if p.capability=='services' and any(op.resource==p.resource for _,op in operations)])
+    bound_profiles = {}
+    if phase == 'preflight':
+        for step, _ in operations:
+            binding = state['repair_bindings'][step]
+            profile = next(p for p in target.repair_profiles if p.id == binding['profile_id'])
+            if profile_digest(profile) != binding['profile_digest']:
+                raise ValueError('frozen_observation_profile_mismatch')
+            bound_profiles[step] = profile
+    # Only the selected profiles can set a new budget. Post-observation loads
+    # the already frozen deadline, even when current grants have been removed.
+    budget = max([300]+[p.constraints.verification_window_seconds+120 for p in bound_profiles.values()])
     data = store.load(state['transaction_id'],budget_seconds=budget)
     if data['phase'] == 'done':
         return data['outcome'], data
@@ -111,10 +120,14 @@ def observe_services(deps, state, target, phase):
         data['preflight']={'samples':data['samples'],'evidence':data.get('evidence',{})}
         data.update(phase='post', samples={}, last={}, evidence={})
     if phase == 'preflight' and 'profiles' not in data:
-        data['profiles']={step:next(p for p in target.repair_profiles
-            if p.id==state['repair_bindings'][step]['profile_id']).model_dump(mode='json') for step,_ in operations}
+        data['profiles']={step:p.model_dump(mode='json') for step,p in bound_profiles.items()}
         data['read_catalog']=target.model_dump(mode='json',include={'recovery_checks','diagnostic_probes'})
-    read_target=TargetConfig.model_validate({**target.model_dump(mode='json'),**data['read_catalog']})
+    # This view is passed only to service_health. Keep current connection,
+    # identity and capability policy, with a consistent original check catalog.
+    # General evidence sources are unused here and may reference replaced probes.
+    read_target=TargetConfig.model_validate({**target.model_dump(mode='json'),**data['read_catalog'],
+        'repair_profiles':tuple({p['id']:p for p in data['profiles'].values()}.values()),
+        'evidence_sources':()})
     ready = True
     reason = None
     unavailable = False
