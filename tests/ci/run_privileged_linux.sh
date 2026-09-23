@@ -30,4 +30,4 @@ if module != source / "tests/target_runtime/test_repair_disk.py":
     raise SystemExit(f"privileged tests imported from {module}, expected {source}")
 print(f"privileged test source: {source}; disk fixture: {module}", flush=True)
 PY
-"$python" -m pytest -p no:cacheprovider -q -rs -m privileged_linux "$@"
+"$python" -m pytest -p no:cacheprovider --basetemp="$test_root/t" -q -rs -m privileged_linux "$@"
