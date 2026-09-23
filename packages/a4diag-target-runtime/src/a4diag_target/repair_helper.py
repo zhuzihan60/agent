@@ -88,6 +88,29 @@ class RepairHelper:
             if len(payload) > MAX_FRAME_BYTES:
                 raise ExecutorError('request_too_large')
             value = json.loads(payload)
+            if type(value) is dict and value.get('method') == 'read' and value.get('kind') in ('kubernetes_state','kubernetes_evidence'):
+                if (set(value) != {'method','kind','profile_id','limit'} or value['profile_id'] != self.binding.id
+                        or self.binding.profile.capability != 'kubernetes'
+                        or type(value['limit']) is not int or not 1 <= value['limit'] <= 262144):
+                    raise ExecutorError('kubernetes_read_invalid')
+                if load_binding(self.binding.id) != self.binding:
+                    raise ExecutorError('helper_binding_changed')
+                policy=current_policy()
+                if (self.binding.id not in policy.allowed_kubernetes_profiles
+                        or policy.target_id != self.binding.profile.target_id
+                        or policy.target_fingerprint != target_fingerprint()):
+                    raise ExecutorError('kubernetes_read_not_granted')
+                from a4diag_target.repair_kubernetes import KubernetesAdapter
+                adapter=KubernetesAdapter(self.binding.profile)
+                if value['kind']=='kubernetes_evidence':
+                    data=await asyncio.to_thread(adapter.evidence)
+                else:
+                    _,snapshot=await asyncio.to_thread(adapter.inspect)
+                    data=snapshot.model_dump(mode='json')
+                body=canonical_json_bytes(data)
+                if len(body)>value['limit']:
+                    raise ExecutorError('kubernetes_read_too_large')
+                return canonical_json_bytes({'content':body.decode(),'truncated':False})
             if type(value) is dict and value.get('method') == 'read':
                 if (set(value) != {'method','kind','profile_id','limit'}
                         or value['kind'] not in ('container_state','container_logs') or value['profile_id'] != self.binding.id

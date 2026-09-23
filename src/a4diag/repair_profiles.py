@@ -96,6 +96,48 @@ class ContainerConstraints(ServicesConstraints):
         return self
 
 
+def kubernetes_endpoint(value):
+    import ipaddress
+    from urllib.parse import urlsplit
+    url = urlsplit(value)
+    address = ipaddress.ip_address(url.hostname or '')
+    if address.is_unspecified or address.is_multicast:
+        raise ValueError('concrete_api_address_required')
+    authority = f'[{address}]' if address.version == 6 else str(address)
+    if (url.scheme != 'https' or url.username or url.password or url.path or url.query or url.fragment
+            or url.port is None or value != f'https://{authority}:{url.port}'):
+        raise ValueError('exact_numeric_tls_endpoint_required')
+    return value
+
+
+def kubernetes_scope(resource):
+    parts = resource.split('/')
+    if len(parts) != 4 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?', p) for p in parts):
+        raise ValueError('exact_deployment_resource_required')
+    return tuple(parts)
+
+
+class KubernetesConstraints(ServicesConstraints):
+    endpoint: str
+    credential_id: str
+    container_name: str = Field(pattern=r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+    known_image: str = Field(pattern=r'^[a-zA-Z0-9][a-zA-Z0-9./:_-]*@sha256:[0-9a-f]{64}$', max_length=512)
+    min_available: int = Field(ge=1, le=1000, strict=True)
+    max_unavailable: int = Field(ge=0, le=1000, strict=True)
+    capacity_replicas: int = Field(ge=1, le=1000, strict=True)
+    rollout_timeout_seconds: int = Field(default=120, ge=10, le=600, strict=True)
+
+    @field_validator('endpoint')
+    @classmethod
+    def endpoint_value(cls, value):
+        return kubernetes_endpoint(value)
+
+    @field_validator('credential_id')
+    @classmethod
+    def credential_value(cls, value):
+        return _safe_id(value, 'credential_id')
+
+
 def container_scope(resource):
     match = re.fullmatch(r'(docker|podman)/(0|[1-9][0-9]{0,9})/([0-9a-f]{64})', resource)
     if match is None or int(match[2]) >= 2**32-1 or (match[1] == 'docker' and match[2] != '0'):
@@ -141,10 +183,10 @@ class RepairProfile(BaseModel):
 
     id: str
     target_id: str
-    capability: Literal["services", "disk", "containers"]
+    capability: Literal["services", "disk", "containers", "kubernetes"]
     resource: str
-    actions: tuple[Literal["start", "restart", "stop", "cleanup", "reset-failed", "reset-failed-start", "reset-failed-restart"], ...] = Field(min_length=1)
-    constraints: ServicesConstraints | DiskConstraints | ContainerConstraints
+    actions: tuple[Literal["start", "restart", "stop", "cleanup", "reset-failed", "reset-failed-start", "reset-failed-restart", "restore-image"], ...] = Field(min_length=1)
+    constraints: ServicesConstraints | DiskConstraints | ContainerConstraints | KubernetesConstraints
     recovery_check_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
     cooldown_seconds: int = Field(default=600, ge=1, strict=True)
     hourly_limit: int = Field(default=2, ge=1, strict=True)
@@ -167,6 +209,9 @@ class RepairProfile(BaseModel):
         if info.data.get('capability') == 'containers':
             container_scope(normalized)
             return normalized
+        if info.data.get('capability') == 'kubernetes':
+            kubernetes_scope(normalized)
+            return normalized
         if not _SERVICE.fullmatch(normalized):
             raise ValueError("services resource must be an exact .service unit")
         if normalized.casefold().startswith(_PROTECTED_SERVICES):
@@ -181,7 +226,10 @@ class RepairProfile(BaseModel):
         elif self.capability == 'containers':
             if not set(self.actions) <= {'start','restart'} or not isinstance(self.constraints, ContainerConstraints):
                 raise ValueError('invalid_container_profile')
-        elif 'cleanup' in self.actions or type(self.constraints) is not ServicesConstraints:
+        elif self.capability == 'kubernetes':
+            if not set(self.actions) <= {'restart','restore-image'} or not isinstance(self.constraints, KubernetesConstraints):
+                raise ValueError('invalid_kubernetes_profile')
+        elif not set(self.actions) <= {'start','restart','stop','reset-failed','reset-failed-start','reset-failed-restart'} or type(self.constraints) is not ServicesConstraints:
             raise ValueError('invalid_service_profile')
         return self
 
@@ -276,7 +324,7 @@ def authorize_profile(
         "unit": profile.resource
     }:
         raise RepairAuthorizationError("profile_parameters_mismatch")
-    if profile.capability in ('disk', 'containers') and operation.parameters != {}:
+    if profile.capability in ('disk', 'containers', 'kubernetes') and operation.parameters != {}:
         raise RepairAuthorizationError('profile_parameters_mismatch')
     if operation.verify != {
         "recovery_check_ids": list(profile.recovery_check_ids)

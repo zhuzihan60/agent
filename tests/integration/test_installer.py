@@ -617,7 +617,7 @@ def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) 
     assert stat.S_IMODE(installed.stat().st_mode) == 0o755
     registry = sandbox.root / "etc" / "a4diag" / "plugin-registry.json"
     registry_payload = json.loads(registry.read_text(encoding="utf-8"))
-    assert len(registry_payload["plugins"]) == 12
+    assert len(registry_payload["plugins"]) == 13
     assert all(pin["enabled"] is False for pin in registry_payload["plugins"])
     assert not (
         sandbox.root / "etc" / "a4diag" / "secrets" / "release-signing.key"

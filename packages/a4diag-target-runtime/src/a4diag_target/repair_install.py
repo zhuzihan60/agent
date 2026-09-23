@@ -14,6 +14,7 @@ import stat
 import sqlite3
 import tempfile
 from typing import Callable
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -98,6 +99,11 @@ def _container_plugin(profile):
     return ContainerPlugin(profile)
 
 
+def _kubernetes_plugin(profile):
+    from a4diag_target.repair_kubernetes import KubernetesPlugin
+    return KubernetesPlugin(profile)
+
+
 def _container_sandbox(profile, runtime):
     from a4diag_target.repair_containers import profile_identity, runtime_socket
     if profile_identity(profile).runtime != runtime:
@@ -108,6 +114,7 @@ def _container_sandbox(profile, runtime):
 
 
 ADAPTERS: dict[str, AdapterSpec] = {
+    'kubernetes': AdapterSpec('kubernetes', lambda p: Sandbox(), _kubernetes_plugin),
     'disk-cache': AdapterSpec('disk', lambda p: Sandbox(write_paths=(p.resource,)), _disk_plugin),
     'docker': AdapterSpec('containers', lambda p: _container_sandbox(p, 'docker'), _container_plugin),
     'podman': AdapterSpec('containers', lambda p: _container_sandbox(p, 'podman'), _container_plugin),
@@ -258,7 +265,8 @@ def sandbox_properties(binding: HelperBinding, *, worker: bool = True) -> tuple[
         'ProtectSystem=strict', 'ProtectHome=yes', 'ProtectKernelTunables=yes',
         'ProtectKernelModules=yes', 'ProtectKernelLogs=yes', 'ProtectControlGroups=yes',
         'RestrictRealtime=yes', 'LockPersonality=yes', 'MemoryDenyWriteExecute=yes',
-        'RestrictAddressFamilies=AF_UNIX',
+        'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' if binding.adapter == 'kubernetes' else 'RestrictAddressFamilies=AF_UNIX',
+        *(('IPAddressDeny=any', 'IPAddressAllow='+urlsplit(binding.profile.constraints.endpoint).hostname) if binding.adapter == 'kubernetes' else ()),
         'CapabilityBoundingSet=CAP_SETUID CAP_SETGID' if binding.adapter == 'podman' else 'CapabilityBoundingSet=',
         *(('AmbientCapabilities=CAP_SETUID CAP_SETGID',) if binding.adapter == 'podman' else ()),
         'ReadOnlyPaths=/etc/a4diag-target /opt/a4diag-target/current',

@@ -314,6 +314,14 @@ class TargetExecutor:
         }
 
     async def _dispatch(self, plugin: object, request: TargetRequestType, *, deadline=None) -> Any:
+        if request.operation.capability == 'kubernetes':
+            from a4diag_target.repair_kubernetes import KubernetesPlugin, KubernetesRefusal
+            if not isinstance(plugin, KubernetesPlugin) or not isinstance(request, TargetRequestV11):
+                raise ExecutorError('kubernetes_helper_required')
+            try:
+                return await plugin.dispatch(request, deadline=deadline)
+            except KubernetesRefusal as error:
+                raise ExecutorError(error.code) from error
         if request.operation.capability == 'containers':
             from a4diag_target.repair_containers import ContainerPlugin
             if not isinstance(plugin, ContainerPlugin) or not isinstance(request, TargetRequestV11):

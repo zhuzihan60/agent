@@ -10,7 +10,8 @@ def admit_effect(plugin, request, *, deadline=None):
     if hook is not None:
         # This plugin comes from the compiled target registry, never the wire.
         from a4diag_target.repair_containers import ContainerPlugin
-        if isinstance(plugin, ContainerPlugin):
+        from a4diag_target.repair_kubernetes import KubernetesPlugin
+        if isinstance(plugin, (ContainerPlugin, KubernetesPlugin)):
             hook(request, deadline=deadline)
         else:
             hook(request)

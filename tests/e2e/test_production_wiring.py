@@ -31,6 +31,7 @@ def test_signed_controller_to_target_production_path() -> None:
         "capability-containers",
         "capability-disk",
         "capability-files",
+        "capability-kubernetes",
         "capability-packages",
         "capability-services",
         "model-openai-compatible",

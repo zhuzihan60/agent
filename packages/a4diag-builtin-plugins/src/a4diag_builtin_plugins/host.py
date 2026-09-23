@@ -96,6 +96,11 @@ def load_instance_config(path: Path) -> dict[str, object]:
 def build_plugin(manifest_name: str, config: dict[str, object] | None = None) -> object:
     """Construct one strictly configured built-in plugin instance."""
     config = dict(config or {})
+    if manifest_name == 'capability-kubernetes':
+        if config:
+            raise RuntimeFailure('instance_config_invalid', 'capability-kubernetes config')
+        from a4diag_builtin_plugins.capability_kubernetes import KubernetesCapability
+        return KubernetesCapability()
     if manifest_name == 'capability-containers':
         if config:
             raise RuntimeFailure('instance_config_invalid', 'capability-containers config')

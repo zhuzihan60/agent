@@ -218,6 +218,8 @@ class ReadKind(StrEnum):
     PROBE = "probe"
     CONTAINER_STATE = "container_state"
     CONTAINER_LOGS = "container_logs"
+    KUBERNETES_STATE = "kubernetes_state"
+    KUBERNETES_EVIDENCE = "kubernetes_evidence"
 
 
 def validate_systemd_unit(value: str) -> str:
@@ -260,7 +262,7 @@ class ReadParams(BaseModel):
 
     @model_validator(mode="after")
     def validate_kind_path(self) -> ReadParams:
-        if (self.kind in (ReadKind.CONTAINER_STATE,ReadKind.CONTAINER_LOGS)) != (self.profile_id is not None):
+        if (self.kind in (ReadKind.CONTAINER_STATE,ReadKind.CONTAINER_LOGS,ReadKind.KUBERNETES_STATE,ReadKind.KUBERNETES_EVIDENCE)) != (self.profile_id is not None):
             raise ValueError('profile_id is required only for container reads')
         if self.kind is ReadKind.FILE and self.path is None:
             raise ValueError("path is required for file reads")

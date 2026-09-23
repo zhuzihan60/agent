@@ -74,7 +74,7 @@ def run_helper(stdin: BinaryIO, stdout: BinaryIO, *, env: Mapping[str, str], con
     except (KeyError, TypeError, json.JSONDecodeError):
         pass
     destination = EXECUTOR_SOCKET
-    if decoded.get('method') == 'read' and decoded.get('kind') in ('container_state','container_logs'):
+    if decoded.get('method') == 'read' and decoded.get('kind') in ('container_state','container_logs','kubernetes_state','kubernetes_evidence'):
         from a4diag_target.repair_install import helper_route
         try:
             destination = helper_route(decoded['profile_id'], routes_path=REPAIR_ROUTES)

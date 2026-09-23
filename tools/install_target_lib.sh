@@ -258,6 +258,7 @@ policy = {"target_id": source["target_id"], "target_fingerprint": sys.argv[4],
           "controller_key_fingerprint": source["controller_key_fingerprint"],
           "managed_roots": roots, "allowed_units": units, "allowed_packages": packages,
           "diagnostic_probes": source.get("diagnostic_probes", []),
+          "allowed_kubernetes_profiles": [p["id"] for p in source.get("repair_profiles", []) if p["capability"] == "kubernetes"],
           "allowed_container_profiles": [p["id"] for p in source.get("repair_profiles", []) if p["capability"] == "containers"],
           "repair_profiles": source.get("repair_profiles", [])}
 policy = TargetPolicy.model_validate(policy).model_dump(mode="json")

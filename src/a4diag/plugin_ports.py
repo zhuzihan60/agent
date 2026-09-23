@@ -582,7 +582,7 @@ class _RpcCollectorPort:
         for source_id in dict.fromkeys(source_ids):
             source = catalog[source_id]
             params = {"kind": source.kind, "output_limit_bytes": source.max_bytes}
-            params[{"file": "path", "probe": "probe_id", "container_state":"profile_id", "container_logs":"profile_id"}.get(source.kind, "unit")] = source.resource
+            params[{"file": "path", "probe": "probe_id", "container_state":"profile_id", "container_logs":"profile_id", "kubernetes_state":"profile_id", "kubernetes_evidence":"profile_id"}.get(source.kind, "unit")] = source.resource
             row = {"kind": source.kind, "source_id": source.id, "resource": source.resource}
             try:
                 result = _run(lambda: self._client(target).call("read", params))
@@ -611,6 +611,9 @@ class _RpcCollectorPort:
             return StepResult(ok=False, status="evidence_sources_missing")
         return StepResult(ok=True, status="recovery_checks_configured")
 
+    def kubernetes_health(self, target, operation, profile, *, timeout_seconds):
+        return self.service_health(target,operation,profile,timeout_seconds=timeout_seconds)
+
     def container_health(self, target, operation, profile, *, timeout_seconds):
         return self.service_health(target,operation,profile,timeout_seconds=timeout_seconds)
 
@@ -638,6 +641,16 @@ class _RpcCollectorPort:
             return value
 
         def fault(unit):
+            if operation.capability == 'kubernetes' and unit == operation.resource:
+                from a4diag_builtin_plugins.capability_kubernetes import DeploymentSnapshot
+                from a4diag.repair_profiles import kubernetes_scope
+                response = call('read', {'kind':'kubernetes_state','profile_id':profile.id,'output_limit_bytes':8192})
+                if response.get('ok') is not True or response.get('data',{}).get('truncated') is not False:
+                    raise ValueError('kubernetes_evidence_unavailable')
+                snapshot = DeploymentSnapshot.model_validate_json(response['stdout'])
+                if tuple(snapshot.identity.model_dump().values()) != kubernetes_scope(profile.resource):
+                    raise ValueError('deployment_identity_changed')
+                return snapshot
             if operation.capability == 'containers' and unit == operation.resource:
                 from a4diag_builtin_plugins.capability_containers import ContainerSnapshot
                 from a4diag.repair_profiles import container_scope
@@ -665,7 +678,7 @@ class _RpcCollectorPort:
         checks = tuple(c for c in target.recovery_checks if c.id in profile.recovery_check_ids)
         if len(checks) != len(profile.recovery_check_ids):
             raise ValueError('recovery_checks_missing')
-        if operation.capability == 'containers' and not any(c.kind == 'http' or
+        if operation.capability in ('containers','kubernetes') and not any(c.kind == 'http' or
             (c.kind == 'probe' and any(p.id == c.resource and p.kind == 'tcp' for p in target.diagnostic_probes)) for c in checks):
             raise ValueError('container_business_check_required')
         results = []
@@ -686,7 +699,10 @@ class _RpcCollectorPort:
                 result = {'ok':evaluate_probe_conditions(parse_bound_probe_output(probe,response['stdout']),check.conditions)}
             results.append({'id':check.id,**result})
         after = fault(operation.resource)
-        if operation.capability == 'containers':
+        if operation.capability == 'kubernetes':
+            same = (before.identity,before.generation,before.pod_uids,before.restart_count,before.image)==(after.identity,after.generation,after.pod_uids,after.restart_count,after.image)
+            active = after.complete
+        elif operation.capability == 'containers':
             same = (before.identity,before.started_at,before.restart_count)==(after.identity,after.started_at,after.restart_count)
             active = after.running and not after.oom_killed and after.health not in ('unhealthy','starting')
         else:
@@ -697,7 +713,7 @@ class _RpcCollectorPort:
         remaining()
         healthy = same and active and all(r['ok'] for r in results)
         return after,healthy,{'ok':healthy,'checks':results,'duration_seconds':timeout_seconds-remaining(),
-                             **({'identity_stable':same} if operation.capability == 'containers' else {})}
+                             **({'identity_stable':same} if operation.capability in ('containers','kubernetes') else {})}
 
     def final_verify(
         self,

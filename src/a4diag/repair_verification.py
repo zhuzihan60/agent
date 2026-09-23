@@ -8,7 +8,7 @@ import uuid
 from time import monotonic, time as wall_time
 
 _PROCESS = uuid.uuid4().hex
-RECOVERY_ACTIONS = frozenset({'start', 'restart', 'reset-failed', 'reset-failed-start', 'reset-failed-restart'})
+RECOVERY_ACTIONS = frozenset({'start', 'restart', 'reset-failed', 'reset-failed-start', 'reset-failed-restart', 'restore-image'})
 OBSERVATION_SCHEMA = '''CREATE TABLE IF NOT EXISTS service_observations (
     transaction_id TEXT PRIMARY KEY, phase TEXT NOT NULL, snapshot TEXT NOT NULL)'''
 
@@ -87,7 +87,7 @@ def service_operations(state):
     if not state.get('repair_bindings'):
         return []
     return [(str(i), op) for i,op in enumerate(Plan.model_validate(state['plan']).operations)
-            if str(i) in state['repair_bindings'] and op.capability in ('services','containers') and op.action in RECOVERY_ACTIONS]
+            if str(i) in state['repair_bindings'] and op.capability in ('services','containers','kubernetes') and op.action in RECOVERY_ACTIONS]
 
 
 def observe_services(deps, state, target, phase):
@@ -108,7 +108,7 @@ def observe_services(deps, state, target, phase):
             bound_profiles[step] = profile
     # Only the selected profiles can set a new budget. Post-observation loads
     # the already frozen deadline, even when current grants have been removed.
-    budget = max([300]+[p.constraints.verification_window_seconds+120 for p in bound_profiles.values()])
+    budget = max([300]+[p.constraints.verification_window_seconds+120+(p.constraints.rollout_timeout_seconds if p.capability=='kubernetes' else 0) for p in bound_profiles.values()])
     data = store.load(state['transaction_id'],budget_seconds=budget)
     if data['phase'] == 'done':
         return data['outcome'], data
@@ -143,7 +143,7 @@ def observe_services(deps, state, target, phase):
             ready = False
             continue
         try:
-            collector = deps.plugins.collector.container_health if op.capability == 'containers' else deps.plugins.collector.service_health
+            collector = getattr(deps.plugins.collector, {'containers':'container_health','kubernetes':'kubernetes_health'}.get(op.capability,'service_health'))
             snapshot, healthy, detail = collector(read_target,op,profile,
                 timeout_seconds=min(4.,store.remaining(data)))
             stamp = store.monotonic()  # Includes the complete HTTP/RPC duration.
@@ -155,25 +155,34 @@ def observe_services(deps, state, target, phase):
         if store.expired(data):
             reason = 'service_observation_budget_exhausted'
             break
+        if phase == 'post' and op.capability == 'kubernetes':
+            accepted=[job.result.get('data',{}).get('generation') for job in deps.transactions.repair_jobs(state['transaction_id']) if job.step_id==step_id]
+            if len(accepted)!=1 or snapshot.generation!=accepted[0]:
+                reason='kubernetes_rollout_conflict'
+                break
         if phase == 'preflight':
+            kubernetes = op.capability == 'kubernetes'
             container = op.capability == 'containers'
-            if healthy or (not container and snapshot.active_state not in ('active','failed','inactive')):
+            if healthy or (not (container or kubernetes) and snapshot.active_state not in ('active','failed','inactive')):
                 reason = 'service_not_eligible'
                 break
             if previous and stamp-previous[-1]['elapsed_seconds'] > 5:
                 previous = []
             previous.append({'elapsed_seconds':stamp,'healthy':False,
-                             'invocation_id':snapshot.started_at if container else snapshot.invocation_id,
-                             'restart_count':snapshot.restart_count if container else snapshot.n_restarts})
+                             'invocation_id':str(snapshot.generation) if kubernetes else (snapshot.started_at if container else snapshot.invocation_id),
+                             'restart_count':snapshot.restart_count if container or kubernetes else snapshot.n_restarts})
             data['samples'][step_id] = previous[-301:]
             ready &= len(previous) >= 3 and stamp-previous[0]['elapsed_seconds'] >= 10
         else:
+            kubernetes = op.capability == 'kubernetes'
             container = op.capability == 'containers'
             identity = (f'{target.id}:{op.resource}:{snapshot.identity.image_digest}:{snapshot.started_at}' if container
-                        else f'{target.id}:{op.resource}:{snapshot.invocation_id}:{snapshot.main_pid}')
+                        else ('' if kubernetes else f'{target.id}:{op.resource}:{snapshot.invocation_id}:{snapshot.main_pid}'))
+            if kubernetes:
+                identity=f'{target.id}:{op.resource}:{snapshot.generation}:{snapshot.image}:{snapshot.pod_uids}'
             sample = HealthSample(elapsed_seconds=stamp,resource_identity=identity,
-                healthy=healthy and (snapshot.running and not snapshot.oom_killed if container else snapshot.active_state=='active' and bool(snapshot.invocation_id)),
-                restart_count=snapshot.restart_count if container else snapshot.n_restarts)
+                healthy=healthy and (snapshot.complete if kubernetes else (snapshot.running and not snapshot.oom_killed if container else snapshot.active_state=='active' and bool(snapshot.invocation_id))),
+                restart_count=snapshot.restart_count if container or kubernetes else snapshot.n_restarts)
             last = data['last'].get(step_id)
             if last and (last['resource_identity'] != identity or last['restart_count'] != sample.restart_count):
                 reason = 'service_failed_during_observation'

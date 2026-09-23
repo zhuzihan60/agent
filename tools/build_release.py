@@ -41,6 +41,7 @@ EXPECTED_BUILTINS = frozenset(
         "capability-packages",
         "capability-services",
         "capability-containers",
+        "capability-kubernetes",
         "capability-disk",
         "model-openai-compatible",
         "notification-cli",

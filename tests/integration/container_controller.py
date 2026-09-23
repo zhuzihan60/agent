@@ -28,15 +28,15 @@ def observe_recovery(deps_factory,tmp_path,selected,operation,check,signer,send,
     deps=repair_deps(deps_factory,tmp_path)
     target=deps.settings.targets[0].model_copy(update={'id':selected.target_id,'identity_ref':'target/'+selected.target_id,
         'repair_profiles':(selected,) if service is None else (selected,service), 'recovery_checks':(check,),
-        'evidence_sources':(EvidenceSource(id='container',kind='container_state',resource=selected.id),),
-        'capabilities':(CapabilityGrant(name='containers',actions=selected.actions,resources=(selected.resource,)),)+
+        'evidence_sources':(EvidenceSource(id='container',kind='kubernetes_state' if selected.capability=='kubernetes' else 'container_state',resource=selected.id),),
+        'capabilities':(CapabilityGrant(name=selected.capability,actions=selected.actions,resources=(selected.resource,)),)+
             (() if service is None else (CapabilityGrant(name='services',actions=service.actions,resources=(service.resource,)),))})
     fingerprint=target_fingerprint()
     deps.plugins.model.plan_result=Plan(target_id=target.id,target_fingerprint=fingerprint,operations=(operation,))
     directory=tmp_path/'container-registry';directory.mkdir()
     (directory/'fixture.whl').write_bytes(b'container-source-staged');pins=[]
     repo=Path(__file__).resolve().parents[2]
-    for name in ('capability-containers','capability-services','transport-local'):
+    for name in ('capability-'+selected.capability,'capability-services','transport-local'):
         content=(repo/'packages/a4diag-builtin-plugins/manifests'/f'{name}.json').read_bytes()
         (directory/f'{name}.json').write_bytes(content)
         pins.append(PluginPin(name=name,version='1.0.0',api_version='1.0',artifact_path='fixture.whl',
@@ -87,7 +87,7 @@ def observe_recovery(deps_factory,tmp_path,selected,operation,check,signer,send,
         assert not daemon.is_alive()
         assert len(applies)==1,evidence
         assert not any(r['lifecycle']=='undo' for r in requests),evidence
-        if fault in ('exited','hung','oom','unhealthy','managed'):
+        if fault in ('exited','hung','oom','unhealthy','managed','bad-image'):
             assert report['status']=='succeeded',evidence
             samples=report['recovery_result']['samples']['0']
             assert samples[-1]['elapsed_seconds']-samples[0]['elapsed_seconds']>=60

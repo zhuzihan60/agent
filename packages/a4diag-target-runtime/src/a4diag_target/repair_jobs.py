@@ -301,6 +301,7 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
     from a4diag.repair_store import RepairStore
     from a4diag_target.policy import PolicyDenied
     from a4diag_target.repair_admission import admit_effect, EffectAdmissionRejected
+    from a4diag_target.repair_kubernetes import KubernetesPatchRejected
     if not store.claim(job_id):
         return
     request = store.request(job_id)
@@ -366,7 +367,7 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
                     if remaining <= 0:
                         raise ExecutorError('worker_admission_budget_exceeded')
                     result = await asyncio.wait_for(executor._dispatch(plugin, request), timeout=remaining)
-                elif request.operation.capability == 'containers':
+                elif request.operation.capability in ('containers','kubernetes'):
                     result = await executor._dispatch(plugin, request, deadline=deadline)
                 else:
                     result = await executor._dispatch(plugin, request)
@@ -380,6 +381,9 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
                 payload.update(changed=None, change_verified=False)
             store.complete(job_id, state=state, changed=changed,
                 result=payload, now=clock())
+        except KubernetesPatchRejected as error:
+            store.complete(job_id, state='failed', changed=False,
+                result={'reason':str(error), 'change_verified':True}, now=clock())
         except Exception:
             # An exception cannot prove whether the effect happened.
             if store.get(job_id).state == 'running':

@@ -69,7 +69,7 @@ def test_loads_exact_digest_pinned_builtin_catalog(tmp_path: Path) -> None:
 
     catalog = load_builtin_catalog(index)
 
-    assert len(catalog.plugins) == 12
+    assert len(catalog.plugins) == 13
     assert {entry.name for entry in catalog.plugins} == EXPECTED_BUILTINS
     assert all(entry.version == build_release.RELEASE_VERSION for entry in catalog.plugins)
     assert all(len(entry.manifest_sha256) == 64 for entry in catalog.plugins)
@@ -82,7 +82,7 @@ def test_fresh_registry_pins_all_builtins_disabled(tmp_path: Path) -> None:
 
     pins = merge_builtin_registry((), catalog, index.parents[2])
 
-    assert len(pins) == 12
+    assert len(pins) == 13
     assert all(pin.enabled is False for pin in pins)
 
 

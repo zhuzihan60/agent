@@ -83,8 +83,9 @@ class TargetPolicy(BaseModel):
     diagnostic_probes: tuple[LinuxProbe, ...] = ()
     repair_profiles: tuple[RepairProfile, ...] = ()
     allowed_container_profiles: tuple[str, ...] = ()
+    allowed_kubernetes_profiles: tuple[str, ...] = ()
 
-    @field_validator('allowed_container_profiles')
+    @field_validator('allowed_container_profiles','allowed_kubernetes_profiles')
     @classmethod
     def container_reads(cls, values):
         if len(values) != len(set(values)) or any(not _SAFE_TARGET.fullmatch(value) for value in values):
