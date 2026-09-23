@@ -193,6 +193,8 @@ class TargetPolicy(BaseModel):
             self.authorize_file_read(operation.resource)
             return
         if operation.capability == "services":
+            if operation.action.startswith('reset-failed'):
+                raise PolicyDenied('repair_profile_required')
             if operation.resource not in self.allowed_units:
                 raise PolicyDenied("unit_not_granted")
             return

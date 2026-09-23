@@ -523,8 +523,9 @@ class SubprocessRunner:
             _read_bounded(proc.stderr, output_limit_bytes)  # type: ignore[arg-type]
         )
         try:
-            proc.stdin.write(payload)  # type: ignore[union-attr]
-            await proc.stdin.drain()  # type: ignore[union-attr]
+            if payload:
+                proc.stdin.write(payload)  # type: ignore[union-attr]
+                await proc.stdin.drain()  # type: ignore[union-attr]
             proc.stdin.close()  # type: ignore[union-attr]
         except (OSError, ValueError):
             # The child closed its stdin before reading everything; it may

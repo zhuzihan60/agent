@@ -344,12 +344,17 @@ class TransactionStore:
             raise ValueError('poll limit must be between 1 and 32')
         db = self._connect()
         try:
-            rows = db.execute('''SELECT DISTINCT j.transaction_id FROM controller_repair_jobs j
+            rows = db.execute('''SELECT transaction_id FROM (
+                SELECT DISTINCT j.transaction_id FROM controller_repair_jobs j
                 JOIN transactions t ON t.transaction_id=j.transaction_id
                 LEFT JOIN repair_cancellations c ON c.transaction_id=j.transaction_id
                 WHERE j.transaction_id > ? AND t.status IN ('executing', 'execution_unknown', 'verifying', 'rollback_running')
                 AND (j.state IN ('prepared', 'running', 'unknown') OR c.transaction_id IS NULL)
-                ORDER BY j.transaction_id LIMIT ?''', (after, limit)).fetchall()
+                UNION SELECT o.transaction_id FROM service_observations o
+                JOIN transactions t ON t.transaction_id=o.transaction_id
+                WHERE o.transaction_id > ? AND o.phase IN ('preflight','post')
+                AND t.status IN ('created','preparing','verifying'))
+                ORDER BY transaction_id LIMIT ?''', (after, after, limit)).fetchall()
             return tuple(row[0] for row in rows)
         finally:
             db.close()
@@ -1576,6 +1581,8 @@ class TransactionStore:
 
 
 _SCHEMA = (
+    '''CREATE TABLE IF NOT EXISTS service_observations (
+        transaction_id TEXT PRIMARY KEY, phase TEXT NOT NULL, snapshot TEXT NOT NULL)''',
     '''CREATE TABLE IF NOT EXISTS repair_cancellations (
         transaction_id TEXT PRIMARY KEY REFERENCES transactions(transaction_id), cancelled_at INTEGER NOT NULL)''',
     '''CREATE TABLE IF NOT EXISTS transaction_effects (

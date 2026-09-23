@@ -37,6 +37,7 @@ def repair_deps(deps_factory, tmp_path, *, standing=True, effect_kind=None):
     settings = deps.settings.model_copy(update={'targets': (target,)})
     deps.plugins.model.plan_result = Plan(target_id=target.id, target_fingerprint='machine-1', operations=(_operation(),))
     return replace(deps, settings=settings, registry=registry,
+                   service_observer=lambda *args: ('ready' if args[-1]=='preflight' else 'legacy', {'unit_fixture':'authorization and transport only'}),
                    policy=PolicyEngine(settings, registry, authorization_key=POLICY_KEY))
 
 
@@ -171,7 +172,7 @@ def test_production_service_manifest_reports_compensation_not_memory_restoration
     result = run_event(build_graph(deps), event())
     assert result['status'] == 'rollback_partial'
     report = build_runtime_report(result, deps)
-    assert report['effects']['0'] == {'kind': 'compensatable', 'changed': True, 'restoration_verified': True}
+    assert report['effects']['0'] == {'kind': 'compensatable', 'changed': True, 'restoration_verified': False}
 
 
 def test_no_change_irreversible_step_needs_no_undo(deps_factory, tmp_path):
@@ -205,7 +206,7 @@ def test_audit_failure_preserves_partial_effect_report_and_blocks_next_write(dep
     audit = FailedFinishAudit(tmp_path/'audit.jsonl')
     runtime = Runtime(settings=deps.settings, registry=deps.registry, policy=deps.policy,
         approvals=deps.approvals, transactions=deps.transactions, tickets=deps.tickets,
-        checkpointer=deps.checkpointer, plugins=deps.plugins, audit=audit, clock=deps.clock)
+        checkpointer=deps.checkpointer, plugins=deps.plugins, audit=audit, clock=deps.clock, service_observer=deps.service_observer)
     result = runtime.handle(event())
     assert result.status == 'rollback_partial'
     assert result.report['effects']['0']['kind'] == 'compensatable'

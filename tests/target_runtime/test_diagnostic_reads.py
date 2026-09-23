@@ -161,12 +161,12 @@ def test_service_state_survives_helper_json_framing(tmp_path: Path, monkeypatch)
             assert argv[0:2] == ["/usr/bin/systemctl", "show"]
             assert argv[-2:] == ["--", "demo.service"]
             return RunOutcome(started=True, timed_out=False, returncode=0,
-                              stdout="ActiveState=failed\nSubState=failed\nLoadState=loaded\nResult=exit-code\n")
+                              stdout="ActiveState=failed\nSubState=failed\nLoadState=loaded\nResult=exit-code\nInvocationID=\nNRestarts=3\nMainPID=0\nExecMainStatus=3\nUnitFileState=static\n")
 
     monkeypatch.setattr(diagnostics, "SubprocessRunner", StateRunner)
     runner = RelayRunner(server(tmp_path))
     result = asyncio.run(LocalTransport(runner=runner).read(
-        ReadParams(kind="service_state", unit="demo.service", output_limit_bytes=100)))
+        ReadParams(kind="service_state", unit="demo.service", output_limit_bytes=1024)))
     assert result.ok is True
     assert json.loads(result.stdout)["ActiveState"] == "failed"
     assert result.data["truncated"] is False

@@ -145,6 +145,10 @@ def residual_risk(state: Mapping[str, object]) -> str:
     """Summarize what remains uncertain after the workflow finished."""
     status = state.get("status")
     recovery = state.get("recovery_result")
+    if status == 'succeeded' and isinstance(recovery,dict) and recovery.get('reason') == 'observation_period_recovered_root_cause_unproven':
+        return 'medium: healthy during observation; root cause unproven; process memory and reset counters cannot be restored'
+    if status == 'service_observing':
+        return 'medium: service observation incomplete; business recovery not established'
     if status == "rollback_succeeded" and isinstance(recovery, dict) and recovery.get("ok") is False:
         return "high: changes restored; business recovery not verified"
     if status == "rollback_succeeded" and (not isinstance(recovery, dict) or recovery.get("ok") is not True):

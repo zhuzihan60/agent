@@ -104,6 +104,7 @@ class Runtime:
         clock: Callable[[], int] | None = None,
         recoverable: tuple[str, ...] = (),
         settings_loader: Callable[[], AgentSettings] | None = None,
+        service_observer: Callable | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -118,6 +119,7 @@ class Runtime:
             checkpointer=checkpointer,
             clock=clock,
             settings_loader=settings_loader,
+            service_observer=service_observer,
         )
         self._graph = build_graph(self._deps)
         self._audit = audit

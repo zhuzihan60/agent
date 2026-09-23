@@ -290,6 +290,8 @@ class PolicyEngine:
                 return _decision(False, risk, "capability_not_allowed", digest)
             if operation.action not in grant.actions:
                 return _decision(False, risk, "action_not_allowed", digest)
+            if operation.capability == 'services' and operation.action.startswith('reset-failed-') and not {'reset-failed', operation.action.removeprefix('reset-failed-')} <= set(grant.actions):
+                return _decision(False, risk, 'constituent_action_not_allowed', digest)
             if not any(
                 _resource_matches(allowed, operation.resource)
                 for allowed in grant.resources

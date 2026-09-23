@@ -121,7 +121,7 @@ class RuntimePoller:
         poll_interval_seconds: int = 600,
         state_path: Path = Path("/var/lib/a4diag/poller.sqlite3"),
         report_root: Path = Path("/var/lib/a4diag/reports"),
-        repair_interval_seconds: float = 5,
+        repair_interval_seconds: float = 1,
     ) -> None:
         if max_concurrency != 2:
             raise ValueError("max_concurrency must equal 2")

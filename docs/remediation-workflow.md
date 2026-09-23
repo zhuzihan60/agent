@@ -37,15 +37,15 @@ relay prepare, apply, undo or confirm requests. If the APPLY response was lost
 before a job ID was saved, the controller keeps the transaction unknown for
 manual reconciliation rather than guessing or resubmitting.
 
-The production daemon calls `RuntimePoller.heartbeat()` every five seconds
+The production daemon calls `RuntimePoller.heartbeat()` every one second
 between passes, independently of its 600-second alert fetch thread. The
 heartbeat invokes `Runtime.poll_repair_jobs(limit=2)`; callers may choose a
 limit from 1 through 32. Durable candidates rotate by transaction ID, with
 bounded work per pass and busy transactions skipped. A known successful job
 can advance the remaining frozen plan through the same live authorization
-checks. These entry points are the S2 scheduler seam for future stable health
-samples and total-budget accounting; RPC duration still contributes to the
-time between passes. Heartbeats never diagnose or generate a new plan.
+checks. Registered service recovery also uses this scheduler for preflight
+failure evidence and sustained health observation. RPC duration contributes
+to the time between passes. Heartbeats never diagnose or generate a new plan.
 
 `Runtime.cancel_repair(transaction_id)` durably prevents further mutations,
 including compensation. Active jobs remain observable until a terminal
@@ -58,8 +58,58 @@ The separate durable resource reservation remains locked across crashes.
 after current write authorization. It only acknowledges an already terminal,
 ownership-bound job and may recover its unreleased reservation. It does not
 confirm a network configuration, convert uncertain execution to success, or
-prove business recovery. Stable recovery observation belongs to S2 and signed
-network nonce/config/deadline confirmation belongs to N2.
+prove business recovery. Signed network nonce/config/deadline confirmation
+belongs to N2.
+
+## Service recovery
+
+Registered `start`, `restart`, `reset-failed`, `reset-failed-start` and
+`reset-failed-restart` plans require at least three consecutive failed business
+samples spanning ten seconds before PREPARE. Unknown evidence, healthy units,
+and activating/deactivating units do not qualify. A live PID plus failed HTTP
+is anomaly evidence; it does not establish why the application stopped
+responding. Legacy unprofiled service operations and disk writer stops retain
+their existing flow.
+
+A compound action is one exact signed action/marker, detached target job and
+resource reservation. Both the compound name and each constituent action must
+be explicitly allowed in the registered profile and controller capability
+grant. For example, `reset-failed-start` needs actions
+`["reset-failed-start", "reset-failed", "start"]`. Target profile authorization
+checks the same constituents independently. Reset actions are unavailable in
+the legacy unprofiled target protocol. Counters/history and process memory
+cannot be restored; resets and restarts are compensatable effects. A failed
+recovery never invokes another service start/restart as compensation.
+
+The controller claims the persistent default 600-second cooldown and two
+attempts/hour allowance before PREPARE. Subsequent APPLY and queries use that
+same attempt; repeated alarms, controller restarts and unknown jobs cannot
+reset or bypass it. Unknown execution remains excluded from further mutation.
+
+Success requires actual healthy samples over at least 60 seconds, with no gap
+larger than five seconds (or the profile's stricter interval), an unchanged
+InvocationID/MainPID, and unchanged restart count. The one-second heartbeat
+leaves RPC slack; it is not a guarantee that every concurrent job is sampled
+on time. A gap discards the incomplete window. Sampling uses unrounded
+monotonic completion times, including HTTP and diagnostic request duration.
+Each sampling RPC is bounded; the workflow yields between samples instead of
+holding a 60-second RPC open. A relapse stops recovery without another restart.
+
+The total budget starts at the first preflight observation and includes
+eligibility, effect execution and post-observation. It defaults to 300 seconds;
+explicitly longer configured windows use `max(300, window + 120)`, bounded by
+the existing maximum 600-second window to at most 720 seconds. The first
+admission freezes the deadline. Process/boot restarts discard sample
+continuity, but retain the original deadline and consumed budget. A config
+change cannot extend it. Backward/discontinuous clocks fail conservatively.
+
+Accepted work can continue read-only observation after profile revocation,
+using its frozen original profile and health-check catalog. Current replacement
+checks cannot introduce another endpoint or resource. Unavailable or revoked
+target reads/identity produce an unknown/manual outcome; they never establish
+recovery. Fresh mutations and confirmations still require current independent
+authorization. Success means healthy during the observation period, with the
+root cause unproven; reports retain that residual risk and measured samples.
 
 Effect kinds come from pinned manifests, never model operation fields. New
 service start/restart/stop operations are `compensatable`: checking unit state

@@ -19,8 +19,14 @@
       "supports_undo": true,
       "parameters_schema": {
         "type": "object",
-        "properties": {"unit": {"type": "string"}},
-        "required": ["unit"],
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
         "additionalProperties": false
       }
     },
@@ -35,8 +41,14 @@
       "supports_undo": true,
       "parameters_schema": {
         "type": "object",
-        "properties": {"unit": {"type": "string"}},
-        "required": ["unit"],
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
         "additionalProperties": false
       }
     },
@@ -51,8 +63,14 @@
       "supports_undo": true,
       "parameters_schema": {
         "type": "object",
-        "properties": {"unit": {"type": "string"}},
-        "required": ["unit"],
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
         "additionalProperties": false
       }
     },
@@ -66,8 +84,14 @@
       "supports_undo": true,
       "parameters_schema": {
         "type": "object",
-        "properties": {"unit": {"type": "string"}},
-        "required": ["unit"],
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
         "additionalProperties": false
       }
     },
@@ -81,8 +105,80 @@
       "supports_undo": true,
       "parameters_schema": {
         "type": "object",
-        "properties": {"unit": {"type": "string"}},
-        "required": ["unit"],
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "services.reset-failed",
+      "effect_kind": "compensatable",
+      "risk_floor": "high",
+      "reversible": false,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": false,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "services.reset-failed-start",
+      "effect_kind": "compensatable",
+      "risk_floor": "high",
+      "reversible": false,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": false,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "services.reset-failed-restart",
+      "effect_kind": "compensatable",
+      "risk_floor": "high",
+      "reversible": false,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": false,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "unit"
+        ],
         "additionalProperties": false
       }
     }
@@ -93,7 +189,9 @@
     "exec:systemctl",
     "exec:a4diag-transport-helper"
   ],
-  "network_access": ["none"],
+  "network_access": [
+    "none"
+  ],
   "secret_refs": [],
   "target_compatibility": [
     "linux:systemd",

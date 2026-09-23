@@ -22,7 +22,8 @@ def runtime_for(deps, tmp_path):
     return Runtime(settings=deps.settings, registry=deps.registry, policy=deps.policy,
         approvals=deps.approvals, transactions=deps.transactions, tickets=deps.tickets,
         checkpointer=deps.checkpointer, plugins=deps.plugins,
-        audit=AuditWriter(tmp_path/'audit.jsonl'), clock=deps.clock, settings_loader=deps.settings_loader)
+        audit=AuditWriter(tmp_path/'audit.jsonl'), clock=deps.clock, settings_loader=deps.settings_loader,
+        service_observer=deps.service_observer)
 
 
 def test_actual_daemon_heartbeat_completes_existing_job_without_model_calls(deps_factory, tmp_path):
@@ -51,7 +52,7 @@ def test_actual_daemon_heartbeat_completes_existing_job_without_model_calls(deps
     assert deps.transactions.get('repair-1').status.value == 'succeeded'
     assert deps.plugins.model.calls == model_calls
     assert len(launches) == 1
-    assert stop.waits == [5, 5]
+    assert stop.waits == [1, 1]
     assert list((tmp_path/'reports').rglob('*.yaml'))
 
 

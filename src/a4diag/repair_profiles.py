@@ -120,7 +120,7 @@ class RepairProfile(BaseModel):
     target_id: str
     capability: Literal["services", "disk"]
     resource: str
-    actions: tuple[Literal["start", "restart", "stop", "cleanup"], ...] = Field(min_length=1)
+    actions: tuple[Literal["start", "restart", "stop", "cleanup", "reset-failed", "reset-failed-start", "reset-failed-restart"], ...] = Field(min_length=1)
     constraints: ServicesConstraints | DiskConstraints
     recovery_check_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
     cooldown_seconds: int = Field(default=600, ge=1, strict=True)
@@ -239,6 +239,8 @@ def authorize_profile(
         raise RepairAuthorizationError("profile_resource_mismatch")
     if operation.action not in profile.actions:
         raise RepairAuthorizationError("profile_action_not_allowed")
+    if operation.action.startswith('reset-failed-') and not {'reset-failed', operation.action.removeprefix('reset-failed-')} <= set(profile.actions):
+        raise RepairAuthorizationError('profile_constituent_action_not_allowed')
     if operation.model_risk is not Risk.HIGH:
         raise RepairAuthorizationError("risk_downgrade")
     if profile.capability == "services" and operation.parameters != {

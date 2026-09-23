@@ -611,6 +611,67 @@ class _RpcCollectorPort:
             return StepResult(ok=False, status="evidence_sources_missing")
         return StepResult(ok=True, status="recovery_checks_configured")
 
+    def service_health(self, target, operation, profile, *, timeout_seconds):
+        """One measured, deadline-bounded sample; no retries inside a sample."""
+        from a4diag_builtin_plugins.capability_services import FAULT_PROPERTIES, parse_service_fault_snapshot
+        deadline = time.monotonic() + timeout_seconds
+
+        def remaining():
+            value = deadline-time.monotonic()
+            if value <= 0:
+                raise TimeoutError('service_sample_budget_exhausted')
+            return value
+
+        def call(method, params):
+            async def request():
+                return await asyncio.wait_for(self._client(target).call(method, params), remaining())
+            return _run(request)
+
+        def identity():
+            result = call('verify_identity', {})
+            value = result.get('data', {}).get('fingerprint')
+            if result.get('ok') is not True or not isinstance(value,str) or not value:
+                raise ValueError('identity_unavailable')
+            return value
+
+        def fault(unit):
+            response = call('read', {'kind':'service_state','unit':unit,'output_limit_bytes':8192})
+            if response.get('ok') is not True or response.get('data',{}).get('truncated') is not False:
+                raise ValueError('service_evidence_unavailable')
+            raw = json.loads(response['stdout'])
+            if raw.get('LoadState') != 'loaded':
+                raise ValueError('service_not_loaded')
+            return parse_service_fault_snapshot('\n'.join(f'{key}={raw[key]}' for key in FAULT_PROPERTIES),int(time.time()))
+
+        fingerprint = identity()
+        if target.identity_fingerprint is not None and fingerprint != target.identity_fingerprint:
+            raise ValueError('identity_mismatch')
+        before = fault(operation.resource)
+        checks = tuple(c for c in target.recovery_checks if c.id in profile.recovery_check_ids)
+        if len(checks) != len(profile.recovery_check_ids):
+            raise ValueError('recovery_checks_missing')
+        results = []
+        for check in checks:
+            if check.kind == 'http':
+                result = check_http(check.model_copy(update={'timeout_seconds':min(check.timeout_seconds,remaining())}))
+            elif check.kind == 'service_active':
+                current = before if check.resource == operation.resource else fault(check.resource)
+                result = {'ok':current.active_state=='active','status':current.active_state}
+            else:
+                probe = next(p for p in target.diagnostic_probes if p.id == check.resource)
+                response = call('read',{'kind':'probe','probe_id':probe.id,'output_limit_bytes':16384})
+                if response.get('ok') is not True or response.get('data',{}).get('truncated') is not False:
+                    raise ValueError('probe_unavailable')
+                result = {'ok':evaluate_probe_conditions(parse_bound_probe_output(probe,response['stdout']),check.conditions)}
+            results.append({'id':check.id,**result})
+        after = fault(operation.resource)
+        same = (before.invocation_id,before.main_pid,before.n_restarts)==(after.invocation_id,after.main_pid,after.n_restarts)
+        if identity() != fingerprint:
+            raise ValueError('identity_mismatch')
+        remaining()
+        healthy = same and after.active_state=='active' and all(r['ok'] for r in results)
+        return after,healthy,{'ok':healthy,'checks':results,'duration_seconds':timeout_seconds-remaining()}
+
     def final_verify(
         self,
         target: TargetConfig,

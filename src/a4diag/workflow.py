@@ -195,6 +195,7 @@ class WorkflowDependencies:
     approval_ttl_seconds: int = 900
     ticket_ttl_seconds: int = 30
     settings_loader: Callable[[], AgentSettings] | None = None
+    service_observer: Callable | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.settings, AgentSettings):
@@ -224,6 +225,7 @@ class WorkflowDependencies:
 
 
 class AgentState(TypedDict, total=False):
+    service_phase: str
     event_id: str
     transaction_id: str
     target_id: str
@@ -835,6 +837,40 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 state, "approval_accepted", approval_id=approval.id
             ),
         }
+
+    def service_gate(state: AgentState) -> AgentState:
+        from a4diag.repair_verification import service_operations, observe_services
+        from a4diag.repair_workflow import plan_authorization, reserve_attempt
+        if not service_operations(state):
+            return {'status':'policy_allowed'}
+        candidate = plan_for(state)
+        transaction_id = state['transaction_id']
+        try:
+            deps.transactions.get(transaction_id)
+        except UnknownTransactionError:
+            deps.transactions.begin(transaction_id,state['target_id'],state['digest'],
+                expected_operations=tuple(canonical_json_bytes(op.model_dump(mode='json')).decode() for op in candidate.operations),now=now())
+        try:
+            target = target_for(state)
+            if deps.transactions.repair_cancelled(transaction_id):
+                raise PermissionError('repair_cancelled')
+            if deps.plugins.collector.verify_identity(target) != state['target_fingerprint']:
+                raise PermissionError('target_identity_changed')
+            plan_authorization(deps,state,target,candidate,now=now())
+            outcome, evidence = (deps.service_observer or observe_services)(deps,state,target,'preflight')
+            if outcome == 'ready':
+                # Claim the one resource attempt before PREPARE as well as APPLY.
+                for step_id, op in service_operations(state):
+                    reserve_attempt(deps,state,target,op,step_id,now=now())
+                return {'status':'policy_allowed','service_phase':'ready'}
+            if outcome == 'pending':
+                return {'status':'service_observing','service_phase':'preflight',
+                        'recovery_result':evidence}
+            error = evidence.get('reason','service_not_eligible')
+        except Exception as exc:
+            error = str(exc)
+        deps.transactions.transition(transaction_id,TransactionStatus.FAILED,now=now())
+        return {'status':'failed','service_phase':'done','error':error}
 
     def prepare(state: AgentState) -> AgentState:
         from a4diag.disk_workflow import is_disk_plan, run_disk_workflow
@@ -1486,8 +1522,10 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                     return data['changed']
             return True
 
+        from a4diag.repair_verification import service_operations
+        recovery_service_steps = {int(step_id) for step_id, _ in service_operations(state)}
         undoable = [index for index in applied if changed(index) is not False
-                    and effect_kind(index) != 'irreversible']
+                    and effect_kind(index) != 'irreversible' and index not in recovery_service_steps]
         remaining = [
             index for index in reversed(undoable) if index not in completed_undos
         ]
@@ -1690,6 +1728,33 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         }
 
     def final_verify(state: AgentState) -> AgentState:
+        from a4diag.repair_verification import service_operations, observe_services
+        if service_operations(state):
+            try:
+                target=target_for(state)
+                if deps.plugins.collector.verify_identity(target) != state['target_fingerprint']:
+                    raise PermissionError('target_identity_changed')
+                outcome,evidence=(deps.service_observer or observe_services)(deps,state,target,'post')
+            except Exception as exc:
+                outcome,evidence='unknown',{'reason':'service_observation_unavailable:'+type(exc).__name__}
+            if outcome == 'pending':
+                return {'status':'service_observing','service_phase':'post','recovery_result':evidence}
+            if outcome == 'unknown':
+                deps.transactions.transition(state['transaction_id'],TransactionStatus.ROLLBACK_RUNNING,now=now())
+                deps.transactions.transition(state['transaction_id'],TransactionStatus.ROLLBACK_UNKNOWN,now=now())
+                return {'status':'rollback_unknown','service_phase':'done','recovery_result':evidence,
+                        'error':evidence.get('reason','service_observation_unknown')}
+            if outcome == 'failed':
+                # Service restart/reset cannot restore process memory or counters.
+                # Retain the changed effect and stop: never auto-restart on relapse.
+                update=begin_rollback(state,list(state.get('applied_steps',[])),reason='service_observation_failed')
+                update.update(service_phase='done',recovery_result=evidence,
+                              error=evidence.get('reason','service_observation_failed'))
+                return update
+            if outcome == 'ready':
+                deps.transactions.transition(state['transaction_id'],TransactionStatus.SUCCEEDED,now=now())
+                return {'status':'succeeded','service_phase':'done','recovery_result':evidence,
+                        'audit_events':audit(state,'service_observation_passed')}
         try:
             target = target_for(state)
             fingerprint = deps.plugins.collector.verify_identity(target)
@@ -1789,6 +1854,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     graph.add_node("final_verify", final_verify)
     graph.add_node("report", report)
     graph.add_node("close", close)
+    graph.add_node('service_gate',service_gate)
 
     graph.add_edge(START, "ingest")
     graph.add_conditional_edges(
@@ -1842,10 +1908,11 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     )
     graph.add_conditional_edges(
         "approval_gate",
-        lambda state: "prepare"
+        lambda state: "service_gate"
         if state.get("status") == "policy_allowed"
         else "report",
     )
+    graph.add_conditional_edges('service_gate',lambda state:'prepare' if state.get('status')=='policy_allowed' else 'report')
     graph.add_conditional_edges(
         "prepare",
         lambda state: "apply_step"
@@ -1934,6 +2001,12 @@ def run_event(
         # Never pass a partial disk plan through legacy prepare-all recovery.
         from a4diag.disk_workflow import is_disk_plan, staged_transaction
         snapshot = graph.get_state(config)
+        if dependencies is not None and snapshot.values.get('service_phase') in ('preflight','post'):
+            # Resume only the persisted service observation frontier, never APPLY.
+            phase=snapshot.values['service_phase']
+            graph.update_state(config,{'status':'policy_allowed'} if phase=='preflight' else {},
+                               as_node='approval_gate' if phase=='preflight' else 'next_or_undo')
+            return cast(AgentState,graph.invoke(None,config=config))
         if dependencies is not None and is_disk_plan(snapshot.values):
             with dependencies.transactions._connect() as db:
                 disk_owned = staged_transaction(db, transaction_id)
