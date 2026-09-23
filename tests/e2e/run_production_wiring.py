@@ -845,7 +845,7 @@ def main() -> int:
         evidence = {
             "execution_path": ["runtime", "plugin-rpc", "transport-ssh", "openssh",
                                "forced-command-helper", "systemd-socket", "target-executor"],
-            "plugin_list": {"count": len(listed), "source": "installed-registry", "private_key_reads": 0},
+            "plugin_list": {"names": [pin.name for pin in listed], "source": "installed-registry", "private_key_reads": 0},
             "target": {
                 "identity_verified": identity_verified,
                 "released_service_hardening": service_hardened,

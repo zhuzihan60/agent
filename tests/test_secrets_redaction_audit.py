@@ -132,6 +132,7 @@ def test_ordinary_file_does_not_accept_systemd_acl_exception(tmp_path: Path, mon
         SecretResolver(tmp_path, trusted_owner_uid=0).resolve("file:" + candidate.name)
 
 
+@pytest.mark.privileged_linux
 @pytest.mark.skipif(os.name != "posix" or not hasattr(os, "getxattr") or os.getuid() != 0, reason="native Linux ACL test requires root")
 def test_native_systemd_acl_can_be_resolved_by_unprivileged_service_uid() -> None:
     from a4diag.secrets import credential_name

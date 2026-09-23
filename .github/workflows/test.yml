@@ -28,7 +28,11 @@ jobs:
           python -m pip install --no-deps -e packages/a4diag-builtin-plugins
           python -m pip install --no-deps -e packages/a4diag-target-runtime
       - name: Full test suite (unit, contract, integration, acceptance)
-        run: python -m pytest -q -rs
+        run: python -m pytest -q -rs -m "not privileged_linux"
+      - name: Privileged Linux tests in private mount namespace
+        run: |
+          sudo unshare --mount --fork --propagation private \
+            bash tests/ci/run_privileged_linux.sh "$PWD" "$(command -v python)"
 
   production-e2e:
     runs-on: ubuntu-24.04

@@ -28,7 +28,14 @@ def cache_root():
     # The isolated Linux runner copies the repository below protected /opt.
     # Unlike /tmp, every parent here is administrator-owned and not writable
     # by another account. This fixture proves scanning only, never writer stop.
-    root = Path(tempfile.mkdtemp(prefix='.disk-candidates-', dir=Path.cwd().parent))
+    if sys.platform != 'linux' or os.geteuid() != 0:
+        pytest.fail('cache_root requires Linux root in a protected test path')
+    parent = Path.cwd().parent.resolve()
+    for ancestor in (parent, *parent.parents):
+        stat = ancestor.stat()
+        if stat.st_uid != 0 or stat.st_mode & 0o022:
+            pytest.fail('cache_root requires root-owned non-writable ancestry')
+    root = Path(tempfile.mkdtemp(prefix='.disk-candidates-', dir=parent))
     try:
         yield root
     finally:

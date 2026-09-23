@@ -120,6 +120,7 @@ def test_target_configuration_rejects_package_grants_without_a_separate_helper(
 
 
 @POSIX
+@pytest.mark.privileged_linux
 @pytest.mark.parametrize("network_probe", [False, True])
 def test_target_install_is_restricted_idempotent_and_rolls_back(tmp_path: Path, network_probe: bool) -> None:
     fake_bin = tmp_path / "bin"
