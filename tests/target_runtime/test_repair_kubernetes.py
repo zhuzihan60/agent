@@ -379,6 +379,23 @@ def test_explicit_patch_rejection_is_durable_no_retry(protected_state,status):
     assert runtime.effects==1
 
 
+@pytest.mark.parametrize('status',[500,503])
+def test_uncertain_patch_error_remains_unknown_after_reload_without_retry(protected_state,status):
+    import asyncio
+    from a4diag_target.repair_kubernetes import KubernetesPlugin,KubernetesAPIError
+    runtime=Runtime();plugin=KubernetesPlugin(profile(),adapter=runtime,state=protected_state)
+    marker=asyncio.run(plugin.dispatch(request('prepare'))).marker
+    def uncertain(*args):runtime.effects+=1;raise KubernetesAPIError(status)
+    runtime.change=uncertain
+    with pytest.raises(KubernetesAPIError):asyncio.run(plugin.dispatch(request('apply',marker)))
+    reloaded=KubernetesPlugin(profile(),adapter=runtime,state=protected_state)
+    result=asyncio.run(reloaded.dispatch(request('reconcile',marker)))
+    assert result.state=='unknown' and result.data['operation_stage']=='intent'
+    with pytest.raises(ValueError,match='kubernetes_operation_uncertain'):
+        asyncio.run(reloaded.dispatch(request('apply',marker)))
+    assert runtime.effects==1
+
+
 def test_deleted_old_replicaset_does_not_hide_terminating_pod():
     from a4diag_target.repair_kubernetes import rollout_snapshot
     d=deployment();d['status'].update(availableReplicas=1)

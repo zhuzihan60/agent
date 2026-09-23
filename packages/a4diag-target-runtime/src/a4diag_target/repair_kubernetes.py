@@ -419,10 +419,11 @@ class KubernetesPlugin:
             if self.adapter.timeout_seconds<=0:raise TimeoutError('kubernetes_operation_budget_exhausted')
             try:updated=self.adapter.change(deployment,request.operation.action,record['marker']['nonce'])
             except KubernetesAPIError as error:
-                # The API explicitly rejected this atomic patch. Persist the rejection;
-                # job framework remains conservative about no-change on effect failure.
-                record.update(stage='rejected',reason=str(error));save()
-                if error.status in (403,409,422):raise KubernetesPatchRejected(str(error)) from error
+                # Only definitive rejections prove no change. Other HTTP errors retain
+                # the persisted intent because the patch outcome can be unknown.
+                if error.status in (403,409,422):
+                    record.update(stage='rejected',reason=str(error));save()
+                    raise KubernetesPatchRejected(str(error)) from error
                 raise
             generation=updated['metadata']['generation']
             record.update(stage='observing',generation=generation,
