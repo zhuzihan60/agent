@@ -46,11 +46,16 @@ class OwnerBoundPodman:
         # Python's user/group arguments drop groups before exec without preexec_fn
         # in a multithreaded dispatcher. Neither caller environment nor user bus
         # is inherited. All paths are compiled or derived from installed scope.
-        result = subprocess.run(['/opt/a4diag-target/current/venv/bin/python', '-I', '-m', 'a4diag_target.repair_podman'],
-            input=json.dumps({'identity':self.identity.model_dump(),'action':action,'timeout':timeout_seconds,
-                              'attestation':self.attestation.model_dump()}),
-            text=True, capture_output=True, timeout=timeout_seconds, env={}, cwd='/',
-            user=self.identity.owner_uid, group=self.identity.owner_uid, extra_groups=[])
+        try:
+            result = subprocess.run(['/opt/a4diag-target/current/venv/bin/python', '-I', '-m', 'a4diag_target.repair_podman'],
+                input=json.dumps({'identity':self.identity.model_dump(),'action':action,'timeout':timeout_seconds,
+                                  'attestation':self.attestation.model_dump()}),
+                text=True, capture_output=True, timeout=timeout_seconds, env={}, cwd='/',
+                user=self.identity.owner_uid, group=self.identity.owner_uid, extra_groups=[])
+        except subprocess.TimeoutExpired as error:
+            # Read/admission handlers recognize OSError; after durable intent,
+            # the same timeout still means unknown effect, never no-change.
+            raise TimeoutError('owner_runtime_timeout') from error
         if result.returncode or len(result.stdout) > (131072 if action == 'logs' else 16384):
             raise ValueError('owner_runtime_unavailable')
         value = json.loads(result.stdout)

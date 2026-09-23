@@ -333,8 +333,9 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
         executor = TargetExecutor(verifier=None, policy=current,
             identity_probe=identity_probe, adapter=adapter, plugins=plugins)
         plugin = executor._plugins[request.operation.capability]
+        deadline = time.monotonic() + request.operation.timeout_seconds
         try:
-            admit_effect(plugin, request)
+            admit_effect(plugin, request, deadline=deadline)
         except EffectAdmissionRejected as error:
             store.complete(job_id, state='failed', changed=False,
                 result={'reason':str(error)[:512], 'admission_rejected':True,
@@ -365,6 +366,8 @@ async def run_job(store: JobStore, job_id: str, *, policy, identity_probe, adapt
                     if remaining <= 0:
                         raise ExecutorError('worker_admission_budget_exceeded')
                     result = await asyncio.wait_for(executor._dispatch(plugin, request), timeout=remaining)
+                elif request.operation.capability == 'containers':
+                    result = await executor._dispatch(plugin, request, deadline=deadline)
                 else:
                     result = await executor._dispatch(plugin, request)
             payload = result.model_dump(mode='json')

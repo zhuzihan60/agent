@@ -50,14 +50,23 @@ class ContainerPlugin:
         require_same_container(self.identity, snapshot.identity)
         return snapshot
 
-    def admit_effect(self, request):
+    def admit_effect(self, request, *, deadline=None):
+        import time
         from a4diag_target.repair_admission import EffectAdmissionRejected
+        if deadline is None:
+            deadline = time.monotonic() + request.operation.timeout_seconds
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('container_operation_budget_exhausted')
+            self.adapter.timeout_seconds = min(5, remaining)
             self._snapshot()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('container_operation_budget_exhausted')
         except (ValueError, OSError) as error:
             raise EffectAdmissionRejected(str(error)) from error
 
-    async def dispatch(self, request):
+    async def dispatch(self, request, *, deadline=None):
         import hashlib
         import json
         import os
@@ -67,7 +76,10 @@ class ContainerPlugin:
         from a4diag_target.repair_install import _atomic_file, protected_json
         from a4diag_builtin_plugins.capability_common import PrepareResult, EffectResult, VerifyResult, ReconcileResult
         from a4diag.repair_profiles import profile_digest
-        deadline = time.monotonic() + request.operation.timeout_seconds
+        # The worker supplies the deadline it established before admission.
+        # Standalone prepare/observation calls get their own bounded read budget.
+        if deadline is None:
+            deadline = time.monotonic() + request.operation.timeout_seconds
         def remaining():
             value = deadline - time.monotonic()
             if value <= 0:
