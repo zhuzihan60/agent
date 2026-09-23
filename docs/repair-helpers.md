@@ -4,8 +4,9 @@ The default installation has no repair profiles, no repair helper sockets, and
 `new_write_helpers_enabled: []` in its installer output and
 `/etc/a4diag-target/repair-self-check.json`. Existing 1.0 install configuration
 remains accepted. The production registry now includes the explicitly selected
-`disk-cache` adapter; see [disk workflow](repair-disk.md). Container, APT and
-network repair adapters are not yet registered.
+`disk-cache`, `docker`, and `podman` adapters; see [disk workflow](repair-disk.md)
+and [container workflow](repair-containers.md). APT and network repair adapters
+are not yet registered.
 
 An administrator enables a registered adapter with `repair_profiles`,
 `repair_helpers: [{"profile_id": "...", "adapter": "..."}]`, and literal
@@ -43,7 +44,7 @@ Compiled adapter code is trusted; this is not a sandbox for malicious plugins.
 The independent worker reloads its installed binding and current policy before
 the first effect. Its writable paths come from that same scope. It retains
 ProtectSystem=strict, NoNewPrivileges, private devices/home/tmp, empty Linux
-capability bounds, and AF_UNIX. Its private read-only `/run` denies the systemd
+capability bounds (except Podman's bounded UID/GID credential switch), and AF_UNIX. Its private read-only `/run` denies the systemd
 private socket, system bus, and rootless user buses; only explicitly registered
 capability sockets are bound into it. The dispatcher keeps manager access to
 launch workers. A worker cannot start an unrelated unrestricted unit.
@@ -66,10 +67,13 @@ it cannot borrow the main executor's permissions. Network adapters must derive
 only registered configuration/watchdog state and provide an independent
 restoration mechanism. No generic command/import/property configuration exists.
 
-Rootless adapters currently fail with `rootless_helper_not_wired`. Their task
-must add protected policy/store access for the exact registered UID and prove
-that lifecycle reads and worker effects use that UID. There is no fallback to
-root or caller-provided XDG/DBus environment. Additional APT/network privileged
+Podman uses root-private orchestration and a fixed child that drops to the exact
+registered UID before socket/API access. The child clears supplementary groups
+and all effective/permitted/inheritable/ambient capabilities. The broker gets
+only CAP_SETUID/CAP_SETGID, including the corresponding ambient set needed by
+the systemd sandbox. Other adapters requesting an unimplemented nonzero worker
+UID still fail with `rootless_helper_not_wired`. There is no fallback to root or
+caller-provided XDG/DBus environment. Additional APT/network privileged
 operations require a separately reviewed fixed interface; manager access must
 not be restored to workers by default.
 

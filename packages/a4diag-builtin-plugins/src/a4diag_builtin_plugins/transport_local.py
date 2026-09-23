@@ -178,7 +178,7 @@ class LocalTransport(BaseTransport):
         return [TRANSPORT_HELPER_EXECUTABLE]
 
     async def _perform_read(self, params: ReadParams) -> tuple[str, bool]:
-        if params.kind in (ReadKind.FILE, ReadKind.SERVICE_STATE, ReadKind.SERVICE_LOGS, ReadKind.PROBE):
+        if params.kind in (ReadKind.FILE, ReadKind.SERVICE_STATE, ReadKind.SERVICE_LOGS, ReadKind.PROBE, ReadKind.CONTAINER_STATE, ReadKind.CONTAINER_LOGS):
             return await self._read_via_helper(params)
         identity = await self._probe_identity()
         if params.kind is ReadKind.MACHINE_ID:

@@ -80,6 +80,29 @@ class ServicesConstraints(BaseModel):
     sample_interval_seconds: int = Field(default=5, ge=1, le=5, strict=True)
 
 
+class ContainerConstraints(ServicesConstraints):
+    image_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+    service_unit: str | None = None
+    service_profile_id: str | None = None
+
+    @model_validator(mode='after')
+    def managed_route(self):
+        if (self.service_unit is None) != (self.service_profile_id is None):
+            raise ValueError('complete_service_route_required')
+        if self.service_unit is not None:
+            if not _SERVICE.fullmatch(self.service_unit) or self.service_unit.casefold().startswith(_PROTECTED_SERVICES):
+                raise ValueError('invalid_service_route')
+            _safe_id(self.service_profile_id,'service_profile_id')
+        return self
+
+
+def container_scope(resource):
+    match = re.fullmatch(r'(docker|podman)/(0|[1-9][0-9]{0,9})/([0-9a-f]{64})', resource)
+    if match is None or int(match[2]) >= 2**32-1 or (match[1] == 'docker' and match[2] != '0'):
+        raise ValueError('exact_container_resource_required')
+    return match[1], int(match[2]), match[3]
+
+
 def validate_cache_root(value: str) -> str:
     if (not re.fullmatch(r'/(?:[A-Za-z0-9._+@:-]+/)*[A-Za-z0-9._+@:-]+', value)
             or len(value) > 1024 or len(value.split('/')) > 33
@@ -118,10 +141,10 @@ class RepairProfile(BaseModel):
 
     id: str
     target_id: str
-    capability: Literal["services", "disk"]
+    capability: Literal["services", "disk", "containers"]
     resource: str
     actions: tuple[Literal["start", "restart", "stop", "cleanup", "reset-failed", "reset-failed-start", "reset-failed-restart"], ...] = Field(min_length=1)
-    constraints: ServicesConstraints | DiskConstraints
+    constraints: ServicesConstraints | DiskConstraints | ContainerConstraints
     recovery_check_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
     cooldown_seconds: int = Field(default=600, ge=1, strict=True)
     hourly_limit: int = Field(default=2, ge=1, strict=True)
@@ -141,6 +164,9 @@ class RepairProfile(BaseModel):
         normalized = unicodedata.normalize("NFC", value)
         if info.data.get('capability') == 'disk':
             return validate_cache_root(normalized)
+        if info.data.get('capability') == 'containers':
+            container_scope(normalized)
+            return normalized
         if not _SERVICE.fullmatch(normalized):
             raise ValueError("services resource must be an exact .service unit")
         if normalized.casefold().startswith(_PROTECTED_SERVICES):
@@ -152,7 +178,10 @@ class RepairProfile(BaseModel):
         if self.capability == 'disk':
             if self.actions != ('cleanup',) or not isinstance(self.constraints, DiskConstraints):
                 raise ValueError('invalid_disk_profile')
-        elif 'cleanup' in self.actions or not isinstance(self.constraints, ServicesConstraints):
+        elif self.capability == 'containers':
+            if not set(self.actions) <= {'start','restart'} or not isinstance(self.constraints, ContainerConstraints):
+                raise ValueError('invalid_container_profile')
+        elif 'cleanup' in self.actions or type(self.constraints) is not ServicesConstraints:
             raise ValueError('invalid_service_profile')
         return self
 
@@ -247,7 +276,7 @@ def authorize_profile(
         "unit": profile.resource
     }:
         raise RepairAuthorizationError("profile_parameters_mismatch")
-    if profile.capability == 'disk' and operation.parameters != {}:
+    if profile.capability in ('disk', 'containers') and operation.parameters != {}:
         raise RepairAuthorizationError('profile_parameters_mismatch')
     if operation.verify != {
         "recovery_check_ids": list(profile.recovery_check_ids)

@@ -216,6 +216,8 @@ class ReadKind(StrEnum):
     SERVICE_STATE = "service_state"
     SERVICE_LOGS = "service_logs"
     PROBE = "probe"
+    CONTAINER_STATE = "container_state"
+    CONTAINER_LOGS = "container_logs"
 
 
 def validate_systemd_unit(value: str) -> str:
@@ -231,6 +233,7 @@ class ReadParams(BaseModel):
     path: str | None = None
     unit: str | None = None
     probe_id: str | None = Field(default=None, strict=True)
+    profile_id: str | None = Field(default=None, strict=True)
     output_limit_bytes: int = Field(
         default=DEFAULT_OUTPUT_LIMIT_BYTES,
         ge=1,
@@ -250,13 +253,15 @@ class ReadParams(BaseModel):
     def validate_unit(cls, value: str | None) -> str | None:
         return None if value is None else validate_systemd_unit(value)
 
-    @field_validator("probe_id")
+    @field_validator("probe_id", "profile_id")
     @classmethod
     def validate_probe_id(cls, value: str | None) -> str | None:
         return None if value is None else validate_probe_id(value)
 
     @model_validator(mode="after")
     def validate_kind_path(self) -> ReadParams:
+        if (self.kind in (ReadKind.CONTAINER_STATE,ReadKind.CONTAINER_LOGS)) != (self.profile_id is not None):
+            raise ValueError('profile_id is required only for container reads')
         if self.kind is ReadKind.FILE and self.path is None:
             raise ValueError("path is required for file reads")
         if self.kind is not ReadKind.FILE and self.path is not None:
@@ -640,6 +645,9 @@ class BaseTransport:
         if params.probe_id is not None:
             request.pop("path")
             request["probe_id"] = params.probe_id
+        if params.profile_id is not None:
+            request.pop('path')
+            request['profile_id'] = params.profile_id
         outcome = await self._run_helper(
             self._build_helper_argv(), request,
             timeout_seconds=TRANSPORT_READ_TIMEOUT_SECONDS,

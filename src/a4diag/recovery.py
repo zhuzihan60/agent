@@ -28,7 +28,7 @@ class EvidenceSource(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-    kind: Literal["service_state", "service_logs", "file", "probe"]
+    kind: Literal["service_state", "service_logs", "file", "probe", "container_state", "container_logs"]
     resource: str = Field(min_length=1, max_length=1024)
     initial: bool = True
     max_bytes: int = Field(default=8192, ge=256, le=16384)
@@ -41,7 +41,7 @@ class EvidenceSource(BaseModel):
                 or any(ord(c) < 32 or ord(c) == 127 for c in self.resource)
                 or any(c in self.resource for c in "*?[]")):
                 raise ValueError("file evidence requires an exact absolute POSIX path")
-        elif self.kind == "probe":
+        elif self.kind in ("probe", "container_state", "container_logs"):
             validate_probe_id(self.resource)
         else:
             _service(self.resource)

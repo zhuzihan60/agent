@@ -74,6 +74,14 @@ def run_helper(stdin: BinaryIO, stdout: BinaryIO, *, env: Mapping[str, str], con
     except (KeyError, TypeError, json.JSONDecodeError):
         pass
     destination = EXECUTOR_SOCKET
+    if decoded.get('method') == 'read' and decoded.get('kind') in ('container_state','container_logs'):
+        from a4diag_target.repair_install import helper_route
+        try:
+            destination = helper_route(decoded['profile_id'], routes_path=REPAIR_ROUTES)
+            if destination is None:
+                raise ValueError('container_helper_required')
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise HelperError('repair_route_unavailable') from exc
     try:
         signed_payload = json.loads(str(decoded.get('payload', '')))
     except (ValueError, TypeError):

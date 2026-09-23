@@ -82,6 +82,14 @@ class TargetPolicy(BaseModel):
     allowed_packages: tuple[PackageGrant, ...] = ()
     diagnostic_probes: tuple[LinuxProbe, ...] = ()
     repair_profiles: tuple[RepairProfile, ...] = ()
+    allowed_container_profiles: tuple[str, ...] = ()
+
+    @field_validator('allowed_container_profiles')
+    @classmethod
+    def container_reads(cls, values):
+        if len(values) != len(set(values)) or any(not _SAFE_TARGET.fullmatch(value) for value in values):
+            raise ValueError('invalid_container_read_grants')
+        return values
 
     @field_validator("diagnostic_probes")
     @classmethod

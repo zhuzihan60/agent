@@ -93,11 +93,40 @@ def _disk_plugin(profile):
     return DiskPlugin(profile)
 
 
+def _container_plugin(profile):
+    from a4diag_target.repair_containers import ContainerPlugin
+    return ContainerPlugin(profile)
+
+
+def _container_sandbox(profile, runtime):
+    from a4diag_target.repair_containers import profile_identity, runtime_socket
+    if profile_identity(profile).runtime != runtime:
+        raise ValueError('runtime_adapter_mismatch')
+    # Trusted orchestration remains root-private. Podman API child drops to the
+    # registered owner before connecting; it cannot read policy/key/job stores.
+    return Sandbox(socket_paths=(runtime_socket(profile),))
+
+
 ADAPTERS: dict[str, AdapterSpec] = {
     'disk-cache': AdapterSpec('disk', lambda p: Sandbox(write_paths=(p.resource,)), _disk_plugin),
+    'docker': AdapterSpec('containers', lambda p: _container_sandbox(p, 'docker'), _container_plugin),
+    'podman': AdapterSpec('containers', lambda p: _container_sandbox(p, 'podman'), _container_plugin),
 }
 if set(ADAPTERS) != set(REPAIR_ADAPTER_IDS):
     raise RuntimeError('repair_adapter_catalog_mismatch')
+
+
+class SocketAttestation(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    device: int = Field(ge=0, strict=True)
+    inode: int = Field(gt=0, strict=True)
+    owner_uid: int = Field(ge=0, strict=True)
+
+
+def attest_runtime_socket(path, owner_uid):
+    from a4diag_target.repair_docker import socket_identity
+    device, inode = socket_identity(Path(path), owner_uid)
+    return SocketAttestation(device=device, inode=inode, owner_uid=owner_uid)
 
 
 class HelperBinding(BaseModel):
@@ -105,6 +134,7 @@ class HelperBinding(BaseModel):
     adapter: str
     profile: RepairProfile
     peer_uid: int = Field(ge=0, strict=True)
+    socket_attestation: SocketAttestation | None = None
 
     @field_validator('adapter')
     @classmethod
@@ -185,6 +215,10 @@ def plan_helpers(profiles, selections, *, peer_uid: int) -> tuple[HelperBinding,
         profile = by_id.get(selection['profile_id'])
         if profile is None:
             raise ValueError('helper_profile_missing')
+        if profile.capability == 'containers' and profile.constraints.service_unit is not None:
+            service=by_id.get(profile.constraints.service_profile_id)
+            if service is None or service.capability != 'services' or service.resource != profile.constraints.service_unit or not set(profile.actions) <= set(service.actions):
+                raise ValueError('registered_service_route_required')
         if profile.id in seen_ids or profile.resource in seen_resources:
             raise ValueError('duplicate_helper_scope')
         if profile.capability == 'disk' and not any(
@@ -211,19 +245,28 @@ def plan_helpers(profiles, selections, *, peer_uid: int) -> tuple[HelperBinding,
 
 def sandbox_properties(binding: HelperBinding, *, worker: bool = True) -> tuple[str, ...]:
     scope = binding.spec().sandbox(binding.profile)
+    socket_binds = tuple('BindReadOnlyPaths=' + path for path in scope.socket_paths if worker)
+    if binding.adapter == 'podman':
+        from a4diag_target.repair_containers import profile_identity
+        uid = profile_identity(binding.profile).owner_uid
+        # ProtectHome hides /run/user. Bind ONLY the registered API socket to a
+        # fixed private alias, never the user's runtime directory or manager bus.
+        socket_binds = (f'BindReadOnlyPaths={scope.socket_paths[0]}:/run/a4diag-podman-{uid}.sock',)
     return (
         f'User={scope.run_uid if worker else 0}', f'Group={scope.run_uid if worker else 0}', 'Restart=no',
         'NoNewPrivileges=yes', 'PrivateTmp=yes', 'PrivateDevices=yes',
         'ProtectSystem=strict', 'ProtectHome=yes', 'ProtectKernelTunables=yes',
         'ProtectKernelModules=yes', 'ProtectKernelLogs=yes', 'ProtectControlGroups=yes',
         'RestrictRealtime=yes', 'LockPersonality=yes', 'MemoryDenyWriteExecute=yes',
-        'RestrictAddressFamilies=AF_UNIX', 'CapabilityBoundingSet=',
+        'RestrictAddressFamilies=AF_UNIX',
+        'CapabilityBoundingSet=CAP_SETUID CAP_SETGID' if binding.adapter == 'podman' else 'CapabilityBoundingSet=',
+        *(('AmbientCapabilities=CAP_SETUID CAP_SETGID',) if binding.adapter == 'podman' else ()),
         'ReadOnlyPaths=/etc/a4diag-target /opt/a4diag-target/current',
         'ReadWritePaths=' + ' '.join((str(binding.state), *scope.write_paths)),
         # Only the trusted dispatcher can reach the systemd manager. Workers
         # cannot reach private, system-bus, or rootless user-bus manager routes.
         *(('TemporaryFileSystem=/run:ro',) if worker else ()),
-        *('BindReadOnlyPaths=' + path for path in scope.socket_paths if worker),
+        *socket_binds,
         'MemoryMax=256M', 'TasksMax=32', 'LimitNOFILE=1024',
         'StandardOutput=null', 'StandardError=journal',
     )
@@ -280,6 +323,15 @@ def install_helpers(source: dict, *, root: Path, peer_uid: int):
     """Install exact scope artifacts; caller owns the surrounding transaction."""
     bindings = installation_plan(source, peer_uid=peer_uid)
     ensure_drained(root)
+    registered = []
+    for binding in bindings:
+        if binding.adapter == 'podman':
+            from a4diag_target.repair_containers import profile_identity, runtime_socket
+            identity = profile_identity(binding.profile)
+            attestation = attest_runtime_socket(root / runtime_socket(binding.profile).lstrip('/'), identity.owner_uid)
+            binding = binding.model_copy(update={'socket_attestation':attestation})
+        registered.append(binding)
+    bindings = tuple(registered)
     etc = root / 'etc/a4diag-target/repair-helpers'
     units = root / 'etc/systemd/system'
     states = root / 'var/lib/a4diag-target/repair-helpers'

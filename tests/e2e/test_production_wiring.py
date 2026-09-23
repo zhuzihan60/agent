@@ -28,6 +28,7 @@ def test_signed_controller_to_target_production_path() -> None:
         "target-executor",
     ]
     assert sorted(evidence["plugin_list"]["names"]) == [
+        "capability-containers",
         "capability-disk",
         "capability-files",
         "capability-packages",

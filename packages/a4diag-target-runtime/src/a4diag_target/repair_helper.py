@@ -88,6 +88,39 @@ class RepairHelper:
             if len(payload) > MAX_FRAME_BYTES:
                 raise ExecutorError('request_too_large')
             value = json.loads(payload)
+            if type(value) is dict and value.get('method') == 'read':
+                if (set(value) != {'method','kind','profile_id','limit'}
+                        or value['kind'] not in ('container_state','container_logs') or value['profile_id'] != self.binding.id
+                        or self.binding.profile.capability != 'containers'
+                        or type(value['limit']) is not int or not 1 <= value['limit'] <= 262144):
+                    raise ExecutorError('container_read_invalid')
+                if load_binding(self.binding.id) != self.binding:
+                    raise ExecutorError('helper_binding_changed')
+                policy = current_policy()
+                if self.binding.id not in policy.allowed_container_profiles:
+                    raise ExecutorError('container_read_not_granted')
+                if self.binding.profile.constraints.service_unit is not None:
+                    if value['kind']=='container_logs':
+                        raise ExecutorError('service_route_required:'+self.binding.profile.constraints.service_profile_id)
+                    route=self.binding.profile.constraints
+                    body=canonical_json_bytes({'service_route':{'profile_id':route.service_profile_id,'unit':route.service_unit}})
+                    if len(body)>value['limit']:
+                        raise ExecutorError('container_read_too_large')
+                    return canonical_json_bytes({'content':body.decode(),'truncated':False})
+                from a4diag_target.repair_containers import profile_adapter, profile_identity, require_same_container
+                if value['kind']=='container_logs':
+                    logs = await asyncio.to_thread(profile_adapter(self.binding.profile).logs,
+                        profile_identity(self.binding.profile).container_id,expected_identity=profile_identity(self.binding.profile))
+                    body = logs['content'].encode('utf-8')
+                    return canonical_json_bytes({'content':body[:value['limit']].decode('utf-8','ignore'),
+                        'truncated':logs['truncated'] or len(body)>value['limit']})
+                snapshot = await asyncio.to_thread(profile_adapter(self.binding.profile).inspect,
+                                                  profile_identity(self.binding.profile).container_id)
+                require_same_container(profile_identity(self.binding.profile),snapshot.identity)
+                body = canonical_json_bytes(snapshot.model_dump(mode='json'))
+                if len(body) > value['limit']:
+                    raise ExecutorError('container_read_too_large')
+                return canonical_json_bytes({'content':body.decode(),'truncated':False})
             if type(value) is not dict or not {'payload', 'signature', 'key_fingerprint'} <= set(value):
                 raise ExecutorError('signature_required')
             envelope = SignedTargetRequest.model_validate(value)
@@ -96,6 +129,8 @@ class RepairHelper:
             if fresh != self.binding:
                 raise ExecutorError('helper_binding_changed')
             scope_request(fresh, request)
+            if fresh.profile.capability == 'containers' and fresh.profile.constraints.service_unit is not None:
+                raise ExecutorError('service_route_required:'+fresh.profile.constraints.service_profile_id)
             # Authenticate before opening writable SQLite state on cold start.
             from a4diag_target.disk_reservation import admission_preflight
             admission_preflight(envelope,verifier=TargetVerifier(self._key,replay_store=None,clock=lambda:int(time.time())),

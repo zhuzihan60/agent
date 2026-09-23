@@ -548,6 +548,8 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 state.get("diagnosis", {}),
             )
             frozen = Plan.model_validate(candidate.model_dump(mode="python"))
+            from a4diag.repair_workflow import route_container_plan
+            frozen = route_container_plan(target_for(state), frozen, now=now())
         except Exception as error:
             return {
                 "status": "read_only_no_model",

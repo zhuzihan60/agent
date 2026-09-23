@@ -314,6 +314,11 @@ class TargetExecutor:
         }
 
     async def _dispatch(self, plugin: object, request: TargetRequestType) -> Any:
+        if request.operation.capability == 'containers':
+            from a4diag_target.repair_containers import ContainerPlugin
+            if not isinstance(plugin, ContainerPlugin) or not isinstance(request, TargetRequestV11):
+                raise ExecutorError('container_helper_required')
+            return await plugin.dispatch(request)
         if request.operation.capability == 'disk':
             from a4diag_target.disk_plugin import DiskPlugin
             if not isinstance(plugin, DiskPlugin) or not isinstance(request, TargetRequestV11):

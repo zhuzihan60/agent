@@ -87,7 +87,7 @@ def service_operations(state):
     if not state.get('repair_bindings'):
         return []
     return [(str(i), op) for i,op in enumerate(Plan.model_validate(state['plan']).operations)
-            if str(i) in state['repair_bindings'] and op.capability == 'services' and op.action in RECOVERY_ACTIONS]
+            if str(i) in state['repair_bindings'] and op.capability in ('services','containers') and op.action in RECOVERY_ACTIONS]
 
 
 def observe_services(deps, state, target, phase):
@@ -143,7 +143,8 @@ def observe_services(deps, state, target, phase):
             ready = False
             continue
         try:
-            snapshot, healthy, detail = deps.plugins.collector.service_health(read_target,op,profile,
+            collector = deps.plugins.collector.container_health if op.capability == 'containers' else deps.plugins.collector.service_health
+            snapshot, healthy, detail = collector(read_target,op,profile,
                 timeout_seconds=min(4.,store.remaining(data)))
             stamp = store.monotonic()  # Includes the complete HTTP/RPC duration.
             data.setdefault('evidence',{})[step_id] = {'fault':snapshot.model_dump(mode='json'), 'health':detail}
@@ -155,23 +156,35 @@ def observe_services(deps, state, target, phase):
             reason = 'service_observation_budget_exhausted'
             break
         if phase == 'preflight':
-            if healthy or snapshot.active_state not in ('active','failed','inactive'):
+            container = op.capability == 'containers'
+            if healthy or (not container and snapshot.active_state not in ('active','failed','inactive')):
                 reason = 'service_not_eligible'
                 break
             if previous and stamp-previous[-1]['elapsed_seconds'] > 5:
                 previous = []
             previous.append({'elapsed_seconds':stamp,'healthy':False,
-                             'invocation_id':snapshot.invocation_id,'restart_count':snapshot.n_restarts})
+                             'invocation_id':snapshot.started_at if container else snapshot.invocation_id,
+                             'restart_count':snapshot.restart_count if container else snapshot.n_restarts})
             data['samples'][step_id] = previous[-301:]
             ready &= len(previous) >= 3 and stamp-previous[0]['elapsed_seconds'] >= 10
         else:
-            identity = f'{target.id}:{op.resource}:{snapshot.invocation_id}:{snapshot.main_pid}'
+            container = op.capability == 'containers'
+            identity = (f'{target.id}:{op.resource}:{snapshot.identity.image_digest}:{snapshot.started_at}' if container
+                        else f'{target.id}:{op.resource}:{snapshot.invocation_id}:{snapshot.main_pid}')
             sample = HealthSample(elapsed_seconds=stamp,resource_identity=identity,
-                healthy=healthy and snapshot.active_state=='active' and bool(snapshot.invocation_id),
-                restart_count=snapshot.n_restarts)
+                healthy=healthy and (snapshot.running and not snapshot.oom_killed if container else snapshot.active_state=='active' and bool(snapshot.invocation_id)),
+                restart_count=snapshot.restart_count if container else snapshot.n_restarts)
             last = data['last'].get(step_id)
-            if (not sample.healthy or (last and (last['resource_identity'] != identity
-                    or last['restart_count'] != sample.restart_count))):
+            if last and (last['resource_identity'] != identity or last['restart_count'] != sample.restart_count):
+                reason = 'service_failed_during_observation'
+                break
+            if container and not previous and (not last or not last['healthy']) and detail.get('identity_stable') is not False and snapshot.health=='starting' and snapshot.running and not snapshot.oom_killed:
+                # Known startup is bounded by the original deadline. Establish
+                # identity/restart baseline now, but accrue no healthy duration.
+                data['last'][step_id] = sample.model_dump(mode='json')
+                ready = False
+                continue
+            if not sample.healthy:
                 reason = 'service_failed_during_observation'
                 break
             data['last'][step_id] = sample.model_dump(mode='json')

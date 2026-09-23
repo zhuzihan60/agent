@@ -46,6 +46,29 @@ def resolve_plan(target, plan, *, now):
     return bindings
 
 
+def route_container_plan(target, plan, *, now):
+    """Before policy/freeze/tickets, select only an administrator-linked service.
+
+    This returns a new HIGH-risk plan requiring ordinary independent service
+    grants and approval. A signed container operation is never rewritten.
+    """
+    operations=[]
+    for operation in plan.operations:
+        if operation.capability == 'containers':
+            profile=resolve_repair_profile(target,operation,now=now)
+            if profile is not None and profile.constraints.service_unit is not None:
+                service=next((p for p in target.repair_profiles if p.id==profile.constraints.service_profile_id),None)
+                if service is None or service.capability!='services' or service.resource!=profile.constraints.service_unit:
+                    raise RepairAuthorizationError('registered_service_route_unavailable')
+                operation=Operation(capability='services',action=operation.action,resource=service.resource,
+                    parameters={'unit':service.resource},model_risk=Risk.HIGH,
+                    verify={'recovery_check_ids':list(service.recovery_check_ids)},undo={},
+                    timeout_seconds=operation.timeout_seconds,output_limit_bytes=operation.output_limit_bytes)
+                authorize_profile(service,operation,now=now,presented_digest=profile_digest(service))
+        operations.append(operation)
+    return plan.model_copy(update={'operations':tuple(operations)})
+
+
 def current_profiles(target, plan, bindings, *, now):
     profiles = {}
     for step_id, binding in bindings.items():
