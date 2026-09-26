@@ -33,7 +33,7 @@ from a4diag_builtin_plugins.capability_common import (
     marker_from,
 )
 
-_VERSION = "1.0.0"
+_VERSION = "1.1.0"
 _PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+._-]{0,127}$")
 _PACKAGE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+~:_-]{0,127}$")
 _REPOSITORY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")

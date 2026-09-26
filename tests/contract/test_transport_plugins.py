@@ -15,23 +15,39 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
-from a4diag.domain import Operation, Risk, canonical_json_bytes
+from a4diag.domain import Operation, RepairBinding, Risk, canonical_json_bytes
 from a4diag.plugin_api.manifest import PluginManifest, PluginType
 from a4diag.plugin_api.protocol import (
     MethodKind,
     PluginHost,
     RpcRequest,
+    TicketedEffectParams,
     effect_fields_digest,
 )
 from a4diag.plugin_api.ticket import (
     OperationPhase,
     OperationTicketRequest,
+    OperationTicketRequestV11,
     TicketIssuer,
     TicketVerifier,
+    effect_payload_digest,
 )
-from a4diag.policy_engine import PolicyAuthorization, canonical_operation_digest
+from a4diag.plugin_api.target_protocol import (
+    TargetLifecycle,
+    TargetLifecycleV11,
+    TargetRequest,
+    TargetRequestV11,
+    TargetSigner,
+)
+from a4diag.policy_engine import (
+    PolicyAuthorization,
+    canonical_operation_digest,
+    issue_repair_policy_authorization,
+)
+from a4diag.repair_profiles import RepairProfile, profile_digest
 
 from a4diag_builtin_plugins.transport_common import (
     TRANSPORT_HELPER_EXECUTABLE,
@@ -42,6 +58,7 @@ from a4diag_builtin_plugins.transport_common import (
     RunOutcome,
     TargetIdentity,
     TransportIdentityError,
+    TransportPrepareParams,
     TransportReadError,
     TransportStatus,
     VerifyIdentityParams,
@@ -192,7 +209,7 @@ def execute_params(identity: TargetIdentity, **updates: object) -> ExecuteTypedP
     return ExecuteTypedParams.model_validate(values)
 
 
-def authorization(params: ExecuteTypedParams) -> PolicyAuthorization:
+def authorization(params: TicketedEffectParams) -> PolicyAuthorization:
     unsigned = PolicyAuthorization(
         target_id=params.target_id,
         target_fingerprint=params.target_fingerprint,
@@ -784,6 +801,329 @@ def test_execute_typed_requires_ticket_and_binds_payload() -> None:
         assert accepted.result["ok"] is True
         assert accepted.result["status"] == "applied"
         assert len(runner.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_prepare_typed_preserves_v10_ticket_and_signed_envelope_dispatch() -> None:
+    async def scenario() -> None:
+        runner = FakeRunner()
+        identity = FakeIdentity()
+        operation = make_operation()
+        fingerprint = identity_fingerprint(identity.target_identity())
+        effect_digest = effect_payload_digest({})
+        signed = TargetSigner(Ed25519PrivateKey.generate()).sign(
+            TargetRequest(
+                controller_id="controller-1",
+                target_id="lab",
+                target_fingerprint=fingerprint,
+                transaction_id="tx-legacy",
+                step_id="step-1",
+                lifecycle=TargetLifecycle.PREPARE,
+                operation=operation,
+                marker=None,
+                undo=None,
+                plan_digest="a" * 64,
+                effect_payload_digest=effect_digest,
+                risk=Risk.LOW,
+                approval_id=None,
+                issued_at=100,
+                expires_at=130,
+                nonce="nonce-legacy-transport",
+            )
+        )
+        params = TransportPrepareParams(
+            transaction_id="tx-legacy",
+            step_id="step-1",
+            target_id="lab",
+            target_fingerprint=fingerprint,
+            operation=operation,
+            plan_digest="a" * 64,
+            risk=Risk.LOW,
+            approval_id=None,
+            envelope=signed,
+        )
+        ticket = TicketIssuer(
+            KEY,
+            authorization_key=POLICY_KEY,
+            clock=lambda: 100,
+            ticket_id_factory=lambda: "ticket-legacy-prepare",
+        ).issue(
+            OperationTicketRequest(
+                transaction_id=params.transaction_id,
+                step_id=params.step_id,
+                target_id=params.target_id,
+                target_fingerprint=params.target_fingerprint,
+                operation=params.operation,
+                phase=OperationPhase.PREPARE,
+                effect_payload_digest=effect_digest,
+                plan_digest=params.plan_digest,
+                risk=params.risk,
+                approval_id=params.approval_id,
+            ),
+            authorization(params),
+        )
+        host = PluginHost(
+            build_transport_bindings(
+                local_transport(identity=identity, runner=runner)
+            ),
+            ticket_verifier=TicketVerifier(KEY, ReplayStore(), clock=lambda: 100),
+        )
+
+        response = await host.dispatch(
+            RpcRequest(
+                jsonrpc="2.0",
+                api_version="1.0",
+                id="prepare-legacy",
+                method="prepare_typed",
+                params=params.model_dump(mode="json"),
+                ticket=ticket,
+            )
+        )
+
+        assert response.error is None
+        assert response.result is not None
+        assert response.result["ok"] is True
+        assert len(runner.calls) == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("authorization_kind", "authorization_id"),
+    (("standing", "web"), ("one_shot", "approval-1")),
+)
+def test_prepare_typed_v11_verifies_ticket_and_relays_signed_envelope(
+    authorization_kind: str,
+    authorization_id: str,
+) -> None:
+    async def scenario() -> None:
+        runner = FakeRunner()
+        runner.outcome = RunOutcome(
+            started=True,
+            timed_out=False,
+            returncode=0,
+            stdout=json.dumps({"ok": True, "marker": {"unit": "example.service"}}),
+        )
+        identity = FakeIdentity()
+        operation = make_operation(
+            model_risk=Risk.HIGH,
+            verify={"recovery_check_ids": ["health"]},
+        )
+        profile = RepairProfile(
+            id="web",
+            target_id="lab",
+            capability="services",
+            resource="example.service",
+            actions=("restart",),
+            constraints={},
+            recovery_check_ids=("health",),
+            expires_at=200,
+            standing_authorization=True,
+        )
+        fingerprint = identity_fingerprint(identity.target_identity())
+        authorization = issue_repair_policy_authorization(
+            profile,
+            operation,
+            target_fingerprint=fingerprint,
+            plan_digest="a" * 64,
+            authorization_kind=authorization_kind,
+            authorization_id=authorization_id,
+            now=100,
+            key=POLICY_KEY,
+        )
+        effect_digest = effect_payload_digest({})
+        ticket_request = OperationTicketRequestV11(
+            transaction_id="tx-repair",
+            step_id="step-1",
+            target_id="lab",
+            target_fingerprint=fingerprint,
+            operation=operation,
+            phase=OperationPhase.PREPARE,
+            effect_payload_digest=effect_digest,
+            plan_digest="a" * 64,
+            binding=authorization.binding,
+            authorization_kind=authorization_kind,
+            authorization_id=authorization_id,
+        )
+        ticket = TicketIssuer(
+            KEY,
+            authorization_key=POLICY_KEY,
+            clock=lambda: 100,
+            ticket_id_factory=lambda: f"ticket-{authorization_kind}",
+        ).issue(ticket_request, authorization)
+        signed = TargetSigner(Ed25519PrivateKey.generate()).sign(
+            TargetRequestV11(
+                controller_id="controller-1",
+                target_id="lab",
+                target_fingerprint=fingerprint,
+                transaction_id="tx-repair",
+                step_id="step-1",
+                lifecycle=TargetLifecycleV11.PREPARE,
+                operation=operation,
+                marker=None,
+                undo=None,
+                plan_digest="a" * 64,
+                effect_payload_digest=effect_digest,
+                risk=Risk.HIGH,
+                binding=authorization.binding,
+                authorization_kind=authorization_kind,
+                authorization_id=authorization_id,
+                issued_at=100,
+                expires_at=130,
+                nonce=f"nonce-{authorization_kind}-transport",
+            )
+        )
+        params = TransportPrepareParams(
+            transaction_id="tx-repair",
+            step_id="step-1",
+            target_id="lab",
+            target_fingerprint=fingerprint,
+            operation=operation,
+            plan_digest="a" * 64,
+            risk=Risk.HIGH,
+            approval_id=authorization_id,
+            envelope=signed,
+        )
+        assert effect_fields_digest(params) == effect_digest
+        host = PluginHost(
+            build_transport_bindings(
+                local_transport(identity=identity, runner=runner)
+            ),
+            ticket_verifier=TicketVerifier(KEY, ReplayStore(), clock=lambda: 100),
+        )
+
+        response = await host.dispatch(
+            RpcRequest(
+                jsonrpc="2.0",
+                api_version="1.0",
+                id=f"prepare-{authorization_kind}",
+                method="prepare_typed",
+                params=params.model_dump(mode="json"),
+                ticket=ticket,
+            )
+        )
+
+        assert response.error is None
+        assert response.result is not None
+        assert response.result["ok"] is True
+        assert len(runner.calls) == 1
+        assert json.loads(runner.calls[0]["payload"]) == signed.model_dump(mode="json")
+
+    asyncio.run(scenario())
+
+
+def test_prepare_typed_v11_rejects_signed_profile_metadata_mismatch() -> None:
+    async def scenario() -> None:
+        runner = FakeRunner()
+        identity = FakeIdentity()
+        operation = make_operation(
+            model_risk=Risk.HIGH,
+            verify={"recovery_check_ids": ["health"]},
+        )
+        profile = RepairProfile(
+            id="web",
+            target_id="lab",
+            capability="services",
+            resource="example.service",
+            actions=("restart",),
+            constraints={},
+            recovery_check_ids=("health",),
+            expires_at=200,
+            standing_authorization=True,
+        )
+        fingerprint = identity_fingerprint(identity.target_identity())
+        authorization = issue_repair_policy_authorization(
+            profile,
+            operation,
+            target_fingerprint=fingerprint,
+            plan_digest="a" * 64,
+            authorization_kind="standing",
+            authorization_id="web",
+            now=100,
+            key=POLICY_KEY,
+        )
+        effect_digest = effect_payload_digest({})
+        ticket = TicketIssuer(
+            KEY,
+            authorization_key=POLICY_KEY,
+            clock=lambda: 100,
+            ticket_id_factory=lambda: "ticket-profile-mismatch",
+        ).issue(
+            OperationTicketRequestV11(
+                transaction_id="tx-repair",
+                step_id="step-1",
+                target_id="lab",
+                target_fingerprint=fingerprint,
+                operation=operation,
+                phase=OperationPhase.PREPARE,
+                effect_payload_digest=effect_digest,
+                plan_digest="a" * 64,
+                binding=authorization.binding,
+                authorization_kind="standing",
+                authorization_id="web",
+            ),
+            authorization,
+        )
+        mismatched_binding = RepairBinding(
+            profile_id="other",
+            profile_digest=profile_digest(profile),
+            preconditions_digest=None,
+        )
+        signed = TargetSigner(Ed25519PrivateKey.generate()).sign(
+            TargetRequestV11(
+                controller_id="controller-1",
+                target_id="lab",
+                target_fingerprint=fingerprint,
+                transaction_id="tx-repair",
+                step_id="step-1",
+                lifecycle=TargetLifecycleV11.PREPARE,
+                operation=operation,
+                marker=None,
+                undo=None,
+                plan_digest="a" * 64,
+                effect_payload_digest=effect_digest,
+                risk=Risk.HIGH,
+                binding=mismatched_binding,
+                authorization_kind="standing",
+                authorization_id="web",
+                issued_at=100,
+                expires_at=130,
+                nonce="nonce-profile-mismatch",
+            )
+        )
+        params = TransportPrepareParams(
+            transaction_id="tx-repair",
+            step_id="step-1",
+            target_id="lab",
+            target_fingerprint=fingerprint,
+            operation=operation,
+            plan_digest="a" * 64,
+            risk=Risk.HIGH,
+            approval_id="web",
+            envelope=signed,
+        )
+        host = PluginHost(
+            build_transport_bindings(
+                local_transport(identity=identity, runner=runner)
+            ),
+            ticket_verifier=TicketVerifier(KEY, ReplayStore(), clock=lambda: 100),
+        )
+
+        response = await host.dispatch(
+            RpcRequest(
+                jsonrpc="2.0",
+                api_version="1.0",
+                id="prepare-mismatch",
+                method="prepare_typed",
+                params=params.model_dump(mode="json"),
+                ticket=ticket,
+            )
+        )
+
+        assert response.error is not None
+        assert response.error.data.reason == "profile_mismatch"
+        assert runner.calls == []
 
     asyncio.run(scenario())
 

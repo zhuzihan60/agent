@@ -45,6 +45,29 @@ class SqliteReplayLedger:
         if columns != _COLUMNS:
             self._connection.close()
             raise ReplayLedgerError("schema_invalid")
+        self._connection.execute('CREATE TABLE IF NOT EXISTS replay_jobs (nonce TEXT PRIMARY KEY, job_id TEXT NOT NULL)')
+
+    def record_job(self, nonce: str, job_id: str, *, transaction_id: str, step_id: str) -> None:
+        with self._lock:
+            try:
+                self._connection.execute('BEGIN IMMEDIATE')
+                row = self._connection.execute('SELECT transaction_id, step_id FROM replay WHERE nonce=?', (nonce,)).fetchone()
+                old = self._connection.execute('SELECT job_id FROM replay_jobs WHERE nonce=?', (nonce,)).fetchone()
+                if row != (transaction_id, step_id) or (old is not None and old[0] != job_id):
+                    raise ReplayLedgerError('job_binding_mismatch')
+                self._connection.execute('INSERT OR IGNORE INTO replay_jobs VALUES (?, ?)', (nonce, job_id))
+                self._connection.commit()
+            except sqlite3.Error as error:
+                self._connection.rollback()
+                raise ReplayLedgerError('ledger_unavailable') from error
+            except BaseException:
+                self._connection.rollback()
+                raise
+
+    def job_id(self, nonce: str) -> str | None:
+        with self._lock:
+            row = self._connection.execute('SELECT job_id FROM replay_jobs WHERE nonce=?', (nonce,)).fetchone()
+            return None if row is None else row[0]
 
     def consume(self, nonce: str, expires_at: int) -> bool:
         return self.consume_request(

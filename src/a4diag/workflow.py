@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,11 +33,13 @@ from a4diag.plugin_api.ticket import (
     OperationTicketRequest,
     TicketIssuer,
     effect_payload_digest,
+    OperationTicketV11,
 )
 from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import PolicyAuthorization, PolicyEngine
 from a4diag.settings import AgentSettings
 from a4diag.redaction import redact
+from a4diag.repair_jobs import RepairJobResponse
 from a4diag.transaction_store import (
     DispatchStatus,
     EffectPhase,
@@ -119,7 +122,7 @@ class ExecutorPort(Protocol):
         operation: Operation,
         marker: dict[str, JsonValue],
         ticket: str,
-    ) -> StepResult: ...
+    ) -> StepResult | RepairJobResponse: ...
 
     def verify(
         self,
@@ -191,6 +194,8 @@ class WorkflowDependencies:
     clock: Callable[[], int] = lambda: int(time.time())
     approval_ttl_seconds: int = 900
     ticket_ttl_seconds: int = 30
+    settings_loader: Callable[[], AgentSettings] | None = None
+    service_observer: Callable | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.settings, AgentSettings):
@@ -220,6 +225,7 @@ class WorkflowDependencies:
 
 
 class AgentState(TypedDict, total=False):
+    service_phase: str
     event_id: str
     transaction_id: str
     target_id: str
@@ -256,6 +262,9 @@ class AgentState(TypedDict, total=False):
     error: str
     audit_events: list[dict[str, JsonValue]]
     report: dict[str, JsonValue]
+    repair_bindings: dict[str, dict[str, str]]
+    effect_kinds: dict[str, str]
+    target_registration: dict[str, JsonValue]
 
 
 def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
@@ -266,8 +275,11 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
 
     def target_for(state: AgentState) -> TargetConfig:
         target_id = state.get("target_id", "")
-        for target in deps.settings.targets:
+        settings = deps.settings_loader() if deps.settings_loader is not None else deps.settings
+        for target in settings.targets:
             if target.id == target_id:
+                from a4diag.repair_workflow import check_target_registration
+                check_target_registration(state, target)
                 return target
         raise LookupError(f"unregistered target: {target_id}")
 
@@ -336,7 +348,11 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 raise PermissionError("approval_expired_or_changed")
             approval_digest = approval.plan_digest
             approval_id = approval.id
-        decision = deps.policy.evaluate(
+        if state.get('repair_bindings'):
+            from a4diag.repair_workflow import plan_authorization
+            plan_authorization(deps, state, target, candidate, now=now())
+        settings = deps.settings_loader() if deps.settings_loader is not None else deps.settings
+        decision = deps.policy.with_settings(settings).evaluate(
             target,
             candidate,
             critic_risk=Risk(state["critic_risk"]),
@@ -358,10 +374,19 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         phase: OperationPhase,
         effect_fields: dict[str, JsonValue] | None = None,
     ) -> tuple[TargetConfig, str]:
+        if state.get('repair_bindings') and deps.transactions.repair_cancelled(state['transaction_id']):
+            raise PermissionError('repair_cancelled')
         if phase in {OperationPhase.PREPARE, OperationPhase.APPLY}:
             ready = decision_readiness(state)
             if not ready.ok:
                 raise PermissionError(ready.status)
+        if step_id in state.get('repair_bindings', {}):
+            from a4diag.repair_workflow import issue_repair_ticket
+            target = target_for(state)
+            if deps.plugins.collector.verify_identity(target) != state['target_fingerprint']:
+                raise PermissionError('target_identity_changed')
+            return target, issue_repair_ticket(deps, state, target, operation, step_id,
+                                               phase, effect_fields or {}, now=now())
         target, authorization = write_authorization(state, operation)
         request = OperationTicketRequest(
             transaction_id=state["transaction_id"],
@@ -421,7 +446,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 "error": "target_identity_missing",
                 "audit_events": audit(state, "target_identity_missing"),
             }
+        from a4diag.repair_workflow import target_registration
         return {
+            'target_registration': target_registration(target),
             "target_fingerprint": fingerprint,
             "audit_events": audit(state, "target_resolved"),
         }
@@ -491,6 +518,10 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "evidence_unavailable_or_unresolved"}
         if missing:
             return {"diagnosis": diagnosis, "missing_evidence": missing, "status": "collecting_evidence"}
+        if callable(getattr(deps.plugins.model, "assess_diagnosis", None)) and diagnosis.get("grounding_status") == "insufficient_evidence":
+            return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "diagnostic_evidence_missing"}
+        if callable(getattr(deps.plugins.model, "assess_diagnosis", None)) and diagnosis.get("grounding_status") == "counterevidence_present":
+            return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "diagnostic_counterevidence_present"}
         confidence = diagnosis.get("confidence")
         if type(confidence) not in {int, float} or not target.minimum_confidence <= confidence <= 1:
             return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "diagnostic_confidence_too_low"}
@@ -521,6 +552,8 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 state.get("diagnosis", {}),
             )
             frozen = Plan.model_validate(candidate.model_dump(mode="python"))
+            from a4diag.repair_workflow import route_container_plan
+            frozen = route_container_plan(target_for(state), frozen, now=now())
         except Exception as error:
             return {
                 "status": "read_only_no_model",
@@ -545,10 +578,21 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
 
     def decision_readiness(state: AgentState) -> StepResult:
         target = target_for(state)
-        confidence = state.get("diagnosis", {}).get("confidence")
+        diagnosis = state.get("diagnosis", {})
+        reassess = getattr(deps.plugins.model, "assess_diagnosis", None)
+        if callable(reassess):
+            try:
+                diagnosis = reassess(target, model_evidence(state), diagnosis, now=now())
+            except Exception:
+                return StepResult(ok=False, status="diagnostic_evidence_missing")
+            if diagnosis.get("grounding_status") == "insufficient_evidence":
+                return StepResult(ok=False, status="diagnostic_evidence_missing")
+            if diagnosis.get("grounding_status") == "counterevidence_present":
+                return StepResult(ok=False, status="diagnostic_counterevidence_present")
+        confidence = diagnosis.get("confidence")
         if type(confidence) not in {int, float} or not target.minimum_confidence <= confidence <= 1:
             return StepResult(ok=False, status="diagnostic_confidence_too_low")
-        if state.get("diagnosis", {}).get("missing_evidence"):
+        if diagnosis.get("missing_evidence"):
             return StepResult(ok=False, status="diagnostic_evidence_missing")
         validate_recovery = getattr(deps.plugins.collector, "validate_recovery", None)
         if plan_for(state).operations and callable(validate_recovery):
@@ -585,14 +629,18 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 "error": "target_fingerprint_mismatch",
                 "audit_events": audit(state, "target_fingerprint_mismatch"),
             }
-        decision = deps.policy.evaluate(
-            target_for(state),
-            plan_for(state),
-            critic_risk=Risk(state["critic_risk"]),
-            approval_digest=None,
-            approval_id=None,
-        )
+        from a4diag.repair_workflow import resolve_plan, plan_authorization
+        try:
+            bindings = resolve_plan(target_for(state), candidate, now=now())
+            decision, _, _, _ = plan_authorization(deps, {**state, 'repair_bindings': bindings},
+                target_for(state), candidate, now=now(), require_approval=False)
+        except Exception as error:
+            return {'status': 'policy_denied', 'risk': Risk.HIGH.value,
+                    'digest': plan_digest(candidate), 'policy_reason': str(error), 'error': str(error)}
         update: AgentState = {
+            'repair_bindings': bindings,
+            'effect_kinds': {str(i): deps.registry.require_operation(op.capability, op.action).effect_kind
+                             for i, op in enumerate(candidate.operations)} if decision.reason in {'approved', 'approval_required', 'auto_execute_low'} else {},
             "digest": decision.digest,
             "risk": decision.risk.value,
             "policy_reason": decision.reason,
@@ -711,6 +759,13 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     def approval_gate(state: AgentState) -> AgentState:
         if Risk(state["risk"]) is Risk.LOW:
             return {}
+        if state.get('status') == 'policy_allowed' and state.get('repair_bindings'):
+            from a4diag.repair_workflow import plan_authorization
+            try:
+                plan_authorization(deps, state, target_for(state), plan_for(state), now=now())
+                return {}
+            except Exception as error:
+                return {'status': 'policy_denied', 'error': str(error)}
 
         interrupt(
             {
@@ -800,7 +855,44 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             ),
         }
 
+    def service_gate(state: AgentState) -> AgentState:
+        from a4diag.repair_verification import service_operations, observe_services
+        from a4diag.repair_workflow import plan_authorization, reserve_attempt
+        if not service_operations(state):
+            return {'status':'policy_allowed'}
+        candidate = plan_for(state)
+        transaction_id = state['transaction_id']
+        try:
+            deps.transactions.get(transaction_id)
+        except UnknownTransactionError:
+            deps.transactions.begin(transaction_id,state['target_id'],state['digest'],
+                expected_operations=tuple(canonical_json_bytes(op.model_dump(mode='json')).decode() for op in candidate.operations),now=now())
+        try:
+            target = target_for(state)
+            if deps.transactions.repair_cancelled(transaction_id):
+                raise PermissionError('repair_cancelled')
+            if deps.plugins.collector.verify_identity(target) != state['target_fingerprint']:
+                raise PermissionError('target_identity_changed')
+            plan_authorization(deps,state,target,candidate,now=now())
+            outcome, evidence = (deps.service_observer or observe_services)(deps,state,target,'preflight')
+            if outcome == 'ready':
+                # Claim the one resource attempt before PREPARE as well as APPLY.
+                for step_id, op in service_operations(state):
+                    reserve_attempt(deps,state,target,op,step_id,now=now())
+                return {'status':'policy_allowed','service_phase':'ready'}
+            if outcome == 'pending':
+                return {'status':'service_observing','service_phase':'preflight',
+                        'recovery_result':evidence}
+            error = evidence.get('reason','service_not_eligible')
+        except Exception as exc:
+            error = str(exc)
+        deps.transactions.transition(transaction_id,TransactionStatus.FAILED,now=now())
+        return {'status':'failed','service_phase':'done','error':error}
+
     def prepare(state: AgentState) -> AgentState:
+        from a4diag.disk_workflow import is_disk_plan, run_disk_workflow
+        if is_disk_plan(state):
+            return run_disk_workflow(deps, state, target_for=target_for, ready=decision_readiness)
         transaction_id = state["transaction_id"]
 
         def invalid_durable_evidence(error: str) -> AgentState:
@@ -988,6 +1080,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     def reconcile_unknown(state: AgentState) -> AgentState:
         pending = deps.transactions.pending_dispatch(state["transaction_id"])
         if pending is None:
+            from a4diag.repair_workflow import completed_repair_dispatch
+            pending = completed_repair_dispatch(deps, state)
+        if pending is None:
             return {
                 "status": "execution_unknown",
                 "error": "missing_dispatch_intent",
@@ -999,6 +1094,42 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         if pending.phase is not EffectPhase.PREPARE:
             operation, marker = prepared_for(state, index)
         operation_phase = OperationPhase(pending.phase.value)
+        if pending.phase is EffectPhase.APPLY and str(index) in state.get('repair_bindings', {}):
+            from a4diag.repair_workflow import observe_job, job_result, plan_authorization
+            try:
+                job = observe_job(deps, state, target_for(state), str(index), now=now())
+                result = job_result(job)
+                if deps.transactions.repair_cancelled(state['transaction_id']):
+                    return {'status': 'execution_unknown', 'reconcile_attempted': True,
+                            'error': 'repair_cancelled', 'audit_events': audit(state, 'cancelled_repair_observed',
+                                job=job.model_dump(mode='json'))}
+                if result.status == 'unknown':
+                    return {'status': 'execution_unknown', 'reconcile_attempted': True,
+                            'error': 'repair_job_pending', 'audit_events': audit(state, 'repair_job_observed',
+                                job=job.model_dump(mode='json'))}
+                # Observation remains available after revocation; advancing the
+                # workflow toward verification/undo still needs current grants.
+                plan_authorization(deps, state, target_for(state), plan_for(state), now=now())
+                if pending.status is DispatchStatus.DISPATCHED:
+                    deps.transactions.complete_result_dispatch(pending.dispatch_id, phase='apply',
+                        status='succeeded' if result.ok else 'failed', payload=result.model_dump(mode='json'), now=now())
+            except Exception as error:
+                return {'status': 'execution_unknown', 'reconcile_attempted': True,
+                        'error': f'repair_job_observation:{type(error).__name__}'}
+            applied = sorted(set(state.get('applied_steps', [])) | {index})
+            transaction_status = deps.transactions.get(state['transaction_id']).status
+            if not result.ok:
+                if transaction_status is TransactionStatus.ROLLBACK_RUNNING:
+                    update = {'status': 'rollback_running', 'applied_steps': applied,
+                              'undo_steps': list(reversed(applied))}
+                else:
+                    update = begin_rollback(state, applied, reason='repair_job_failed')
+                update['reconcile_attempted'] = True
+                return update
+            if transaction_status is TransactionStatus.EXECUTION_UNKNOWN:
+                deps.transactions.resume_repair_execution(state['transaction_id'], now=now())
+            return {'status': 'executing', 'applied_steps': applied, 'verify_step': 0,
+                    'reconcile_attempted': True, 'incomplete_after_reconcile': False}
         try:
             reconciled = ReconcileEffect.model_validate(
                 deps.plugins.executor.reconcile(
@@ -1079,6 +1210,8 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             except Exception:
                 restored = StepResult(ok=False, status="unknown")
             if restored.ok:
+                from a4diag.repair_workflow import record_effect
+                record_effect(deps, state, str(index), True, restored=True)
                 deps.transactions.complete_result_dispatch(
                     pending.dispatch_id,
                     phase="undo",
@@ -1129,6 +1262,8 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                     "reconcile_attempted": True,
                 }
         if result in {"applied", "partial"}:
+            from a4diag.repair_workflow import record_effect
+            record_effect(deps, state, str(index), True)
             deps.transactions.complete_result_dispatch(
                 pending.dispatch_id,
                 phase="apply",
@@ -1177,6 +1312,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         }
 
     def apply_step(state: AgentState) -> AgentState:
+        from a4diag.disk_workflow import is_disk_plan, run_disk_workflow
+        if is_disk_plan(state):
+            return run_disk_workflow(deps, state, target_for=target_for, ready=decision_readiness)
         if state.get("status") == "execution_unknown":
             return reconcile_unknown(state)
 
@@ -1231,6 +1369,9 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 OperationPhase.APPLY,
                 {"marker": marker},
             )
+            if step_id in state.get('repair_bindings', {}):
+                from a4diag.repair_workflow import reserve_attempt
+                reserve_attempt(deps, state, target, operation, step_id, now=now())
         except Exception as error:
             deps.transactions.mark_unknown(state["transaction_id"], now=now())
             return {
@@ -1248,11 +1389,23 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             now=now(),
         )
         try:
-            result = StepResult.model_validate(
-                deps.plugins.executor.apply(
-                    target, step_id, operation, marker, ticket
-                )
-            )
+            from a4diag.repair_workflow import record_effect
+            record_effect(deps, state, step_id, None)
+            from a4diag.writer_holds import controller_mutation_guard
+            with controller_mutation_guard(deps, state, target, operation, step_id, marker, ticket):
+                response = deps.plugins.executor.apply(target, step_id, operation, marker, ticket)
+            from a4diag.repair_jobs import RepairJobResponse
+            if isinstance(response, RepairJobResponse):
+                from a4diag.repair_workflow import record_job, job_result
+                result = job_result(record_job(deps, state, response, now=now()))
+            else:
+                result = StepResult.model_validate(response)
+                record_effect(deps, state, step_id,
+                    result.data.get('changed', True) if result.status != 'unknown' else None)
+        except asyncio.CancelledError:
+            if step_id in state.get('repair_bindings', {}):
+                deps.transactions.cancel_repair(state['transaction_id'], now=now())
+            raise
         except Exception as error:
             deps.transactions.record_result(
                 state["transaction_id"],
@@ -1370,8 +1523,28 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
         durable_applied = set(durable_completed_results(state, EffectPhase.APPLY))
         applied = sorted(durable_applied | set(state.get("applied_steps", [])))
         completed_undos = durable_completed_results(state, EffectPhase.UNDO)
+        def effect_kind(index):
+            # Historical checkpoints retain their original legacy behavior.
+            return state.get('effect_kinds', {}).get(str(index), 'restorable')
+
+        def changed(index):
+            for job in deps.transactions.repair_jobs(state['transaction_id']):
+                if job.step_id == str(index):
+                    return job.changed
+            result = durable_completed_results(state, EffectPhase.APPLY).get(index)
+            if result is not None:
+                payload = json.loads(result.payload_json)
+                data = payload.get('data', {})
+                if isinstance(data, dict) and type(data.get('changed')) is bool:
+                    return data['changed']
+            return True
+
+        from a4diag.repair_verification import service_operations
+        recovery_service_steps = {int(step_id) for step_id, _ in service_operations(state)}
+        undoable = [index for index in applied if changed(index) is not False
+                    and effect_kind(index) != 'irreversible' and index not in recovery_service_steps]
         remaining = [
-            index for index in reversed(applied) if index not in completed_undos
+            index for index in reversed(undoable) if index not in completed_undos
         ]
         restored_steps = list(state.get("restored_steps", []))
         rollback_failed = state.get("rollback_failed", False)
@@ -1379,7 +1552,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
 
         awaiting_restoration = [
             index
-            for index in reversed(applied)
+            for index in reversed(undoable)
             if index in completed_undos and index not in restored_steps
         ]
         if awaiting_restoration:
@@ -1402,6 +1575,8 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             except Exception:
                 restored = StepResult(ok=False, status="unknown")
             restored_steps.append(index)
+            from a4diag.repair_workflow import record_effect
+            record_effect(deps, state, str(index), changed(index), restored=restored.ok)
             return {
                 "status": "rollback_running",
                 "applied_steps": applied,
@@ -1450,16 +1625,18 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 now=now(),
             )
             try:
-                result = StepResult.model_validate(
-                    deps.plugins.executor.undo(
-                        target,
-                        step_id,
-                        operation,
-                        marker,
-                        operation.undo,
-                        ticket,
+                from a4diag.writer_holds import controller_mutation_guard
+                with controller_mutation_guard(deps, state, target, operation, step_id, marker, ticket):
+                    result = StepResult.model_validate(
+                        deps.plugins.executor.undo(
+                            target,
+                            step_id,
+                            operation,
+                            marker,
+                            operation.undo,
+                            ticket,
+                        )
                     )
-                )
             except Exception as error:
                 deps.transactions.record_result(
                     state["transaction_id"],
@@ -1530,6 +1707,8 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 restored = StepResult(ok=False, status="unknown")
             remaining.pop(0)
             restored_steps.append(index)
+            from a4diag.repair_workflow import record_effect
+            record_effect(deps, state, str(index), changed(index), restored=restored.ok)
             return {
                 "status": "rollback_running",
                 "applied_steps": applied,
@@ -1547,19 +1726,52 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
                 ),
             }
 
-        if rollback_unknown:
+        from a4diag.repair_effects import RepairEffect, rollback_outcome
+        effects = [RepairEffect(kind=effect_kind(i), changed=changed(i),
+                   restoration_verified=i in restored_steps and not rollback_failed and not rollback_unknown)
+                   for i in applied]
+        outcome = rollback_outcome(effects)
+        if rollback_unknown or outcome == 'rollback_unknown':
             terminal = TransactionStatus.ROLLBACK_UNKNOWN
-        elif rollback_failed:
+        elif rollback_failed or outcome == 'rollback_partial':
             terminal = TransactionStatus.ROLLBACK_PARTIAL
         else:
             terminal = TransactionStatus.ROLLBACK_SUCCEEDED
         deps.transactions.transition(state["transaction_id"], terminal, now=now())
         return {
             "status": terminal.value,
-            "audit_events": audit(state, "rollback_finished", result=terminal.value),
+            "audit_events": audit(state, "rollback_finished", result=terminal.value,
+                                  effects=[e.model_dump(mode='json') for e in effects]),
         }
 
     def final_verify(state: AgentState) -> AgentState:
+        from a4diag.repair_verification import service_operations, observe_services
+        if service_operations(state):
+            try:
+                target=target_for(state)
+                if deps.plugins.collector.verify_identity(target) != state['target_fingerprint']:
+                    raise PermissionError('target_identity_changed')
+                outcome,evidence=(deps.service_observer or observe_services)(deps,state,target,'post')
+            except Exception as exc:
+                outcome,evidence='unknown',{'reason':'service_observation_unavailable:'+type(exc).__name__}
+            if outcome == 'pending':
+                return {'status':'service_observing','service_phase':'post','recovery_result':evidence}
+            if outcome == 'unknown':
+                deps.transactions.transition(state['transaction_id'],TransactionStatus.ROLLBACK_RUNNING,now=now())
+                deps.transactions.transition(state['transaction_id'],TransactionStatus.ROLLBACK_UNKNOWN,now=now())
+                return {'status':'rollback_unknown','service_phase':'done','recovery_result':evidence,
+                        'error':evidence.get('reason','service_observation_unknown')}
+            if outcome == 'failed':
+                # Service restart/reset cannot restore process memory or counters.
+                # Retain the changed effect and stop: never auto-restart on relapse.
+                update=begin_rollback(state,list(state.get('applied_steps',[])),reason='service_observation_failed')
+                update.update(service_phase='done',recovery_result=evidence,
+                              error=evidence.get('reason','service_observation_failed'))
+                return update
+            if outcome == 'ready':
+                deps.transactions.transition(state['transaction_id'],TransactionStatus.SUCCEEDED,now=now())
+                return {'status':'succeeded','service_phase':'done','recovery_result':evidence,
+                        'audit_events':audit(state,'service_observation_passed')}
         try:
             target = target_for(state)
             fingerprint = deps.plugins.collector.verify_identity(target)
@@ -1659,6 +1871,7 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     graph.add_node("final_verify", final_verify)
     graph.add_node("report", report)
     graph.add_node("close", close)
+    graph.add_node('service_gate',service_gate)
 
     graph.add_edge(START, "ingest")
     graph.add_conditional_edges(
@@ -1712,10 +1925,11 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
     )
     graph.add_conditional_edges(
         "approval_gate",
-        lambda state: "prepare"
+        lambda state: "service_gate"
         if state.get("status") == "policy_allowed"
         else "report",
     )
+    graph.add_conditional_edges('service_gate',lambda state:'prepare' if state.get('status')=='policy_allowed' else 'report')
     graph.add_conditional_edges(
         "prepare",
         lambda state: "apply_step"
@@ -1800,6 +2014,22 @@ def run_event(
             raise ValueError("resume requires transaction_id")
         bind_transaction(transaction_id)
         config = {"configurable": {"thread_id": transaction_id}}
+        # The compiled disk runner owns its staged/finally recovery frontier.
+        # Never pass a partial disk plan through legacy prepare-all recovery.
+        from a4diag.disk_workflow import is_disk_plan, staged_transaction
+        snapshot = graph.get_state(config)
+        if dependencies is not None and snapshot.values.get('service_phase') in ('preflight','post'):
+            # Resume only the persisted service observation frontier, never APPLY.
+            phase=snapshot.values['service_phase']
+            graph.update_state(config,{'status':'policy_allowed'} if phase=='preflight' else {},
+                               as_node='approval_gate' if phase=='preflight' else 'next_or_undo')
+            return cast(AgentState,graph.invoke(None,config=config))
+        if dependencies is not None and is_disk_plan(snapshot.values):
+            with dependencies.transactions._connect() as db:
+                disk_owned = staged_transaction(db, transaction_id)
+            if disk_owned:
+                graph.update_state(config, {'status':'execution_unknown', 'reconcile_attempted':False}, as_node='report')
+                return cast(AgentState, graph.invoke(None, config=config))
         pending = None
         recovery_action = None
         recovery_error = None
@@ -1847,7 +2077,8 @@ def run_event(
                                 or claim.step_id != dispatch.step_id
                                 or claim.phase.value != dispatch.phase.value
                                 or claim.risk.value != values.get("risk")
-                                or claim.approval_id != values.get("approval_id")
+                                or (not isinstance(claim, OperationTicketV11)
+                                    and claim.approval_id != values.get("approval_id"))
                             ):
                                 raise ValueError("recovery_dispatch_mismatch")
                             effect_fields: dict[str, JsonValue] = {}
@@ -1862,6 +2093,14 @@ def run_event(
                         restore(target, plan, tuple(claims))
                     except Exception:
                         recovery_error = "invalid_recovery_context"
+        if (dependencies is not None and pending is None and recovery_error is None
+            and recovery_action in {RecoveryAction.RECONCILE, RecoveryAction.RESUME, RecoveryAction.ROLLBACK}
+            and graph.get_state(config).values.get('status') == 'execution_unknown'):
+            from a4diag.repair_workflow import completed_repair_dispatch
+            try:
+                pending = completed_repair_dispatch(dependencies, graph.get_state(config).values)
+            except Exception:
+                recovery_error = 'invalid_completed_repair_context'
         if recovery_error is not None:
             graph.update_state(config, {
                 "status": "execution_unknown", "error": recovery_error,

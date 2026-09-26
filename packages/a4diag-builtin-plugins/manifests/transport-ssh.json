@@ -1,13 +1,14 @@
 {
   "name": "transport-ssh",
   "plugin_type": "transport",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "api_min": "1.0",
   "api_max": "1.0",
   "executable": "a4diag_builtin_plugins.transport_ssh:main",
   "socket": "/run/a4diag/transport-ssh.sock",
   "config_schema": "schemas/transport-ssh.json",
   "operations": [],
+  "rpc_methods": ["health", "describe", "capability_probe", "verify_identity", "read", "execute_typed", "prepare_typed", "apply_typed", "verify_typed", "undo_typed", "reconcile_typed", "query_job_typed", "confirm_job_typed"],
   "permissions": [
     "read:machine-id",
     "read:os-release",

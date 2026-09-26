@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import time
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,9 +57,14 @@ class AuditWriter:
         self._last_hash = GENESIS_HASH
         self._sequence = 0
         self._fd: int | None = None
+        self._guard = threading.RLock()
         self._startup()
 
     def append(self, event: Mapping[str, JsonValue]) -> int:
+        with self._guard:
+            return self._append(event)
+
+    def _append(self, event: Mapping[str, JsonValue]) -> int:
         """Append one chained, fsynced canonical record; returns its sequence."""
         if self._read_only:
             raise AuditError("audit_chain_broken")
@@ -67,6 +73,14 @@ class AuditWriter:
         event_name = event.get("event")
         if type(event_name) is not str or not event_name:
             raise AuditError("event_name_required")
+        if event.get('result', event.get('status')) == 'rollback_succeeded' and 'effects' in event:
+            from a4diag.repair_effects import RepairEffect, rollback_outcome
+            try:
+                truthful = rollback_outcome([RepairEffect.model_validate(e) for e in event['effects']])
+            except (TypeError, ValueError) as error:
+                raise AuditError('invalid_effect_evidence') from error
+            if truthful != 'rollback_succeeded':
+                raise AuditError('effect_outcome_mismatch')
         if self._read_last_hash() != self._last_hash:
             self._read_only = True
             raise AuditError("audit_chain_broken")

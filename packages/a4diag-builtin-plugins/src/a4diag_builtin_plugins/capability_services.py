@@ -9,9 +9,10 @@ recorded state and reconcile can distinguish a restart from other changes.
 from __future__ import annotations
 
 import re
+import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from a4diag_builtin_plugins.capability_common import (
     BaseCapabilityPlugin,
@@ -32,13 +33,53 @@ from a4diag_builtin_plugins.capability_common import (
     marker_from,
 )
 
-_VERSION = "1.0.0"
+_VERSION = "1.1.0"
 SYSTEMCTL_EXECUTABLE = "/usr/bin/systemctl"
 _UNIT_NAME = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9@._-]{0,255}\.(service|socket|timer|target|mount|path)$"
 )
-_ACTIONS = frozenset({"restart", "start", "stop", "enable", "disable"})
+_ACTIONS = frozenset({"restart", "start", "stop", "enable", "disable", "reset-failed", "reset-failed-start", "reset-failed-restart"})
 _RUNTIME_ACTIONS = frozenset({"restart", "start", "stop"})
+FAULT_PROPERTIES = ('ActiveState', 'SubState', 'InvocationID', 'MainPID', 'ExecMainStatus', 'Result', 'NRestarts')
+
+
+class ServiceFaultSnapshot(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    active_state: Literal['active', 'inactive', 'failed', 'activating', 'deactivating', 'reloading', 'maintenance', 'refreshing']
+    sub_state: str = Field(min_length=1, max_length=256)
+    invocation_id: str = Field(max_length=256)
+    main_pid: int = Field(ge=0, strict=True)
+    exec_main_status: int = Field(ge=0, strict=True)
+    result: str = Field(min_length=1, max_length=256)
+    n_restarts: int = Field(ge=0, strict=True)
+    observed_at: int = Field(ge=0, strict=True)
+
+    @model_validator(mode='after')
+    def valid_identity(self):
+        if self.active_state == 'active' and (not self.invocation_id or self.main_pid == 0):
+            raise ValueError('service_identity_unavailable')
+        for value in (self.sub_state, self.invocation_id, self.result):
+            if any(ord(c)<32 or ord(c)==127 for c in value) or value in ('unknown', '[not set]'):
+                raise ValueError('service_evidence_unavailable')
+        return self
+
+
+def parse_service_fault_snapshot(output: str, observed_at: int) -> ServiceFaultSnapshot:
+    values = {}
+    for line in output.splitlines():
+        key, sep, value = line.partition('=')
+        if not sep or key not in FAULT_PROPERTIES or key in values:
+            raise ValueError('service_evidence_unavailable')
+        values[key] = value
+    if set(values) != set(FAULT_PROPERTIES):
+        raise ValueError('service_evidence_unavailable')
+    for key in ('MainPID', 'ExecMainStatus', 'NRestarts'):
+        if not re.fullmatch(r'[0-9]{1,20}', values[key]):
+            raise ValueError('service_evidence_unavailable')
+        values[key] = int(values[key])
+    return ServiceFaultSnapshot(active_state=values['ActiveState'], sub_state=values['SubState'],
+        invocation_id=values['InvocationID'], main_pid=values['MainPID'], exec_main_status=values['ExecMainStatus'],
+        result=values['Result'], n_restarts=values['NRestarts'], observed_at=observed_at)
 
 
 class ServiceMarker(BaseModel):
@@ -46,7 +87,7 @@ class ServiceMarker(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    action: Literal["restart", "start", "stop", "enable", "disable"]
+    action: Literal["restart", "start", "stop", "enable", "disable", "reset-failed", "reset-failed-start", "reset-failed-restart"]
     unit: str
     prior: ServiceState
 
@@ -111,16 +152,28 @@ class ServicesPlugin(BaseCapabilityPlugin):
         self._require_action(marker.action)
         if marker.action != params.operation.action:
             raise CapabilityError("marker_action_mismatch")
-        outcome = await self._run(service_action_argv(marker.action, marker.unit), params)
-        if outcome.returncode != 0:
-            return EffectResult(ok=False, changed=False, reason="command_failed")
-        return EffectResult(ok=True, changed=True)
+        actions = ('reset-failed', marker.action.removeprefix('reset-failed-')) if marker.action.startswith('reset-failed-') else (marker.action,)
+        started = time.monotonic()
+        changed = False
+        for action in actions:
+            remaining = self._timeout(params) - (time.monotonic() - started)
+            if remaining <= 0:
+                return EffectResult(ok=False, changed=changed, reason='command_budget_exceeded')
+            outcome = await self._transport.run_command(service_action_argv(action, marker.unit),
+                timeout_seconds=remaining, output_limit_bytes=self._output_limit(params))
+            if outcome.returncode != 0:
+                return EffectResult(ok=False, changed=changed, reason='command_failed')
+            changed = True
+        return EffectResult(ok=True, changed=not (marker.action == 'stop' and marker.prior.active_state == 'inactive'),
+                            reason='reset_counters_not_restorable' if marker.action.startswith('reset-failed') else None)
 
     async def undo(
         self, params: CapabilityUndoParams, invocation: object | None = None
     ) -> EffectResult:
         marker = self._marker(params)
         self._require_action(marker.action)
+        if marker.action.startswith('reset-failed'):
+            return EffectResult(ok=False, changed=False, reason='reset_counters_not_restorable')
         if marker.action != params.operation.action:
             raise CapabilityError("marker_action_mismatch")
         target_action = self._restore_action(marker)
@@ -140,11 +193,22 @@ class ServicesPlugin(BaseCapabilityPlugin):
             return VerifyResult(ok=False, reason="state_unavailable")
         if not self._state_satisfies(current, marker, marker.action):
             return VerifyResult(ok=False, reason="state_mismatch")
+        if marker.action.startswith('reset-failed'):
+            outcome = await self._run([SYSTEMCTL_EXECUTABLE,'show',marker.unit,'--no-pager',
+                                      '--property='+','.join(FAULT_PROPERTIES)],params)
+            try:
+                fault = parse_service_fault_snapshot(outcome.stdout,observed_at=int(time.time()))
+                if outcome.returncode != 0 or fault.n_restarts != 0:
+                    return VerifyResult(ok=False,reason='reset_counters_not_zero')
+            except ValueError:
+                return VerifyResult(ok=False,reason='state_unavailable')
         return VerifyResult(ok=True)
 
     async def verify_restored(self, params: CapabilityVerifyParams) -> VerifyResult:
         marker = self._marker(params)
         self._require_action(marker.action)
+        if marker.action.startswith('reset-failed'):
+            return VerifyResult(ok=False,reason='reset_counters_not_restorable')
         current = await self._read_state_or_none(marker.unit, params)
         if current is None:
             return VerifyResult(ok=False, reason="state_unavailable")
@@ -176,6 +240,8 @@ class ServicesPlugin(BaseCapabilityPlugin):
             raise CapabilityError("invalid_marker")
         parsed = marker_from(ServiceMarker, marker)  # type: ignore[arg-type]
         assert isinstance(parsed, ServiceMarker)
+        if parsed.unit != self._unit(params):
+            raise CapabilityError('marker_resource_mismatch')
         return parsed
 
     def _unit(self, params: CapabilityPrepareParams) -> str:
@@ -217,8 +283,10 @@ class ServicesPlugin(BaseCapabilityPlugin):
         return "enable" if marker.prior.unit_file_state == "enabled" else "disable"
 
     def _state_satisfies(self, current: ServiceState, marker: ServiceMarker, action: str) -> bool:
-        if action in {"restart", "start"}:
+        if action in {"restart", "start", "reset-failed-start", "reset-failed-restart"}:
             return current.active_state == "active"
+        if action == 'reset-failed':
+            return current.active_state != 'failed'
         if action == "stop":
             return current.active_state != "active"
         if action == "enable":

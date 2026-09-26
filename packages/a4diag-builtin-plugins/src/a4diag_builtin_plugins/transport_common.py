@@ -32,12 +32,26 @@ from pydantic import (
 
 from a4diag.domain import Operation, Risk, canonical_json_bytes
 from a4diag.linux_probes import validate_probe_id
-from a4diag.plugin_api.target_protocol import SignedTargetRequest, TargetLifecycle, TargetRequest
+from a4diag.plugin_api.target_protocol import (
+    SignedTargetRequest,
+    TargetLifecycle,
+    TargetLifecycleV11,
+    TargetRequest,
+    TargetRequestType,
+    TargetRequestV11,
+)
 from a4diag.plugin_api.protocol import (
     EmptyParams,
     MethodBinding,
     MethodKind,
     TicketedEffectParams,
+    effect_fields_digest,
+)
+from a4diag.plugin_api.ticket import (
+    OperationPhase,
+    OperationTicketExpectationType,
+    OperationTicketExpectationV11,
+    TicketError,
 )
 
 TRANSPORT_HELPER_EXECUTABLE = "/usr/libexec/a4diag/a4diag-transport-helper"
@@ -202,6 +216,10 @@ class ReadKind(StrEnum):
     SERVICE_STATE = "service_state"
     SERVICE_LOGS = "service_logs"
     PROBE = "probe"
+    CONTAINER_STATE = "container_state"
+    CONTAINER_LOGS = "container_logs"
+    KUBERNETES_STATE = "kubernetes_state"
+    KUBERNETES_EVIDENCE = "kubernetes_evidence"
 
 
 def validate_systemd_unit(value: str) -> str:
@@ -217,6 +235,7 @@ class ReadParams(BaseModel):
     path: str | None = None
     unit: str | None = None
     probe_id: str | None = Field(default=None, strict=True)
+    profile_id: str | None = Field(default=None, strict=True)
     output_limit_bytes: int = Field(
         default=DEFAULT_OUTPUT_LIMIT_BYTES,
         ge=1,
@@ -236,13 +255,15 @@ class ReadParams(BaseModel):
     def validate_unit(cls, value: str | None) -> str | None:
         return None if value is None else validate_systemd_unit(value)
 
-    @field_validator("probe_id")
+    @field_validator("probe_id", "profile_id")
     @classmethod
     def validate_probe_id(cls, value: str | None) -> str | None:
         return None if value is None else validate_probe_id(value)
 
     @model_validator(mode="after")
     def validate_kind_path(self) -> ReadParams:
+        if (self.kind in (ReadKind.CONTAINER_STATE,ReadKind.CONTAINER_LOGS,ReadKind.KUBERNETES_STATE,ReadKind.KUBERNETES_EVIDENCE)) != (self.profile_id is not None):
+            raise ValueError('profile_id is required only for container reads')
         if self.kind is ReadKind.FILE and self.path is None:
             raise ValueError("path is required for file reads")
         if self.kind is not ReadKind.FILE and self.path is not None:
@@ -283,18 +304,49 @@ class ExecuteTypedParams(TicketedEffectParams):
         return value
 
 
-class TransportPrepareParams(TicketedEffectParams):
+class _TransportTicketedEffectParams(TicketedEffectParams):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    def ticket_expectation(
+        self, phase: OperationPhase
+    ) -> OperationTicketExpectationType:
+        try:
+            request = _validated_transport_request(
+                self, TargetLifecycleV11(phase.value)
+            )
+        except TransportError as error:
+            raise TicketError(error.code) from error
+        if isinstance(request, TargetRequest):
+            return TicketedEffectParams.ticket_expectation(self, phase)
+        return OperationTicketExpectationV11(
+            transaction_id=self.transaction_id,
+            step_id=self.step_id,
+            target_id=self.target_id,
+            target_fingerprint=self.target_fingerprint,
+            operation=self.operation,
+            phase=phase,
+            effect_payload_digest=effect_fields_digest(self),
+            plan_digest=self.plan_digest,
+            risk=self.risk,
+            binding=request.binding,
+            preparation_dependency=request.preparation_dependency,
+            authorization_kind=request.authorization_kind,
+            authorization_id=request.authorization_id,
+        )
+
+
+class TransportPrepareParams(_TransportTicketedEffectParams):
     model_config = ConfigDict(extra="forbid", frozen=True)
     envelope: SignedTargetRequest
 
 
-class TransportApplyParams(TicketedEffectParams):
+class TransportApplyParams(_TransportTicketedEffectParams):
     model_config = ConfigDict(extra="forbid", frozen=True)
     marker: dict[str, JsonValue]
     envelope: SignedTargetRequest
 
 
-class TransportUndoParams(TicketedEffectParams):
+class TransportUndoParams(_TransportTicketedEffectParams):
     model_config = ConfigDict(extra="forbid", frozen=True)
     marker: dict[str, JsonValue]
     undo: dict[str, JsonValue] | None = None
@@ -319,6 +371,21 @@ class TransportReconcileParams(BaseModel):
     envelope: SignedTargetRequest
 
 
+class TransportQueryJobParams(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    transaction_id: str
+    step_id: str
+    operation: Operation
+    job_id: str
+    envelope: SignedTargetRequest
+
+
+class TransportConfirmJobParams(_TransportTicketedEffectParams):
+    model_config = ConfigDict(extra='forbid', frozen=True)
+    job_id: str
+    envelope: SignedTargetRequest
+
+
 @dataclass(frozen=True, slots=True)
 class RunOutcome:
     """Outcome of one fixed-argv process run with bounded output."""
@@ -330,6 +397,57 @@ class RunOutcome:
     stderr: str = ""
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+
+
+def _parse_target_request(envelope: SignedTargetRequest) -> TargetRequestType:
+    try:
+        value = json.loads(envelope.payload)
+        if type(value) is not dict:
+            raise ValueError("target request must be an object")
+        version = value.get("protocol_version", "1.0")
+        if version == "1.0":
+            request_model = TargetRequest
+        elif version == "1.1":
+            request_model = TargetRequestV11
+        else:
+            raise ValueError("unsupported target request version")
+        return request_model.model_validate(value)
+    except (json.JSONDecodeError, UnicodeError, ValueError) as error:
+        raise TransportError("target_envelope_invalid") from error
+
+
+def _validated_transport_request(
+    params: TransportPrepareParams | TransportApplyParams | TransportUndoParams |
+    TransportVerifyParams | TransportReconcileParams,
+    lifecycle: TargetLifecycle,
+) -> TargetRequestType:
+    request = _parse_target_request(params.envelope)
+    if (
+        request.lifecycle.value != lifecycle.value
+        or request.transaction_id != params.transaction_id
+        or request.step_id != params.step_id
+        or request.operation != params.operation
+        or request.target_fingerprint
+        != getattr(params, "target_fingerprint", request.target_fingerprint)
+        or request.marker != getattr(params, "marker", None)
+        or request.undo != getattr(params, "undo", None)
+        or getattr(request, 'job_id', None) != getattr(params, 'job_id', None)
+    ):
+        raise TransportError("target_envelope_binding_mismatch")
+    if isinstance(params, TicketedEffectParams):
+        authorization_id = (
+            request.approval_id
+            if isinstance(request, TargetRequest)
+            else request.authorization_id
+        )
+        if (
+            request.target_id != params.target_id
+            or request.plan_digest != params.plan_digest
+            or request.risk is not params.risk
+            or authorization_id != params.approval_id
+        ):
+            raise TransportError("target_envelope_binding_mismatch")
+    return request
 
 
 class ProcessRunner(Protocol):
@@ -412,8 +530,9 @@ class SubprocessRunner:
             _read_bounded(proc.stderr, output_limit_bytes)  # type: ignore[arg-type]
         )
         try:
-            proc.stdin.write(payload)  # type: ignore[union-attr]
-            await proc.stdin.drain()  # type: ignore[union-attr]
+            if payload:
+                proc.stdin.write(payload)  # type: ignore[union-attr]
+                await proc.stdin.drain()  # type: ignore[union-attr]
             proc.stdin.close()  # type: ignore[union-attr]
         except (OSError, ValueError):
             # The child closed its stdin before reading everything; it may
@@ -528,6 +647,9 @@ class BaseTransport:
         if params.probe_id is not None:
             request.pop("path")
             request["probe_id"] = params.probe_id
+        if params.profile_id is not None:
+            request.pop('path')
+            request['profile_id'] = params.profile_id
         outcome = await self._run_helper(
             self._build_helper_argv(), request,
             timeout_seconds=TRANSPORT_READ_TIMEOUT_SECONDS,
@@ -630,29 +752,8 @@ class BaseTransport:
         params: TransportPrepareParams | TransportApplyParams | TransportUndoParams |
         TransportVerifyParams | TransportReconcileParams,
         lifecycle: TargetLifecycle,
-    ) -> TargetRequest:
-        try:
-            request = TargetRequest.model_validate_json(params.envelope.payload)
-        except ValueError as error:
-            raise TransportError("target_envelope_invalid") from error
-        if (
-            request.lifecycle is not lifecycle
-            or request.transaction_id != params.transaction_id
-            or request.step_id != params.step_id
-            or request.operation != params.operation
-            or request.target_fingerprint != getattr(params, "target_fingerprint", request.target_fingerprint)
-            or request.marker != getattr(params, "marker", None)
-            or request.undo != getattr(params, "undo", None)
-        ):
-            raise TransportError("target_envelope_binding_mismatch")
-        if isinstance(params, TicketedEffectParams) and (
-            request.target_id != params.target_id
-            or request.plan_digest != params.plan_digest
-            or request.risk is not params.risk
-            or request.approval_id != params.approval_id
-        ):
-            raise TransportError("target_envelope_binding_mismatch")
-        return request
+    ) -> TargetRequestType:
+        return _validated_transport_request(params, lifecycle)
 
     async def _relay_signed(
         self,
@@ -693,6 +794,19 @@ class BaseTransport:
             result = json.loads(outcome.stdout)
             if type(result) is not dict:
                 raise ValueError("result must be object")
+            if isinstance(request, TargetRequestV11) and request.lifecycle.value in {'apply', 'query_job', 'confirm_job'}:
+                from a4diag.repair_jobs import RepairJobResponse
+                from a4diag.policy_engine import canonical_operation_digest
+                if outcome.stdout_truncated or len(outcome.stdout.encode()) > request.operation.output_limit_bytes:
+                    raise ValueError('job response too large')
+                job = RepairJobResponse.model_validate(result).job
+                if (job.transaction_id, job.step_id, job.profile_digest, job.operation_digest) != (
+                    request.transaction_id, request.step_id, request.binding.profile_digest,
+                    canonical_operation_digest(request.operation),
+                ):
+                    raise ValueError('job response binding mismatch')
+                if request.job_id is not None and job.id != request.job_id:
+                    raise ValueError('job response ID mismatch')
         except (json.JSONDecodeError, ValueError):
             return TransportResult(ok=False, status=TransportStatus.FAILED, reason="helper_result_invalid")
         return TransportResult(
@@ -714,6 +828,12 @@ class BaseTransport:
 
     async def reconcile_typed(self, params: TransportReconcileParams) -> TransportResult:
         return await self._relay_signed(params, TargetLifecycle.RECONCILE)
+
+    async def query_job_typed(self, params: TransportQueryJobParams) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycleV11.QUERY_JOB)
+
+    async def confirm_job_typed(self, params: TransportConfirmJobParams, invocation: object) -> TransportResult:
+        return await self._relay_signed(params, TargetLifecycleV11.CONFIRM_JOB)
 
     async def _run_helper(
         self,
@@ -799,6 +919,10 @@ def build_transport_bindings(
             "reconcile_typed", TransportReconcileParams, TransportResult,
             transport.reconcile_typed, kind=MethodKind.RECONCILE,
         ),
+        'query_job_typed': MethodBinding('query_job_typed', TransportQueryJobParams, TransportResult,
+            transport.query_job_typed, kind=MethodKind.RECONCILE),
+        'confirm_job_typed': MethodBinding('confirm_job_typed', TransportConfirmJobParams, TransportResult,
+            transport.confirm_job_typed, kind=MethodKind.CONFIRM_JOB),
         "execute_typed": MethodBinding(
             "execute_typed",
             ExecuteTypedParams,

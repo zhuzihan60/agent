@@ -93,11 +93,13 @@ class ServiceState(BaseModel):
 
     @field_validator("active_state", "sub_state", "unit_file_state", "invocation_id")
     @classmethod
-    def validate_state_component(cls, value: str) -> str:
-        if not isinstance(value, str) or not value or len(value) > 256:
+    def validate_state_component(cls, value: str, info) -> str:
+        if not isinstance(value, str) or (not value and info.field_name != 'invocation_id') or len(value) > 256:
             raise ValueError("service state component must be a bounded string")
         if any(ord(character) < 32 or ord(character) == 127 for character in value):
             raise ValueError("service state component must not contain control characters")
+        if info.field_name == 'invocation_id' and not value and info.data.get('active_state') == 'active':
+            raise ValueError('active service invocation identity is missing')
         return value
 
 

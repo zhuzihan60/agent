@@ -1,0 +1,41 @@
+# Administrator replaces namespace and exact Deployment name before provisioning.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: a4diag-repair
+  namespace: a4diag-remediation
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: a4diag-repair
+  namespace: a4diag-remediation
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [http-demo]
+    verbs: [get, patch]
+  - apiGroups: [apps]
+    resources: [replicasets]
+    verbs: [list]
+  - apiGroups: ['']
+    resources: [pods, events, resourcequotas]
+    verbs: [list]
+  - apiGroups: ['']
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: a4diag-repair
+  namespace: a4diag-remediation
+subjects:
+  - kind: ServiceAccount
+    name: a4diag-repair
+    namespace: a4diag-remediation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: a4diag-repair

@@ -1,0 +1,18 @@
+[Unit]
+Description=Disposable a4diag CI k3s server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/local/bin/k3s server --node-name=a4diag-remediation-test --tls-san=127.0.0.1 --write-kubeconfig-mode=0600 --disable=traefik --disable=servicelb --disable=local-storage --disable=metrics-server
+Restart=on-failure
+RestartSec=5s
+KillMode=process
+Delegate=yes
+TasksMax=infinity
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

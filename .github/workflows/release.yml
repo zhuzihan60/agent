@@ -9,6 +9,9 @@ permissions:
   contents: write
 
 jobs:
+  remediation:
+    uses: ./.github/workflows/remediation.yml
+
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -24,7 +27,11 @@ jobs:
           python -m pip install --no-deps -e packages/a4diag-builtin-plugins
           python -m pip install --no-deps -e packages/a4diag-target-runtime
           python tools/build_release.py verify-source --project-root .
-          python -m pytest -q -rs
+          python -m pytest -q -rs -m "not privileged_linux"
+      - name: Privileged Linux tests in private mount namespace
+        run: |
+          sudo unshare --mount --fork --propagation private \
+            bash tests/ci/run_privileged_linux.sh "$PWD" "$(command -v python)"
       - name: Verify complete controller-to-target production wiring
         run: |
           sudo apt-get update
@@ -36,7 +43,7 @@ jobs:
 
   assemble-and-sign:
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [verify, remediation]
     environment: release
     steps:
       - uses: actions/checkout@v4

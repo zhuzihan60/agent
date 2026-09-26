@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import socket
+import stat
 import struct
 import subprocess
 import time
@@ -24,9 +25,31 @@ from a4diag_target.executor import ExecutorError, TargetExecutor
 from a4diag_target.diagnostics import read_diagnostic
 from a4diag_target.policy import TargetPolicy
 from a4diag_target.replay import SqliteReplayLedger
+from a4diag_target.repair_jobs import JobStore, SystemdJobLauncher
+from a4diag.repair_store import RepairStore
 
 MAX_FRAME_BYTES = 1_048_576
 SYSTEMCTL_EXECUTABLE = "/usr/bin/systemctl"
+
+
+def load_policy(path: Path) -> TargetPolicy:
+    """Read the current protected policy without a stale-cache fallback."""
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError('policy_not_regular')
+        with os.fdopen(descriptor, 'rb', closefd=False) as handle:
+            payload = handle.read(MAX_FRAME_BYTES + 1)
+        if len(payload) > MAX_FRAME_BYTES:
+            raise ValueError('policy_too_large')
+        return TargetPolicy.model_validate_json(payload)
+    except (OSError, ValueError) as error:
+        raise ExecutorError('target_policy_unavailable') from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _systemd_version() -> bytes:
@@ -130,20 +153,37 @@ class TargetSocketServer:
     ) -> None:
         self._identity_root = Path(os.environ.get("A4DIAG_TARGET_IDENTITY_ROOT", "/"))
         self._diagnostic_root = Path("/")
-        policy = TargetPolicy.model_validate_json(policy_path.read_text(encoding="utf-8"))
-        self._policy = policy
+        self._policy_path = Path(policy_path)
+        self._load_policy()
         key = serialization.load_pem_public_key(public_key_path.read_bytes())
         if not isinstance(key, Ed25519PublicKey):
             raise TypeError("target operation public key must be Ed25519")
+        self._key,self._replay_path,self._executor = key,Path(replay_path),None
+
+    def _initialize_executor(self):
+        if self._executor is not None:
+            return
+        key,replay_path=self._key,self._replay_path
         self._executor = TargetExecutor(
             verifier=TargetVerifier(
                 key, replay_store=SqliteReplayLedger(replay_path),
                 clock=lambda: int(time.time()),
             ),
-            policy=policy,
+            policy=self._load_policy,
             identity_probe=lambda: target_fingerprint(self._identity_root),
             adapter=LocalFileAdapter(),
         )
+        # Same root-owned directory as the replay ledger, including after a
+        # profile is revoked: existing jobs must remain observable.
+        jobs_path = Path(replay_path).with_name('repair-jobs.sqlite3')
+        self._executor.configure_jobs(JobStore(jobs_path), RepairStore(jobs_path),
+            SystemdJobLauncher(jobs_path, policy_path=self._policy_path,
+                identity_root=self._identity_root))
+
+    def _load_policy(self) -> TargetPolicy:
+        """Read and validate the current protected policy without cache fallback."""
+
+        return load_policy(self._policy_path)
 
     async def handle(self, payload: bytes) -> bytes:
         try:
@@ -157,13 +197,26 @@ class TargetSocketServer:
             if value.get("method") == "read":
                 if value.get("kind") in ("file", "service_state", "service_logs", "probe"):
                     return canonical_json_bytes(
-                        await read_diagnostic(self._diagnostic_root, value, self._policy),
+                        await read_diagnostic(
+                            self._diagnostic_root, value, self._load_policy()
+                        ),
                         max_bytes=MAX_FRAME_BYTES,
                     )
                 return canonical_json_bytes(read_identity(self._identity_root, value))
-            result = await self._executor.execute(
-                SignedTargetRequest.model_validate(value)
-            )
+            envelope = SignedTargetRequest.model_validate(value)
+            # Existing services retain their V11 executor path. Registered
+            # helper scopes cannot bypass isolation via this socket.
+            candidate = json.loads(envelope.payload)
+            if isinstance(candidate, dict) and candidate.get('protocol_version') == '1.1':
+                from a4diag_target.repair_install import helper_route
+                route = helper_route(candidate['binding']['profile_id'])
+                if route is not None or candidate['operation']['capability'] != 'services':
+                    raise ExecutorError('repair_helper_required')
+            from a4diag_target.disk_reservation import admission_preflight
+            admission_preflight(envelope,verifier=TargetVerifier(self._key,replay_store=None,clock=lambda:int(time.time())),
+                policy=self._load_policy(),identity_probe=lambda:target_fingerprint(self._identity_root))
+            self._initialize_executor()
+            result = await self._executor.execute(envelope)
             return canonical_json_bytes(result)
         except (ValueError, OSError, ExecutorError) as error:
             return canonical_json_bytes(

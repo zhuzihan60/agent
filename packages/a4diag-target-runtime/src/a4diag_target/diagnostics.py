@@ -14,7 +14,7 @@ from a4diag_target.linux_probes import run_probe
 from a4diag.linux_probes import probe_definition_digest, validate_probe_output
 
 DIAGNOSTIC_TIMEOUT_SECONDS = 10.0
-_STATE_PROPERTIES = ("ActiveState", "SubState", "LoadState", "Result", "ExecMainStatus", "MainPID", "UnitFileState")
+_STATE_PROPERTIES = ("ActiveState", "SubState", "LoadState", "Result", "ExecMainStatus", "MainPID", "UnitFileState", "InvocationID", "NRestarts")
 
 
 def _bounded_response(raw: bytes, limit: int, *, truncated: bool = False) -> dict[str, object]:
@@ -107,8 +107,14 @@ async def read_diagnostic(root: Path, request: dict[str, object], policy: Target
     values = {}
     for line in outcome.stdout.splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in _STATE_PROPERTIES:
-            values[key] = value
-    if not all(key in values for key in ("ActiveState", "SubState", "LoadState")):
+        if not separator or key not in _STATE_PROPERTIES or key in values:
+            return {"ok": False, "reason": "read_failed"}
+        values[key] = value
+    if set(values) != set(_STATE_PROPERTIES):
+        return {"ok": False, "reason": "read_failed"}
+    from a4diag_builtin_plugins.capability_services import FAULT_PROPERTIES, parse_service_fault_snapshot
+    try:
+        parse_service_fault_snapshot('\n'.join(f'{key}={values[key]}' for key in FAULT_PROPERTIES),observed_at=0)
+    except ValueError:
         return {"ok": False, "reason": "read_failed"}
     return _bounded_response(json.dumps(values, separators=(",", ":")).encode(), limit)

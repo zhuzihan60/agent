@@ -194,16 +194,20 @@ class ModelHttpFixture:
             return {"ok": True, "capabilities": ["structured"]}
         task = envelope["task"]
         if task == "diagnose":
-            source_id = f"{self.mode}-file"
-            observed = any(
-                row.get("source_id") == source_id and row.get("available") is True
-                for row in envelope["evidence"]["observations"]
-            )
+            source_id = "low-file" if self.mode == "protected" else f"{self.mode}-file"
+            observed = next((row for row in envelope["evidence"]["observations"]
+                             if row.get("source_id") == source_id
+                             and row.get("available") is True
+                             and isinstance(row.get("content"), str)
+                             and row["content"]), None)
             # The protected-path scenario reaches the existing policy guard;
             # it never tries to register or read protected target files.
-            missing = [] if observed or self.mode == "protected" else [source_id]
+            missing = [] if observed else [source_id]
             return {"cause": "e2e managed file drift", "confidence": 0.95,
-                    "missing_evidence": missing, "recommended_actions": ["files.replace_managed_file"]}
+                    "missing_evidence": missing, "recommended_actions": ["files.replace_managed_file"],
+                    "evidence_refs": ([{"source_id": source_id,
+                                        "quote": observed["content"][:256],
+                                        "relation": "supports"}] if observed else [])}
         if task == "critic":
             return {"risk": "high" if self.mode == "high" else "low", "complete": True,
                     "issues": [], "verify_suggestions": [], "undo_suggestions": []}
@@ -845,7 +849,7 @@ def main() -> int:
         evidence = {
             "execution_path": ["runtime", "plugin-rpc", "transport-ssh", "openssh",
                                "forced-command-helper", "systemd-socket", "target-executor"],
-            "plugin_list": {"count": len(listed), "source": "installed-registry", "private_key_reads": 0},
+            "plugin_list": {"names": [pin.name for pin in listed], "source": "installed-registry", "private_key_reads": 0},
             "target": {
                 "identity_verified": identity_verified,
                 "released_service_hardening": service_hardened,

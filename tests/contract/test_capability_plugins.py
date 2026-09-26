@@ -1040,7 +1040,7 @@ def test_capability_manifest_contract(manifest_name: str) -> None:
     assert all(operation.supports_prepare for operation in manifest.operations)
     assert all(operation.supports_verify for operation in manifest.operations)
     assert all(operation.supports_reconcile for operation in manifest.operations)
-    assert all(operation.supports_undo for operation in manifest.operations)
+    assert all(operation.supports_undo or operation.name.startswith('services.reset-failed') for operation in manifest.operations)
     assert manifest.read_risk_floor is Risk.LOW
     assert manifest.permissions
     assert "linux:systemd" in manifest.target_compatibility
@@ -1057,7 +1057,7 @@ def test_packages_manifest_operations_are_high() -> None:
     assert manifest.write_risk_floor is Risk.HIGH
 
 
-def test_services_manifest_declares_five_operations() -> None:
+def test_services_manifest_declares_lifecycle_and_exact_reset_operations() -> None:
     manifest = PluginManifest.model_validate(
         json.loads((MANIFEST_ROOT / "capability-services.json").read_text(encoding="utf-8"))
     )
@@ -1069,6 +1069,9 @@ def test_services_manifest_declares_five_operations() -> None:
         "services.stop": Risk.LOW,
         "services.enable": Risk.LOW,
         "services.disable": Risk.LOW,
+        "services.reset-failed": Risk.HIGH,
+        "services.reset-failed-start": Risk.HIGH,
+        "services.reset-failed-restart": Risk.HIGH,
     }
 
 

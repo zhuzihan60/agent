@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from a4diag.domain import Risk
+from a4diag.repair_effects import EffectKind
 
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -93,6 +94,14 @@ class OperationContract(BaseModel):
     supports_reconcile: bool
     supports_undo: bool = False
     parameters_schema: dict[str, JsonValue]
+    effect_kind: EffectKind = 'irreversible'
+
+    @model_validator(mode='before')
+    @classmethod
+    def legacy_effect_kind(cls, value: object) -> object:
+        if isinstance(value, dict) and 'effect_kind' not in value:
+            return {**value, 'effect_kind': 'restorable' if value.get('reversible') is True else 'irreversible'}
+        return value
 
     @field_validator("name")
     @classmethod
@@ -114,6 +123,7 @@ class PluginManifest(BaseModel):
     socket: str
     config_schema: str
     operations: tuple[OperationContract, ...]
+    rpc_methods: tuple[str, ...] = ()
     permissions: tuple[PermissionDeclaration, ...] = ()
     network_access: tuple[NetworkAccess, ...] = ()
     secret_refs: tuple[SecretReference, ...] = ()
@@ -125,6 +135,15 @@ class PluginManifest(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         return _validate_name(value, "plugin name")
+
+    @field_validator('rpc_methods')
+    @classmethod
+    def validate_rpc_methods(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError('duplicate RPC method')
+        for value in values:
+            _validate_name(value, 'RPC method')
+        return values
 
     @field_validator("version")
     @classmethod

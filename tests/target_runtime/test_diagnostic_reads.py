@@ -25,10 +25,12 @@ def policy() -> TargetPolicy:
 
 
 def server(root: Path) -> TargetSocketServer:
+    root.mkdir(parents=True, exist_ok=True)
     instance = object.__new__(TargetSocketServer)
     instance._identity_root = root / "identity"
     instance._diagnostic_root = root
-    instance._policy = policy()
+    instance._policy_path = root / "policy.json"
+    instance._policy_path.write_text(policy().model_dump_json(), encoding="utf-8")
     return instance
 
 
@@ -62,7 +64,12 @@ def test_unsigned_file_reads_deny_unmanaged_paths(tmp_path: Path) -> None:
 
 def test_file_read_rejects_normalization_alias_before_open(tmp_path: Path) -> None:
     instance = server(tmp_path)
-    instance._policy = policy().model_copy(update={"managed_roots": ("/srv/caf\u00e9",)})
+    instance._policy_path.write_text(
+        policy().model_copy(
+            update={"managed_roots": ("/srv/caf\u00e9",)}
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
     request = {"method": "read", "kind": "file", "path": "/srv/cafe\u0301/private", "limit": 100}
     result = json.loads(asyncio.run(instance.handle(json.dumps(request).encode())))
     assert result == {"ok": False, "reason": "resource_not_canonical"}
@@ -154,12 +161,12 @@ def test_service_state_survives_helper_json_framing(tmp_path: Path, monkeypatch)
             assert argv[0:2] == ["/usr/bin/systemctl", "show"]
             assert argv[-2:] == ["--", "demo.service"]
             return RunOutcome(started=True, timed_out=False, returncode=0,
-                              stdout="ActiveState=failed\nSubState=failed\nLoadState=loaded\nResult=exit-code\n")
+                              stdout="ActiveState=failed\nSubState=failed\nLoadState=loaded\nResult=exit-code\nInvocationID=\nNRestarts=3\nMainPID=0\nExecMainStatus=3\nUnitFileState=static\n")
 
     monkeypatch.setattr(diagnostics, "SubprocessRunner", StateRunner)
     runner = RelayRunner(server(tmp_path))
     result = asyncio.run(LocalTransport(runner=runner).read(
-        ReadParams(kind="service_state", unit="demo.service", output_limit_bytes=100)))
+        ReadParams(kind="service_state", unit="demo.service", output_limit_bytes=1024)))
     assert result.ok is True
     assert json.loads(result.stdout)["ActiveState"] == "failed"
     assert result.data["truncated"] is False

@@ -1,4 +1,4 @@
-"""A4Diag 1.0.0 release assembly and static verification.
+"""A4Diag 1.1.0 release assembly and static verification.
 
 Commands:
 - ``stage-systemd``: stage the exact systemd unit inventory atomically.
@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from email.parser import BytesParser
 from pathlib import Path
 
-RELEASE_VERSION = "1.0.0"
+RELEASE_VERSION = "1.1.0"
 CORE_WHEEL = f"a4diag-{RELEASE_VERSION}-py3-none-any.whl"
 BUILTIN_WHEEL = f"a4diag_builtin_plugins-{RELEASE_VERSION}-py3-none-any.whl"
 TARGET_WHEEL = f"a4diag_target_runtime-{RELEASE_VERSION}-py3-none-any.whl"
@@ -40,6 +40,9 @@ EXPECTED_BUILTINS = frozenset(
         "capability-files",
         "capability-packages",
         "capability-services",
+        "capability-containers",
+        "capability-kubernetes",
+        "capability-disk",
         "model-openai-compatible",
         "notification-cli",
         "notification-flashduty",
@@ -60,7 +63,8 @@ EXPECTED_SYSTEMD_UNITS = frozenset(
     }
 )
 EXPECTED_TARGET_SYSTEMD_UNITS = frozenset(
-    {"a4diag-target-executor.service", "a4diag-target-executor.socket"}
+    {"a4diag-target-executor.service", "a4diag-target-executor.socket",
+     "a4diag-repair-helper@.service", "a4diag-repair-helper@.socket"}
 )
 
 FORBIDDEN_RUNTIME_LITERALS = (

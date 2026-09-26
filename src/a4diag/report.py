@@ -145,6 +145,10 @@ def residual_risk(state: Mapping[str, object]) -> str:
     """Summarize what remains uncertain after the workflow finished."""
     status = state.get("status")
     recovery = state.get("recovery_result")
+    if status == 'succeeded' and isinstance(recovery,dict) and recovery.get('reason') == 'observation_period_recovered_root_cause_unproven':
+        return 'medium: healthy during observation; root cause unproven; process memory and reset counters cannot be restored'
+    if status == 'service_observing':
+        return 'medium: service observation incomplete; business recovery not established'
     if status == "rollback_succeeded" and isinstance(recovery, dict) and recovery.get("ok") is False:
         return "high: changes restored; business recovery not verified"
     if status == "rollback_succeeded" and (not isinstance(recovery, dict) or recovery.get("ok") is not True):
@@ -289,6 +293,10 @@ def build_runtime_report(
     report["approval_status"] = approval_status
     report["notification_status"] = notification_status
     report["results"] = results
+    if transaction_id:
+        report['effects'] = {step_id: effect.model_dump(mode='json') for step_id, effect
+                             in dependencies.transactions.repair_effects(transaction_id).items()}
+        report['repair_jobs'] = [job.model_dump(mode='json') for job in dependencies.transactions.repair_jobs(transaction_id)]
     report["residual_risk"] = residual_risk(state)
     report["manual_commands"] = manual_investigation_commands(
         str(transaction_id) if transaction_id else ""

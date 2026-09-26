@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+from typing import Literal
 
 from jsonschema import Draft202012Validator
 from pydantic import (
@@ -19,9 +20,16 @@ from a4diag.domain import (
     Operation,
     Plan,
     Risk,
+    RepairBinding,
     TargetConfig,
     canonical_json_bytes,
     plan_digest,
+)
+from a4diag.repair_profiles import (
+    RepairAuthorizationError,
+    RepairProfile,
+    authorize_profile,
+    profile_digest,
 )
 from a4diag.plugin_api.manifest import OperationContract
 from a4diag.plugin_registry import PluginRegistry, PluginRegistryError
@@ -35,6 +43,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _TARGET_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 POLICY_AUTHORIZATION_PREFIX = b"a4diag-policy-authorization-v1\x00"
+REPAIR_POLICY_AUTHORIZATION_PREFIX = b"a4diag-repair-policy-authorization-v1.1\x00"
 _POLICY_AUTHORIZATION_MAX_BYTES = 1_052_672
 
 
@@ -113,6 +122,53 @@ class PolicyAuthorization(BaseModel):
         if self.risk is Risk.LOW and self.approval_id is not None:
             raise ValueError("LOW authorization must not contain approval_id")
         return self
+
+
+class RepairPolicyAuthorization(BaseModel):
+    """Authenticated controller decision for one protocol 1.1 repair."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    protocol_version: Literal["1.1"] = "1.1"
+    target_id: str
+    target_fingerprint: str
+    plan_digest: str
+    operation_digest: str
+    risk: Literal[Risk.HIGH] = Risk.HIGH
+    binding: RepairBinding
+    authorization_kind: Literal["one_shot", "standing"]
+    authorization_id: str
+    mac: str
+
+    @field_validator("target_id")
+    @classmethod
+    def validate_target_id(cls, value: str) -> str:
+        if not isinstance(value, str) or not _TARGET_ID.fullmatch(value):
+            raise ValueError("target_id must be a safe identifier")
+        return value
+
+    @field_validator("target_fingerprint")
+    @classmethod
+    def validate_target_fingerprint(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("target_fingerprint must not be blank")
+        if any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("target_fingerprint must not contain control characters")
+        return value
+
+    @field_validator("plan_digest", "operation_digest", "mac")
+    @classmethod
+    def validate_digest(cls, value: str) -> str:
+        if not isinstance(value, str) or not _SHA256.fullmatch(value):
+            raise ValueError("value must be a lowercase SHA256 digest")
+        return value
+
+    @field_validator("authorization_id")
+    @classmethod
+    def validate_authorization_id(cls, value: str) -> str:
+        if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
+            raise ValueError("authorization_id must be a safe identifier")
+        return value
 
 
 class PolicyDecision(BaseModel):
@@ -234,6 +290,8 @@ class PolicyEngine:
                 return _decision(False, risk, "capability_not_allowed", digest)
             if operation.action not in grant.actions:
                 return _decision(False, risk, "action_not_allowed", digest)
+            if operation.capability == 'services' and operation.action.startswith('reset-failed-') and not {'reset-failed', operation.action.removeprefix('reset-failed-')} <= set(grant.actions):
+                return _decision(False, risk, 'constituent_action_not_allowed', digest)
             if not any(
                 _resource_matches(allowed, operation.resource)
                 for allowed in grant.resources
@@ -295,6 +353,19 @@ class PolicyEngine:
             self._authorization_key,
         )
         return _decision(True, risk, "auto_execute_low", digest, authorization)
+
+    def with_settings(self, settings: AgentSettings) -> PolicyEngine:
+        return PolicyEngine(settings, self.registry, authorization_key=self._authorization_key)
+
+    def authorize_repair(self, profile, operation, *, target_fingerprint, digest,
+                         authorization_kind, authorization_id, now, marker=None):
+        authorization = issue_repair_policy_authorization(profile, operation,
+            target_fingerprint=target_fingerprint, plan_digest=digest,
+            authorization_kind=authorization_kind, authorization_id=authorization_id,
+            now=now, key=self._authorization_key)
+        if marker is not None:
+            authorization = bind_repair_preconditions(authorization, marker, key=self._authorization_key)
+        return authorization
 
 
 def _initial_risk(plan: Plan, critic_risk: Risk) -> Risk:
@@ -366,6 +437,118 @@ def policy_authorization_is_authentic(
     except (CanonicalPlanError, ValueError, TypeError):
         return False
     return hmac.compare_digest(authorization.mac, expected)
+
+
+def repair_policy_authorization_is_authentic(
+    authorization: RepairPolicyAuthorization,
+    key: bytes,
+) -> bool:
+    if not isinstance(authorization, RepairPolicyAuthorization):
+        return False
+    if type(key) is not bytes or len(key) < 32:
+        return False
+    try:
+        payload = canonical_json_bytes(
+            authorization.model_dump(mode="json", exclude={"mac"}),
+            max_bytes=_POLICY_AUTHORIZATION_MAX_BYTES,
+        )
+    except (CanonicalPlanError, ValueError, TypeError):
+        return False
+    expected = hmac.new(
+        key,
+        REPAIR_POLICY_AUTHORIZATION_PREFIX + payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(authorization.mac, expected)
+
+
+def issue_repair_policy_authorization(
+    profile: RepairProfile,
+    operation: Operation,
+    *,
+    target_fingerprint: str,
+    plan_digest: str,
+    authorization_kind: Literal["one_shot", "standing"],
+    authorization_id: str,
+    now: int,
+    key: bytes,
+) -> RepairPolicyAuthorization:
+    """Authorize and authenticate one exact profile-bound repair operation."""
+
+    key = _validate_authorization_key(key)
+    binding = authorize_profile(
+        profile,
+        operation,
+        now=now,
+        presented_digest=profile_digest(profile),
+    )
+    if authorization_kind not in {"one_shot", "standing"}:
+        raise RepairAuthorizationError("authorization_kind_invalid")
+    if not isinstance(authorization_id, str) or not _SAFE_ID.fullmatch(authorization_id):
+        raise RepairAuthorizationError("authorization_id_invalid")
+    if authorization_kind == "standing" and (
+        not profile.standing_authorization or authorization_id != profile.id
+    ):
+        raise RepairAuthorizationError("standing_authorization_mismatch")
+    unsigned = RepairPolicyAuthorization(
+        target_id=profile.target_id,
+        target_fingerprint=target_fingerprint,
+        plan_digest=plan_digest,
+        operation_digest=canonical_operation_digest(operation),
+        binding=binding,
+        authorization_kind=authorization_kind,
+        authorization_id=authorization_id,
+        mac="0" * 64,
+    )
+    payload = canonical_json_bytes(
+        unsigned.model_dump(mode="json", exclude={"mac"}),
+        max_bytes=_POLICY_AUTHORIZATION_MAX_BYTES,
+    )
+    mac = hmac.new(
+        key,
+        REPAIR_POLICY_AUTHORIZATION_PREFIX + payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return unsigned.model_copy(update={"mac": mac})
+
+
+def bind_repair_preconditions(
+    authorization: RepairPolicyAuthorization,
+    marker: dict[str, object],
+    *,
+    key: bytes,
+) -> RepairPolicyAuthorization:
+    """Return a newly authenticated authorization bound to the prepare marker."""
+
+    key = _validate_authorization_key(key)
+    if not repair_policy_authorization_is_authentic(authorization, key):
+        raise RepairAuthorizationError("invalid_authorization")
+    if authorization.binding.preconditions_digest is not None:
+        raise RepairAuthorizationError("preconditions_already_bound")
+    try:
+        preconditions_digest = hashlib.sha256(
+            canonical_json_bytes(marker, max_bytes=262_144)
+        ).hexdigest()
+    except (CanonicalPlanError, ValueError, TypeError) as exc:
+        raise RepairAuthorizationError("invalid_preconditions") from exc
+    rebound = authorization.model_copy(
+        update={
+            "binding": authorization.binding.model_copy(
+                update={"preconditions_digest": preconditions_digest}
+            ),
+            "mac": "0" * 64,
+        }
+    )
+    payload = canonical_json_bytes(
+        rebound.model_dump(mode="json", exclude={"mac"}),
+        max_bytes=_POLICY_AUTHORIZATION_MAX_BYTES,
+    )
+    mac = hmac.new(
+        key,
+        REPAIR_POLICY_AUTHORIZATION_PREFIX + payload,
+        hashlib.sha256,
+    ).hexdigest()
+    return rebound.model_copy(update={"mac": mac})
 
 
 def _validate_authorization_key(key: bytes) -> bytes:

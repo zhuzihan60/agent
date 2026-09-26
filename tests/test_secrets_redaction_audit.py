@@ -132,6 +132,7 @@ def test_ordinary_file_does_not_accept_systemd_acl_exception(tmp_path: Path, mon
         SecretResolver(tmp_path, trusted_owner_uid=0).resolve("file:" + candidate.name)
 
 
+@pytest.mark.privileged_linux
 @pytest.mark.skipif(os.name != "posix" or not hasattr(os, "getxattr") or os.getuid() != 0, reason="native Linux ACL test requires root")
 def test_native_systemd_acl_can_be_resolved_by_unprivileged_service_uid() -> None:
     from a4diag.secrets import credential_name
@@ -369,6 +370,130 @@ def test_plain_values_are_unchanged() -> None:
 def test_redact_rejects_unbounded_known_secrets() -> None:
     with pytest.raises(ValueError, match="known_secrets"):
         redact({"x": "y"}, {"z" * 300})
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            'event={"password": "s\\\"ecret", "status": "ready"}',
+            'event={"password": "[REDACTED]", "status": "ready"}',
+        ),
+        (
+            'event={"dbPasswordSuffix":"value", "API_KEY":"another"}',
+            'event={"dbPasswordSuffix":"[REDACTED]", "API_KEY":"[REDACTED]"}',
+        ),
+        (
+            r'event={\"password\":\"escaped-value\"}',
+            r'event={\"password\":\"[REDACTED]\"}',
+        ),
+        (
+            r'event={\"password\":\"s\\\"ecret\",\"status\":\"ready\"}',
+            r'event={\"password\":\"[REDACTED]\",\"status\":\"ready\"}',
+        ),
+        (
+            'event={"password":123456,"status":"ready"}',
+            'event={"password":"[REDACTED]","status":"ready"}',
+        ),
+    ],
+)
+def test_quoted_secret_fields_in_log_text_keep_structure(value: str, expected: str) -> None:
+    assert redact(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "connect postgres://alice:p%40ss%3Aword@db.example:5432/app ok",
+            "connect postgres://alice:[REDACTED]@db.example:5432/app ok",
+        ),
+        (
+            "connect redis://cache-user:cache-pass@redis.example:6379/0 ok",
+            "connect redis://cache-user:[REDACTED]@redis.example:6379/0 ok",
+        ),
+        (
+            "connect postgresql+psycopg://alice:db-pass@db.example/app ok",
+            "connect postgresql+psycopg://alice:[REDACTED]@db.example/app ok",
+        ),
+        (
+            "connect mysql+pymysql://alice:mysql-pass@db.example/app ok",
+            "connect mysql+pymysql://alice:[REDACTED]@db.example/app ok",
+        ),
+    ],
+)
+def test_connection_uri_passwords_are_redacted(value: str, expected: str) -> None:
+    assert redact(value) == expected
+
+
+@pytest.mark.parametrize("kind", ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY"])
+def test_pem_private_key_blocks_are_redacted_without_nearby_log_text(kind: str) -> None:
+    value = f"before\n-----BEGIN {kind}-----\nTUlJLXNlY3JldA==\n-----END {kind}-----\nafter"
+    assert redact(value) == "before\n[REDACTED]\nafter"
+
+
+def test_truncated_pem_private_key_tail_is_redacted_to_next_log_line() -> None:
+    value = "before\n-----BEGIN PRIVATE KEY-----\nTUlJLXNlY3JldA==\nlog: after"
+    assert redact(value) == "before\n[REDACTED]\nlog: after"
+
+
+def test_complete_private_key_marker_pair_redacts_non_base64_fixture_body() -> None:
+    value = "before\n-----BEGIN PRIVATE KEY-----\nREVIEW_DUMMY_KEY_MATERIAL\n-----END PRIVATE KEY-----\nafter"
+    assert redact(value) == "before\n[REDACTED]\nafter"
+
+
+def test_private_key_in_json_log_with_literal_escaped_newlines_is_redacted() -> None:
+    value = r'payload="-----BEGIN PRIVATE KEY-----\nMII-key-body\n-----END PRIVATE KEY-----" status=ready'
+    assert redact(value) == r'payload="[REDACTED]" status=ready'
+
+
+def test_truncated_private_key_with_literal_escaped_newlines_redacts_body() -> None:
+    value = r'payload="-----BEGIN PRIVATE KEY-----\nMIIsecretbase64\nstatus=ready'
+    assert redact(value) == r'payload="[REDACTED]\nstatus=ready'
+
+
+def test_complete_json_text_redacts_object_valued_secret_member() -> None:
+    value = '{"password":{"nested":"not-for-logs"},"status":"ready"}'
+    assert redact(value) == '{"password":"[REDACTED]","status":"ready"}'
+
+
+def test_complete_json_array_text_redacts_nested_secret_members() -> None:
+    value = '[{"status":"ready"},{"details":{"token":{"value":"not-for-logs"}}}]'
+    assert redact(value) == '[{"status":"ready"},{"details":{"token":"[REDACTED]"}}]'
+
+
+def test_complete_json_without_secrets_and_ordinary_text_keep_original_format() -> None:
+    json_text = '  { "items": [{"name": "alice"}], "ready": true }  '
+    assert redact(json_text) == json_text
+    text = 'event={"password":{"nested":"not-parsed"}} completed'
+    assert redact(text) == text
+
+
+def test_deep_complete_json_text_fails_closed_without_recursing() -> None:
+    value = '[' * 40 + '{"password":{"value":"not-for-logs"}}' + ']' * 40
+    assert redact(value) == '[REDACTED]'
+
+
+def test_parser_recursion_limit_on_complete_json_fails_closed() -> None:
+    value = '[' * 3_000 + '{"password":{"value":"not-for-logs"}}' + ']' * 3_000
+    assert redact(value) == '[REDACTED]'
+
+
+def test_complete_json_known_secret_in_key_name_is_replaced() -> None:
+    assert redact('{"s3cr3t":"ok"}', {"s3cr3t"}) == '{"[REDACTED]":"ok"}'
+
+
+def test_complete_json_duplicate_secret_key_fails_closed() -> None:
+    value = '{"password":"not-for-logs","password":"[REDACTED]"}'
+    assert redact(value) == '[REDACTED]'
+
+
+def test_new_redaction_patterns_are_idempotent_and_leave_nonsecrets_unchanged() -> None:
+    value = 'status={"user":"alice"} redis://cache.example:6379/0 -----BEGIN CERTIFICATE-----'
+    assert redact(value) == value
+    sensitive = 'status={"password":"value"} redis://alice:pass@cache.example/0'
+    first = redact(sensitive)
+    assert redact(first) == first
 
 
 # ---------------------------------------------------------------------------

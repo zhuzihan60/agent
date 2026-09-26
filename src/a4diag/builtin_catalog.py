@@ -22,6 +22,9 @@ EXPECTED_BUILTINS = frozenset(
         "capability-files",
         "capability-packages",
         "capability-services",
+        "capability-containers",
+        "capability-kubernetes",
+        "capability-disk",
         "model-openai-compatible",
         "notification-cli",
         "notification-flashduty",
@@ -31,6 +34,9 @@ EXPECTED_BUILTINS = frozenset(
         "transport-ssh",
     }
 )
+# Separate from the transport/model/capability plugin inventory. New repair
+# adapters require target code, sandbox rendering, and explicit installation.
+REPAIR_ADAPTER_IDS: frozenset[str] = frozenset({'disk-cache', 'docker', 'podman', 'kubernetes'})
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -213,7 +219,7 @@ def _verify_catalog_files(catalog: BuiltinCatalog, root: Path) -> None:
 
 
 def load_builtin_catalog(path: Path) -> BuiltinCatalog:
-    """Load and verify an exact ten-plugin catalog and every bound byte."""
+    """Load and verify the exact built-in catalog and every bound byte."""
     try:
         index = Path(path).resolve(strict=True)
         root = index.parent.resolve(strict=True)

@@ -27,7 +27,21 @@ def test_signed_controller_to_target_production_path() -> None:
         "systemd-socket",
         "target-executor",
     ]
-    assert evidence["plugin_list"]["count"] == 10
+    assert sorted(evidence["plugin_list"]["names"]) == [
+        "capability-containers",
+        "capability-disk",
+        "capability-files",
+        "capability-kubernetes",
+        "capability-packages",
+        "capability-services",
+        "model-openai-compatible",
+        "notification-cli",
+        "notification-flashduty",
+        "notification-smtp",
+        "notification-webhook",
+        "transport-local",
+        "transport-ssh",
+    ]
     assert evidence["plugin_list"]["source"] == "installed-registry"
     assert evidence["plugin_list"]["private_key_reads"] == 0
     assert evidence["target"]["identity_verified"] is True

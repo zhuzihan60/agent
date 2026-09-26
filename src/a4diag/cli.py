@@ -534,6 +534,10 @@ def run_serve_loop(
     iteration; without one the loop idles so a default read-only install
     stays healthy. Failures are reported on stderr and never crash the loop.
     """
+    from .poller import RuntimePoller
+    if isinstance(poller, RuntimePoller):
+        poller.run_forever(stop_event)
+        return 0
     while not stop_event.is_set():
         if poller is not None:
             try:
@@ -608,21 +612,17 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from .settings import load_settings
 
     settings = load_settings(_config_path())
-    poller = None
+    alert_source = None
     if settings.alertmanager is not None:
         from .alertmanager import AlertmanagerClient
-        poller = RuntimePoller(
-            runtime,
-            alert_source=AlertmanagerClient(
-                settings.alertmanager, runtime.registered_target_ids
-            ),
-            poll_interval_seconds=settings.alertmanager.poll_interval_seconds,
-            state_path=Path("/var/lib/a4diag/poller.sqlite3"),
-            report_root=REPORT_ROOT,
-        )
+        alert_source = AlertmanagerClient(settings.alertmanager, runtime.registered_target_ids)
+    poller = RuntimePoller(runtime, alert_source=alert_source,
+        poll_interval_seconds=settings.alertmanager.poll_interval_seconds if settings.alertmanager else 600,
+        state_path=Path('/var/lib/a4diag/poller.sqlite3'), report_root=REPORT_ROOT)
     if args.once:
-        if poller is not None:
+        if alert_source is not None:
             poller.poll_once()
+        poller.heartbeat()
         runtime.close()
         return 0
     return run_serve_loop(runtime, stop_event, poller=poller)

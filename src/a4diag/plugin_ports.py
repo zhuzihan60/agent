@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import re
 import secrets
@@ -25,14 +26,28 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from a4diag.domain import Operation, Plan, Risk, StepResult, TargetConfig, canonical_json_bytes, plan_digest
+from a4diag.evidence_grounding import assess_diagnosis as assess_grounding
 from a4diag.plugin_api.manifest import PluginType
 from a4diag.plugin_client import PluginClient
-from a4diag.plugin_api.target_protocol import TargetLifecycle, TargetRequest, TargetSigner
-from a4diag.plugin_api.ticket import OperationPhase, OperationTicket, effect_payload_digest
+from a4diag.plugin_api.target_protocol import (
+    TargetLifecycle,
+    TargetLifecycleV11,
+    TargetRequest,
+    TargetRequestV11,
+    TargetSigner,
+)
+from a4diag.plugin_api.ticket import (
+    OperationPhase,
+    OperationTicket,
+    OperationTicketType,
+    OperationTicketV11,
+    effect_payload_digest,
+)
 from a4diag.plugin_registry import PluginRegistry
 from a4diag.policy_engine import canonical_operation_digest
 from a4diag.runtime import RuntimeFailure
 from a4diag.recovery import check_http
+from a4diag.repair_jobs import RepairJobResponse
 from a4diag.linux_probes import PROBE_OUTPUTS, parse_bound_probe_output, evaluate_probe_conditions
 from a4diag.redaction import redact
 from a4diag.settings import AgentSettings
@@ -63,7 +78,8 @@ class _RpcExecutorPort:
     signer_resolver: Callable[[TargetConfig], TargetSigner]
     clock: Callable[[], int] = lambda: int(time.time())
     nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(24)
-    _contexts: dict[tuple[str, str], OperationTicket] = field(default_factory=dict)
+    _contexts: dict[tuple[str, str], OperationTicketType] = field(default_factory=dict)
+    _observed_jobs: dict[tuple[str, str], tuple[OperationTicketType, str]] = field(default_factory=dict)
     _transaction: ContextVar[str | None] = ContextVar(
         "a4diag_rpc_transaction", default=None
     )
@@ -80,7 +96,7 @@ class _RpcExecutorPort:
         return transaction_id
 
     def restore_read_context(
-        self, target: TargetConfig, plan: Plan, claims: tuple[OperationTicket, ...]
+        self, target: TargetConfig, plan: Plan, claims: tuple[OperationTicketType, ...]
     ) -> None:
         """Bind authenticated durable dispatch claims without dispatching effects."""
         restored = {}
@@ -103,7 +119,12 @@ class _RpcExecutorPort:
                 or claim.operation_digest != canonical_operation_digest(operation)
             ):
                 raise RuntimeFailure("ticket_context_mismatch")
-            restored[(claim.transaction_id, claim.step_id)] = claim
+            key = (claim.transaction_id, claim.step_id)
+            # Durable dispatch rows need not be phase ordered. Never replace
+            # an authenticated bound APPLY context with unbound PREPARE.
+            previous = restored.get(key)
+            if previous is None or claim.phase is not OperationPhase.PREPARE:
+                restored[key] = claim
         for key in tuple(self._contexts):
             if key[0] == self._transaction_id():
                 del self._contexts[key]
@@ -118,14 +139,22 @@ class _RpcExecutorPort:
         return client
 
     @staticmethod
-    def _claims(ticket: str) -> OperationTicket:
+    def _claims(ticket: str) -> OperationTicketType:
         try:
             if not isinstance(ticket, str) or ticket.count(".") != 1:
                 raise ValueError("malformed ticket")
             payload_segment = ticket.split(".", 1)[0]
             padded = payload_segment + "=" * ((4 - len(payload_segment) % 4) % 4)
             payload = base64.b64decode(padded, altchars=b"-_", validate=True)
-            claims = OperationTicket.model_validate_json(payload)
+            decoded = json.loads(payload)
+            if type(decoded) is not dict:
+                raise ValueError("ticket must be object")
+            model = (
+                OperationTicketV11
+                if decoded.get("protocol_version") == "1.1"
+                else OperationTicket
+            )
+            claims = model.model_validate(decoded)
             if canonical_json_bytes(claims.model_dump(mode="json")) != payload:
                 raise ValueError("noncanonical ticket")
             return claims
@@ -133,7 +162,7 @@ class _RpcExecutorPort:
             raise RuntimeFailure("ticket_context_invalid") from error
 
     def _validate_claims(
-        self, claims: OperationTicket, target: TargetConfig, step_id: str,
+        self, claims: OperationTicketType, target: TargetConfig, step_id: str,
         operation: Operation, phase: OperationPhase,
     ) -> None:
         if claims.target_id != target.id:
@@ -147,7 +176,9 @@ class _RpcExecutorPort:
             raise RuntimeFailure("ticket_context_mismatch")
 
     @staticmethod
-    def _ticket_base(claims: OperationTicket, operation: Operation) -> dict[str, object]:
+    def _ticket_base(
+        claims: OperationTicketType, operation: Operation
+    ) -> dict[str, object]:
         return {
             "transaction_id": claims.transaction_id,
             "step_id": claims.step_id,
@@ -156,27 +187,70 @@ class _RpcExecutorPort:
             "operation": operation.model_dump(mode="json"),
             "plan_digest": claims.plan_digest,
             "risk": claims.risk.value,
-            "approval_id": claims.approval_id,
+            "approval_id": (
+                claims.approval_id
+                if isinstance(claims, OperationTicket)
+                else claims.authorization_id
+            ),
         }
 
     def _envelope(
         self, *, target: TargetConfig, operation: Operation,
         lifecycle: TargetLifecycle, marker: dict[str, object] | None,
-        undo: dict[str, object] | None, claims: OperationTicket,
+        undo: dict[str, object] | None, claims: OperationTicketType,
         effect_digest: str,
         verify_restored: bool = False,
+        job_id: str | None = None,
     ) -> dict[str, object]:
         issued = int(self.clock())
-        request = TargetRequest(
-            controller_id="a4diag-core", target_id=target.id,
-            target_fingerprint=claims.target_fingerprint,
-            transaction_id=self._transaction_id(), step_id=claims.step_id,
-            lifecycle=lifecycle, operation=operation, marker=marker, undo=undo,
-            verify_restored=verify_restored,
-            plan_digest=claims.plan_digest, effect_payload_digest=effect_digest,
-            risk=claims.risk, approval_id=claims.approval_id,
-            issued_at=issued, expires_at=issued + 30, nonce=self.nonce_factory(),
-        )
+        common = {
+            "controller_id": "a4diag-core",
+            "target_id": target.id,
+            "target_fingerprint": claims.target_fingerprint,
+            "transaction_id": self._transaction_id(),
+            "step_id": claims.step_id,
+            "operation": operation,
+            "marker": marker,
+            "undo": undo,
+            "verify_restored": verify_restored,
+            "plan_digest": claims.plan_digest,
+            "effect_payload_digest": effect_digest,
+            "risk": claims.risk,
+            "issued_at": issued,
+            "expires_at": issued + 30,
+            "nonce": self.nonce_factory(),
+        }
+        if isinstance(claims, OperationTicketV11):
+            dependency = claims.preparation_dependency
+            if (dependency is not None and claims.step_id == dependency.stop_step_id
+                    and dependency.stop_job_id is None
+                    and lifecycle in (TargetLifecycleV11.QUERY_JOB, TargetLifecycle.VERIFY,
+                                      TargetLifecycle.RECONCILE)):
+                reference = job_id
+                if reference is None:
+                    observed = self._observed_jobs.get((claims.transaction_id, claims.step_id))
+                    if observed is not None and observed[0] == claims:
+                        reference = observed[1]
+                if reference is None:
+                    raise RuntimeFailure('preparation_job_context_missing', claims.step_id)
+                # Read-only reference derived from an admitted/queried job.
+                # Never modify the historical HMAC claim or derive effect authority.
+                dependency = dependency.model_copy(update={'stop_job_id':reference})
+            request = TargetRequestV11(
+                **common,
+                lifecycle=TargetLifecycleV11(lifecycle.value),
+                binding=claims.binding,
+                preparation_dependency=dependency,
+                authorization_kind=claims.authorization_kind,
+                authorization_id=claims.authorization_id,
+                job_id=job_id,
+            )
+        else:
+            request = TargetRequest(
+                **common,
+                lifecycle=lifecycle,
+                approval_id=claims.approval_id,
+            )
         return self.signer_resolver(target).sign(request).model_dump(mode="json")
 
     @staticmethod
@@ -236,7 +310,7 @@ class _RpcExecutorPort:
         operation: Operation,
         marker: dict[str, object],
         ticket: str,
-    ) -> StepResult:
+    ) -> StepResult | RepairJobResponse:
         claims = self._claims(ticket)
         self._validate_claims(claims, target, step_id, operation, OperationPhase.APPLY)
         self._contexts[(claims.transaction_id, step_id)] = claims
@@ -249,7 +323,44 @@ class _RpcExecutorPort:
             _run(lambda: self._client(target).call("apply_typed", params, ticket=ticket)),
             "apply_typed",
         )
+        if isinstance(claims, OperationTicketV11):
+            response = RepairJobResponse.model_validate(result)
+            self._observed_jobs[(claims.transaction_id, step_id)] = (claims, response.job.id)
+            return response
         return self._step_result(result, "applied")
+
+    def query_job(self, target, step_id, operation, job_id, claims):
+        self._validate_claims(claims, target, step_id, operation, OperationPhase.APPLY)
+        if not isinstance(claims, OperationTicketV11):
+            raise RuntimeFailure('job_requires_v11')
+        envelope = self._envelope(target=target, operation=operation,
+            lifecycle=TargetLifecycleV11.QUERY_JOB, marker=None, undo=None, claims=claims,
+            effect_digest=effect_payload_digest({}), job_id=job_id)
+        result = self._target_result(_run(lambda: self._client(target).call('query_job_typed', {
+            'transaction_id': claims.transaction_id, 'step_id': step_id,
+            'operation': operation.model_dump(mode='json'), 'job_id': job_id, 'envelope': envelope,
+        })), 'query_job_typed')
+        from a4diag.repair_jobs import RepairJobResponse
+        response = RepairJobResponse.model_validate(result)
+        if response.job.id != job_id:
+            raise RuntimeFailure('job_id_mismatch')
+        self._observed_jobs[(claims.transaction_id, step_id)] = (claims, job_id)
+        self._contexts[(claims.transaction_id, step_id)] = claims
+        return response
+
+    def confirm_job(self, target, step_id, operation, job_id, ticket):
+        claims = self._claims(ticket)
+        self._validate_claims(claims, target, step_id, operation, OperationPhase.CONFIRM_JOB)
+        if not isinstance(claims, OperationTicketV11):
+            raise RuntimeFailure('job_requires_v11')
+        params = {**self._ticket_base(claims, operation), 'job_id': job_id}
+        params['envelope'] = self._envelope(target=target, operation=operation,
+            lifecycle=TargetLifecycleV11.CONFIRM_JOB, marker=None, undo=None, claims=claims,
+            effect_digest=effect_payload_digest({}), job_id=job_id)
+        result = self._target_result(_run(lambda: self._client(target).call(
+            'confirm_job_typed', params, ticket=ticket)), 'confirm_job_typed')
+        from a4diag.repair_jobs import RepairJobResponse
+        return RepairJobResponse.model_validate(result)
 
     def verify(
         self,
@@ -327,7 +438,9 @@ class _RpcExecutorPort:
         except ValueError as error:
             raise RuntimeFailure("plugin_result_invalid", "reconcile") from error
 
-    def _context(self, target: TargetConfig, step_id: str, operation: Operation) -> OperationTicket:
+    def _context(
+        self, target: TargetConfig, step_id: str, operation: Operation
+    ) -> OperationTicketType:
         claims = self._contexts.get((self._transaction_id(), step_id))
         if claims is None:
             raise RuntimeFailure("target_request_context_missing", step_id)
@@ -400,6 +513,7 @@ def _target_signer(target: TargetConfig) -> TargetSigner:
 class _RpcCollectorPort:
     registry: PluginRegistry
     client_factory: ClientFactory
+    clock: Callable[[], int] = lambda: int(time.time())
 
     def _client(self, target: TargetConfig) -> PluginClient:
         manifest_name = f"transport-{target.mode.value}"
@@ -471,7 +585,7 @@ class _RpcCollectorPort:
         for source_id in dict.fromkeys(source_ids):
             source = catalog[source_id]
             params = {"kind": source.kind, "output_limit_bytes": source.max_bytes}
-            params[{"file": "path", "probe": "probe_id"}.get(source.kind, "unit")] = source.resource
+            params[{"file": "path", "probe": "probe_id", "container_state":"profile_id", "container_logs":"profile_id", "kubernetes_state":"profile_id", "kubernetes_evidence":"profile_id"}.get(source.kind, "unit")] = source.resource
             row = {"kind": source.kind, "source_id": source.id, "resource": source.resource}
             try:
                 result = _run(lambda: self._client(target).call("read", params))
@@ -486,8 +600,10 @@ class _RpcCollectorPort:
                     if result["data"]["truncated"]:
                         raise ValueError("truncated probe")
                     parse_bound_probe_output(probe, result["stdout"])
-                row.update(content=redact(result["stdout"]), available=True,
-                           truncated=result["data"]["truncated"])
+                content = redact(result["stdout"])
+                row.update(content=content, available=True,
+                           truncated=result["data"]["truncated"], collected_at=self.clock(),
+                           content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest())
             except Exception:
                 row.update(content="", available=False, truncated=False, error="evidence_unavailable")
             evidence.append(row)
@@ -499,6 +615,110 @@ class _RpcCollectorPort:
         if not target.evidence_sources:
             return StepResult(ok=False, status="evidence_sources_missing")
         return StepResult(ok=True, status="recovery_checks_configured")
+
+    def kubernetes_health(self, target, operation, profile, *, timeout_seconds):
+        return self.service_health(target,operation,profile,timeout_seconds=timeout_seconds)
+
+    def container_health(self, target, operation, profile, *, timeout_seconds):
+        return self.service_health(target,operation,profile,timeout_seconds=timeout_seconds)
+
+    def service_health(self, target, operation, profile, *, timeout_seconds):
+        """One measured, deadline-bounded sample; no retries inside a sample."""
+        from a4diag_builtin_plugins.capability_services import FAULT_PROPERTIES, parse_service_fault_snapshot
+        deadline = time.monotonic() + timeout_seconds
+
+        def remaining():
+            value = deadline-time.monotonic()
+            if value <= 0:
+                raise TimeoutError('service_sample_budget_exhausted')
+            return value
+
+        def call(method, params):
+            async def request():
+                return await asyncio.wait_for(self._client(target).call(method, params), remaining())
+            return _run(request)
+
+        def identity():
+            result = call('verify_identity', {})
+            value = result.get('data', {}).get('fingerprint')
+            if result.get('ok') is not True or not isinstance(value,str) or not value:
+                raise ValueError('identity_unavailable')
+            return value
+
+        def fault(unit):
+            if operation.capability == 'kubernetes' and unit == operation.resource:
+                from a4diag_builtin_plugins.capability_kubernetes import DeploymentSnapshot
+                from a4diag.repair_profiles import kubernetes_scope
+                response = call('read', {'kind':'kubernetes_state','profile_id':profile.id,'output_limit_bytes':8192})
+                if response.get('ok') is not True or response.get('data',{}).get('truncated') is not False:
+                    raise ValueError('kubernetes_evidence_unavailable')
+                snapshot = DeploymentSnapshot.model_validate_json(response['stdout'])
+                if tuple(snapshot.identity.model_dump().values()) != kubernetes_scope(profile.resource):
+                    raise ValueError('deployment_identity_changed')
+                return snapshot
+            if operation.capability == 'containers' and unit == operation.resource:
+                from a4diag_builtin_plugins.capability_containers import ContainerSnapshot
+                from a4diag.repair_profiles import container_scope
+                response = call('read', {'kind':'container_state','profile_id':profile.id,'output_limit_bytes':8192})
+                if response.get('ok') is not True or response.get('data',{}).get('truncated') is not False:
+                    raise ValueError('container_evidence_unavailable')
+                snapshot = ContainerSnapshot.model_validate_json(response['stdout'])
+                runtime,uid,identifier = container_scope(profile.resource)
+                if snapshot.identity.model_dump() != {'runtime':runtime,'owner_uid':uid,'container_id':identifier,
+                                                       'image_digest':profile.constraints.image_digest}:
+                    raise ValueError('container_identity_changed')
+                return snapshot
+            response = call('read', {'kind':'service_state','unit':unit,'output_limit_bytes':8192})
+            if response.get('ok') is not True or response.get('data',{}).get('truncated') is not False:
+                raise ValueError('service_evidence_unavailable')
+            raw = json.loads(response['stdout'])
+            if raw.get('LoadState') != 'loaded':
+                raise ValueError('service_not_loaded')
+            return parse_service_fault_snapshot('\n'.join(f'{key}={raw[key]}' for key in FAULT_PROPERTIES),int(time.time()))
+
+        fingerprint = identity()
+        if target.identity_fingerprint is not None and fingerprint != target.identity_fingerprint:
+            raise ValueError('identity_mismatch')
+        before = fault(operation.resource)
+        checks = tuple(c for c in target.recovery_checks if c.id in profile.recovery_check_ids)
+        if len(checks) != len(profile.recovery_check_ids):
+            raise ValueError('recovery_checks_missing')
+        if operation.capability in ('containers','kubernetes') and not any(c.kind == 'http' or
+            (c.kind == 'probe' and any(p.id == c.resource and p.kind == 'tcp' for p in target.diagnostic_probes)) for c in checks):
+            raise ValueError('container_business_check_required')
+        results = []
+        for check in checks:
+            if check.kind == 'http':
+                result = check_http(check.model_copy(update={'timeout_seconds':min(check.timeout_seconds,remaining())}))
+                if result.get('status') == 'http_probe_busy':
+                    # Controller capacity says nothing about the target's health.
+                    raise ValueError('http_probe_busy')
+            elif check.kind == 'service_active':
+                current = before if check.resource == operation.resource else fault(check.resource)
+                result = {'ok':current.active_state=='active','status':current.active_state}
+            else:
+                probe = next(p for p in target.diagnostic_probes if p.id == check.resource)
+                response = call('read',{'kind':'probe','probe_id':probe.id,'output_limit_bytes':16384})
+                if response.get('ok') is not True or response.get('data',{}).get('truncated') is not False:
+                    raise ValueError('probe_unavailable')
+                result = {'ok':evaluate_probe_conditions(parse_bound_probe_output(probe,response['stdout']),check.conditions)}
+            results.append({'id':check.id,**result})
+        after = fault(operation.resource)
+        if operation.capability == 'kubernetes':
+            same = (before.identity,before.generation,before.pod_uids,before.restart_count,before.image)==(after.identity,after.generation,after.pod_uids,after.restart_count,after.image)
+            active = after.complete
+        elif operation.capability == 'containers':
+            same = (before.identity,before.started_at,before.restart_count)==(after.identity,after.started_at,after.restart_count)
+            active = after.running and not after.oom_killed and after.health not in ('unhealthy','starting')
+        else:
+            same = (before.invocation_id,before.main_pid,before.n_restarts)==(after.invocation_id,after.main_pid,after.n_restarts)
+            active = after.active_state=='active'
+        if identity() != fingerprint:
+            raise ValueError('identity_mismatch')
+        remaining()
+        healthy = same and active and all(r['ok'] for r in results)
+        return after,healthy,{'ok':healthy,'checks':results,'duration_seconds':timeout_seconds-remaining(),
+                             **({'identity_stable':same} if operation.capability in ('containers','kubernetes') else {})}
 
     def final_verify(
         self,
@@ -563,6 +783,7 @@ class _RpcCollectorPort:
 class _RpcModelPort:
     client: PluginClient
     registry: PluginRegistry | None = None
+    clock: Callable[[], int] = lambda: int(time.time())
 
     def _evidence(
         self,
@@ -607,7 +828,14 @@ class _RpcModelPort:
             or not isinstance(missing, list) or len(missing) > 8
             or any(not isinstance(item, str) for item in missing)):
             raise RuntimeFailure("model_result_invalid", "diagnose")
-        return result
+        return self.assess_diagnosis(target, evidence, result)
+
+    def assess_diagnosis(
+        self, target: TargetConfig, evidence: list[dict[str, JsonValue]],
+        diagnosis: dict[str, JsonValue], *, now: int | None = None,
+    ) -> dict[str, JsonValue]:
+        return assess_grounding(target, evidence, diagnosis,
+                                now=self.clock() if now is None else now)
 
     def plan(
         self,

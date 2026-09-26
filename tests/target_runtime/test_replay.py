@@ -35,3 +35,18 @@ def test_inconsistent_schema_fails_closed(tmp_path) -> None:
     connection.close()
     with pytest.raises(ReplayLedgerError, match="schema_invalid"):
         SqliteReplayLedger(path)
+
+
+def test_nonce_job_reference_is_durable_and_cannot_be_rebound(tmp_path):
+    path = tmp_path / 'replay.db'
+    ledger = SqliteReplayLedger(path)
+    ledger.consume_request(nonce='nonce-job-00000001', expires_at=200,
+        transaction_id='tx1', step_id='0', lifecycle='apply', request_digest='a'*64, now=100)
+    ledger.record_job('nonce-job-00000001', 'job1', transaction_id='tx1', step_id='0')
+    ledger.close()
+    ledger = SqliteReplayLedger(path)
+    assert ledger.job_id('nonce-job-00000001') == 'job1'
+    with pytest.raises(ReplayLedgerError, match='job_binding_mismatch'):
+        ledger.record_job('nonce-job-00000001', 'job2', transaction_id='tx1', step_id='0')
+    with pytest.raises(ReplayLedgerError, match='job_binding_mismatch'):
+        ledger.record_job('nonce-job-00000001', 'job1', transaction_id='other', step_id='0')

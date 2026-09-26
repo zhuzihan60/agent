@@ -1,0 +1,56 @@
+{
+  "name": "capability-containers",
+  "plugin_type": "capability",
+  "version": "1.1.0",
+  "api_min": "1.0",
+  "api_max": "1.0",
+  "executable": "a4diag_builtin_plugins.capability_containers:main",
+  "socket": "/run/a4diag/capability-containers.sock",
+  "config_schema": "schemas/capability-containers.json",
+  "operations": [
+    {
+      "name": "containers.start",
+      "effect_kind": "compensatable",
+      "risk_floor": "high",
+      "reversible": false,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": false,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "containers.restart",
+      "effect_kind": "compensatable",
+      "risk_floor": "high",
+      "reversible": false,
+      "supports_prepare": true,
+      "supports_verify": true,
+      "supports_reconcile": true,
+      "supports_undo": false,
+      "parameters_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": [
+    "exec:a4diag-transport-helper"
+  ],
+  "network_access": [
+    "none"
+  ],
+  "secret_refs": [],
+  "target_compatibility": [
+    "ubuntu:22.04",
+    "ubuntu:24.04",
+    "debian:12"
+  ],
+  "read_risk_floor": "low",
+  "write_risk_floor": "high"
+}

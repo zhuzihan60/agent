@@ -22,8 +22,8 @@
 
 set -euo pipefail
 
-# Test overrides may pin a different expected version; production is 1.0.0.
-A4DIAG_EXPECTED_VERSION="${A4DIAG_EXPECTED_VERSION:-1.0.0}"
+# Test overrides may pin a different expected version; production is 1.1.0.
+A4DIAG_EXPECTED_VERSION="${A4DIAG_EXPECTED_VERSION:-1.1.0}"
 
 A4DIAG_ROOT="${A4DIAG_ROOT:-/}"
 RELEASE_BASE="${A4DIAG_ROOT}opt/a4diag/releases"

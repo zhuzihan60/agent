@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import hmac
 import re
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from a4diag.domain import Operation, normalize_resource
+from a4diag.domain import Operation, RepairBinding, normalize_resource
 from a4diag.linux_probes import LinuxProbe
+from a4diag.repair_profiles import (
+    RepairAuthorizationError,
+    RepairProfile,
+    authorize_profile,
+    profile_digest,
+    validate_repair_profiles,
+)
 
 _SAFE_TARGET = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:-]{0,127}$")
@@ -72,6 +81,16 @@ class TargetPolicy(BaseModel):
     allowed_units: tuple[str, ...] = ()
     allowed_packages: tuple[PackageGrant, ...] = ()
     diagnostic_probes: tuple[LinuxProbe, ...] = ()
+    repair_profiles: tuple[RepairProfile, ...] = ()
+    allowed_container_profiles: tuple[str, ...] = ()
+    allowed_kubernetes_profiles: tuple[str, ...] = ()
+
+    @field_validator('allowed_container_profiles','allowed_kubernetes_profiles')
+    @classmethod
+    def container_reads(cls, values):
+        if len(values) != len(set(values)) or any(not _SAFE_TARGET.fullmatch(value) for value in values):
+            raise ValueError('invalid_container_read_grants')
+        return values
 
     @field_validator("diagnostic_probes")
     @classmethod
@@ -122,6 +141,11 @@ class TargetPolicy(BaseModel):
         for probe in self.diagnostic_probes:
             if probe.kind == "file":
                 self.authorize_file_read(probe.resource)
+        validate_repair_profiles(
+            self.repair_profiles,
+            target_id=self.target_id,
+            recovery_check_ids=None,
+        )
         return self
 
     def authorize_probe(self, probe_id: str) -> LinuxProbe:
@@ -132,11 +156,54 @@ class TargetPolicy(BaseModel):
             self.authorize_file_read(probe.resource)
         return probe
 
+    def require_repair_profile(
+        self, profile_id: str, presented_digest: str
+    ) -> RepairProfile:
+        profile = next(
+            (item for item in self.repair_profiles if item.id == profile_id), None
+        )
+        if profile is None:
+            raise PolicyDenied("profile_not_granted")
+        if not hmac.compare_digest(profile_digest(profile), presented_digest):
+            raise PolicyDenied("profile_digest_mismatch")
+        return profile
+
+    def authorize_repair(
+        self,
+        binding: RepairBinding,
+        operation: Operation,
+        *,
+        authorization_kind: Literal["one_shot", "standing"],
+        authorization_id: str,
+        now: int,
+    ) -> RepairProfile:
+        """Independently recheck a protocol 1.1 repair at execution time."""
+
+        try:
+            profile = self.require_repair_profile(
+                binding.profile_id, binding.profile_digest
+            )
+            authorize_profile(
+                profile,
+                operation,
+                now=now,
+                presented_digest=binding.profile_digest,
+            )
+        except RepairAuthorizationError as exc:
+            raise PolicyDenied(exc.code) from exc
+        if authorization_kind == "standing" and (
+            not profile.standing_authorization or authorization_id != profile.id
+        ):
+            raise PolicyDenied("standing_authorization_mismatch")
+        return profile
+
     def authorize(self, operation: Operation) -> None:
         if operation.capability == "files":
             self.authorize_file_read(operation.resource)
             return
         if operation.capability == "services":
+            if operation.action.startswith('reset-failed'):
+                raise PolicyDenied('repair_profile_required')
             if operation.resource not in self.allowed_units:
                 raise PolicyDenied("unit_not_granted")
             return

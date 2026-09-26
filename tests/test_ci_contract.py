@@ -100,6 +100,32 @@ def test_release_workflow_triggers_on_version_tags_only() -> None:
     assert any(tag == "v*" or tag.startswith("v") for tag in tags)
 
 
+def test_release_uses_the_same_privileged_test_boundary_as_branch_ci() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+    commands = "\n".join(step.get("run", "") for step in workflow["jobs"]["verify"]["steps"])
+    assert '-m "not privileged_linux"' in commands
+    assert 'unshare --mount --fork --propagation private' in commands
+    assert 'tests/ci/run_privileged_linux.sh' in commands
+
+
+@pytest.mark.parametrize("workflow_name,consumer", [("test.yml", "build"), ("release.yml", "assemble-and-sign")])
+def test_live_remediation_is_a_required_reusable_workflow(workflow_name, consumer) -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_name).read_text())
+    assert workflow["jobs"]["remediation"]["uses"] == "./.github/workflows/remediation.yml"
+    assert "remediation" in workflow["jobs"][consumer]["needs"]
+
+
+def test_live_remediation_rejects_silently_skipped_acceptance() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/remediation.yml").read_text())
+    for job in workflow["jobs"].values():
+        commands = "\n".join(step.get("run", "") for step in job["steps"])
+        assert 'tests/ci/run_remediation_linux.sh' in commands
+        assert any(step.get("if") == "always()" and str(step.get("uses", "")).startswith("actions/upload-artifact@") for step in job["steps"])
+    script = (ROOT / "tests/ci/run_remediation_linux.sh").read_text()
+    assert 'assert_live_results.py' in script
+    assert 'github-hosted' in script
+
+
 def test_release_tag_is_bound_to_the_built_project_version_before_signing() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text()

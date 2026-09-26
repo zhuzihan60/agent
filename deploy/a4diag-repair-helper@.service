@@ -1,0 +1,22 @@
+[Unit]
+Description=A4Diag trusted repair dispatcher %i
+Requires=a4diag-repair-helper@%i.socket
+ConditionPathExists=/etc/a4diag-target/repair-helpers/%i.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/opt/a4diag-target/current/venv/bin/a4diag-repair-helper --helper %i
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=1024
+# No writable directories until an exact registered drop-in is installed.
