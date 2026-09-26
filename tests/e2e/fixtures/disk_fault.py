@@ -11,7 +11,9 @@ import time
 
 @contextmanager
 def disk_image(*, inodes=512):
-    base = Path('/opt/a4diag-remediation-lab')
+    # Hosted runners keep tool directories under /opt writable by the runner.
+    # Cache deletion requires an entirely root-owned, non-writable ancestry.
+    base = Path('/var/lib/a4diag-remediation-lab')
     assert os.uname().nodename == 'a4diag-remediation-test'
     root = Path(tempfile.mkdtemp(prefix='disk-fault-', dir=base))
     image, mount = root/'bounded.ext4', root/'fs'
