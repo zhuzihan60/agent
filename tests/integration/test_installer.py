@@ -606,6 +606,22 @@ def test_install_rejects_service_stuck_activating(tmp_path: Path) -> None:
 
 
 @POSIX
+def test_installer_default_accepts_current_project_release_without_version_override(tmp_path: Path) -> None:
+    from a4diag import __version__
+
+    sandbox = InstallerSandbox(tmp_path)
+    release = sandbox.make_release(tmp_path, version=__version__)
+    environment = sandbox.env(version=__version__)
+    environment.pop("A4DIAG_EXPECTED_VERSION")
+    result = subprocess.run(
+        ["bash", str(INSTALL_SH), "--offline", str(release)],
+        env=environment, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert sandbox.current.resolve().name == __version__
+
+
+@POSIX
 def test_fresh_install_initializes_secure_runtime_files_and_cli(tmp_path: Path) -> None:
     sandbox = InstallerSandbox(tmp_path)
     release = sandbox.make_release(tmp_path)
