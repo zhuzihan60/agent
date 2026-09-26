@@ -78,7 +78,7 @@ def test_production_signed_graph_ext4_writer_http(deps_factory, tmp_path,fault):
     from a4diag.plugin_api.protocol import PluginHost, RpcRequest
     from a4diag.plugin_api.target_protocol import SignedTargetRequest, TargetSigner, TargetVerifier, _public_fingerprint
     from a4diag.plugin_api.ticket import TicketVerifier
-    from a4diag.plugin_ports import _RpcExecutorPort
+    from a4diag.plugin_ports import _RpcCollectorPort, _RpcExecutorPort
     from a4diag.recovery import RecoveryCheck, check_http
     from a4diag.repair_store import RepairStore
     from a4diag.workflow import build_graph, run_event
@@ -147,7 +147,10 @@ cleanup.write_slot=write
         with socket.socket() as s:
             s.bind(('127.0.0.1',0));port=s.getsockname()[1]
         script=stage/'writer.py'
-        script.write_text('''import http.server,os,sys
+        # Type=simple reports "active" before HTTP is listening. Deliberately
+        # make that window visible so acceptance exercises bounded readiness.
+        script.write_text('''import http.server,os,sys,time
+time.sleep(.5)
 class Handler(http.server.BaseHTTPRequestHandler):
  def do_GET(self):
   st=os.statvfs(sys.argv[1]);ok=st.f_bavail*st.f_frsize>=1048576 and st.f_favail>=10 and not os.path.exists(sys.argv[3])
@@ -179,10 +182,11 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
         operations[1]=operations[1].model_copy(update={'resource':str(cache)})
         deps.plugins.model.plan_result=Plan(target_id=target.id,target_fingerprint=fingerprint,operations=tuple(operations))
         deps.plugins.collector.fingerprint=fingerprint
-        def final_verify(*_):
-            health=check_http(check)
+        def final_verify(selected, _view, observations):
+            view=collector.acquire_read_view(selected,fingerprint)
+            health=collector.final_verify(selected,view,observations)
             active=subprocess.run(['systemctl','is-active',unit],capture_output=True,text=True).stdout.strip()=='active'
-            return StepResult(ok=health['ok'] and active,status='healthy' if health['ok'] and active else 'unhealthy',data=health)
+            return StepResult(ok=health.ok and active,status='healthy' if health.ok and active else 'unhealthy',data=health.data)
         deps.plugins.collector.final_verify=final_verify
         deps=replace(deps,settings=settings,policy=PolicyEngine(settings,deps.registry,authorization_key=POLICY_KEY))
         key=Ed25519PrivateKey.generate();signer=TargetSigner(key)
@@ -257,6 +261,7 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
                 if result.error:raise ValueError(result.error)
                 return result.result
         executor=_RpcExecutorPort({target.id:Client()},signer_resolver=lambda _:signer,clock=deps.clock)
+        collector=_RpcCollectorPort(deps.registry,lambda _:Client())
         deps=replace(deps,plugins=replace(deps.plugins,executor=executor))
         graph=build_graph(deps)
         if fault=='controller_disconnect':
@@ -294,7 +299,8 @@ http.server.HTTPServer(('127.0.0.1',int(sys.argv[2])),Handler).serve_forever()
         evidence={'before':before,'after':{'available_bytes':after.f_bavail*after.f_frsize,'free_inodes':after.f_favail,
             'service':subprocess.run(['systemctl','is-active',unit],capture_output=True,text=True).stdout.strip(),
             'http':check_http(check)},'jobs':detail,'outcome':result['status'],'error':result.get('error'),
-            'requests':[(r['operation']['capability'],r['lifecycle']) for r in requests]}
+            'requests':[(r['operation']['capability'],r['lifecycle']) for r in requests],
+            'recovery_result':result.get('recovery_result')}
         from a4diag.disk_workflow import DiskJournal
         evidence['journal']=DiskJournal(deps.transactions,dict(graph.get_state({'configurable':{'thread_id':transaction}}).values),target).row()
         (repo.parent/f'disk-workflow-{fault}-evidence.json').write_text(json.dumps(evidence,indent=2))

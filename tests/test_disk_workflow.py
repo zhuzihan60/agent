@@ -28,7 +28,7 @@ def disk_deps(deps_factory, tmp_path):
     root.mkdir()
     (root/'plugins.whl').write_bytes(b'pinned-fixture')
     pins = []
-    for name in ('capability-services', 'capability-disk'):
+    for name in ('capability-services', 'capability-disk', 'transport-local'):
         data = Path(f'packages/a4diag-builtin-plugins/manifests/{name}.json').read_bytes()
         (root/f'{name}.json').write_bytes(data)
         pins.append(PluginPin(name=name, version='1.1.0', api_version='1.0',
