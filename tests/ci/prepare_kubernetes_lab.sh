@@ -79,8 +79,11 @@ docker info >/dev/null
 docker pull --platform linux/amd64 docker.io/library/python:3.11-slim
 docker save --output "${tmp}/python.tar" docker.io/library/python:3.11-slim
 /usr/local/bin/k3s ctr -n k8s.io images import "${tmp}/python.tar"
-digest=$(/usr/local/bin/k3s ctr -n k8s.io images inspect docker.io/library/python:3.11-slim |
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["target"]["digest"])')
+# `ctr images inspect` renders a tree, not JSON. Resolve the exact imported
+# reference from containerd's table; the digest validation below rejects zero
+# or multiple matches as well as malformed output.
+digest=$(/usr/local/bin/k3s ctr -n k8s.io images list 'name==docker.io/library/python:3.11-slim' |
+  awk '$1 == "docker.io/library/python:3.11-slim" { print $3 }')
 [[ ${digest} =~ ^sha256:[0-9a-f]{64}$ ]] || {
   echo 'imported Python image has no immutable manifest digest' >&2
   exit 1

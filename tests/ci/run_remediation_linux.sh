@@ -6,6 +6,10 @@ set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted && "$EUID" == 0 ]] || {
   echo 'requires a disposable GitHub-hosted Linux runner' >&2; exit 1;
 }
+# Hosted runners may export their own container configuration paths. They
+# must not leak into the separate root/rootless lab identities via runuser.
+unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME
+unset CONTAINERS_STORAGE_CONF CONTAINERS_CONF CONTAINER_HOST CONTAINER_CONNECTION REGISTRY_AUTH_FILE
 source_tree="$(realpath "$1")"
 python="$(realpath "$2")"
 export PATH="$(dirname "$python"):$PATH"
@@ -17,6 +21,7 @@ test ! -e /opt/a4diag-target/current
 test ! -L /opt/a4diag-target/current
 test ! -e /run/netns/a4diag-remediation
 mkdir -p "$results" /opt/a4diag-remediation-lab
+exec > >(tee -a "$results/setup.log") 2>&1
 hostnamectl set-hostname a4diag-remediation-test
 # The entire VM is disposable. The fixture units need a stable namespace path;
 # attaching its existing namespace avoids giving test services a different lo.
