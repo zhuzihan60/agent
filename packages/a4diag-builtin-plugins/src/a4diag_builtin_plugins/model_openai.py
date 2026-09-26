@@ -40,7 +40,7 @@ API_VERSION = "1.0"
 PLUGIN_TYPE = "model"
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_USER_PAYLOAD_BYTES = 262_144
-_VERSION = "1.0.0"
+_VERSION = "1.1.0"
 _SAFE_REF = re.compile(r"^[a-z][a-z0-9_-]{0,31}:[a-z0-9][a-z0-9_.-]{0,63}$")
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
@@ -63,7 +63,11 @@ SYSTEM_PROMPT = (
     "Do not assume unavailable, failed, or uncollected evidence is present or "
     "supports a cause. Reflect evidence gaps in confidence and request relevant "
     "registered sources; if no suitable source is registered, explain the gap "
-    "in cause. For planning, use only supplied authorized capabilities and "
+    "in cause. For diagnosis, evidence_refs must cite exact substrings of "
+    "available, complete observations by registered source_id; label each "
+    "quote supports or contradicts. Do not invent citations. A matching quote "
+    "supports only a hypothesis, not causal proof or a root-cause probability. "
+    "For planning, use only supplied authorized capabilities and "
     "resources supported by collected evidence. Recovery criteria come only "
     "from recovery_checks. Each operation must include non-empty verify metadata "
     "describing verification intent. For a reversible operation, include non-null "
@@ -288,6 +292,14 @@ class ProbeResponse(BaseModel):
     )
 
 
+class DiagnosisEvidenceRef(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    quote: str = Field(min_length=1, max_length=256)
+    relation: Literal["supports", "contradicts"]
+
+
 class DiagnosisResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -295,6 +307,7 @@ class DiagnosisResult(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0, strict=True, allow_inf_nan=False)
     missing_evidence: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
+    evidence_refs: list[DiagnosisEvidenceRef] = Field(default_factory=list, max_length=8)
 
 
 class OperationProposal(BaseModel):

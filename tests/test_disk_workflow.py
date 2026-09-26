@@ -31,7 +31,7 @@ def disk_deps(deps_factory, tmp_path):
     for name in ('capability-services', 'capability-disk'):
         data = Path(f'packages/a4diag-builtin-plugins/manifests/{name}.json').read_bytes()
         (root/f'{name}.json').write_bytes(data)
-        pins.append(PluginPin(name=name, version='1.0.0', api_version='1.0',
+        pins.append(PluginPin(name=name, version='1.1.0', api_version='1.0',
             artifact_path='plugins.whl', artifact_sha256=hashlib.sha256(b'pinned-fixture').hexdigest(),
             manifest_sha256=hashlib.sha256(data).hexdigest(), enabled=True))
     registry = PluginRegistry.load(tuple(pins), root, core_api='1.0')

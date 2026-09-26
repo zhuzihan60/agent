@@ -12,6 +12,19 @@ from a4diag_builtin_plugins.model_openai import ModelEvidenceParams
 from e2e import run_production_wiring as wiring
 
 
+def test_protected_path_fixture_has_real_registered_evidence_before_policy_check(tmp_path: Path) -> None:
+    with wiring.ModelHttpFixture(tmp_path) as fixture:
+        fixture.mode = "protected"
+        request = {"task": "diagnose", "evidence": {"observations": []}}
+        assert fixture._response(request)["missing_evidence"] == ["low-file"]
+        request["evidence"]["observations"] = [
+            {"source_id": "low-file", "available": True, "content": "before\n"}
+        ]
+        result = fixture._response(request)
+        assert result["missing_evidence"] == []
+        assert result["evidence_refs"] == [{"source_id": "low-file", "quote": "before\n", "relation": "supports"}]
+
+
 def test_model_fixture_requests_registered_evidence_before_diagnosing(tmp_path: Path) -> None:
     with wiring.ModelHttpFixture(tmp_path) as fixture:
         fixture.mode = "low"
@@ -31,6 +44,8 @@ def test_model_fixture_requests_registered_evidence_before_diagnosing(tmp_path: 
         diagnosis = fixture.plugin.diagnose(ModelEvidenceParams(evidence=evidence))
         assert diagnosis.missing_evidence == []
         assert diagnosis.confidence >= 0.7
+        assert diagnosis.evidence_refs[0].source_id == "low-file"
+        assert diagnosis.evidence_refs[0].quote == "before\n"
         sent = fixture.requests[-1]
         assert sent["format"] == "json"
         schema = json.loads(sent["messages"][0]["content"].split("JSON Schema:\n", 1)[1])
@@ -73,15 +88,19 @@ def test_production_model_adapter_uses_http_plugin_for_all_decisions() -> None:
     observations = [
         {"kind": "target_fingerprint", "content": "actual-fingerprint"},
         {"kind": "file", "source_id": "low-file", "available": True,
-         "content": "before\n", "truncated": False},
+         "resource": "/srv/managed/low.conf", "content": "before\n",
+         "truncated": False, "collected_at": 1_000},
     ]
     with wiring.ModelHttpFixture(Path("/srv/managed")) as fixture:
-        port = _RpcModelPort(wiring._ModelPluginClient(fixture.plugin))
+        port = _RpcModelPort(wiring._ModelPluginClient(fixture.plugin), clock=lambda: 1_000)
         diagnosis = port.diagnose(target, observations)
         plan = port.plan(target, observations, diagnosis)
         risk = port.critic(target, observations, plan)
 
         assert plan.target_fingerprint == "actual-fingerprint"
+        assert diagnosis["model_confidence"] == 0.95
+        assert diagnosis["confidence"] == 0.7
+        assert diagnosis["grounding_status"] == "supported"
         assert plan.operations[0].resource.replace("\\", "/") == "/srv/managed/low.conf"
         assert risk is Risk.LOW
         envelopes = [json.loads(request["messages"][1]["content"]) for request in fixture.requests]

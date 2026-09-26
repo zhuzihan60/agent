@@ -33,7 +33,7 @@ from a4diag.report import (
     manual_investigation_commands,
 )
 from a4diag.settings import AgentSettings, load_settings
-from a4diag.transaction_store import TransactionStore
+from a4diag.transaction_store import TransactionStore, UnknownTransactionError
 from a4diag.repair_store import RepairStore
 from a4diag.repair_jobs import RepairJob, RepairJobResponse
 from a4diag.workflow import (
@@ -239,6 +239,30 @@ class Runtime:
             return self._handle(event)
         with self._deps.transactions.workflow_guard(event['event_id']):
             return self._handle(event)
+
+    def handle_alert_event(self, event: Mapping[str, object]) -> RuntimeResult:
+        """Ingest an alert once, or resume its checkpoint under the same workflow lock.
+
+        The poller may reclaim a lease after a crash. Inspecting the durable
+        frontier while holding this lock prevents a late first worker from
+        starting a duplicate workflow between inspection and dispatch.
+        """
+        if not isinstance(event, Mapping) or not isinstance(event.get("event_id"), str) or not event["event_id"]:
+            raise RuntimeFailure("invalid_event", "event requires event_id")
+        event_id = event["event_id"]
+        with self._deps.transactions.workflow_guard(event_id):
+            snapshot = self._graph.get_state({"configurable": {"thread_id": event_id}})
+            if getattr(snapshot, "values", None):
+                return self._resume(event_id)
+            try:
+                self._deps.transactions.get(event_id)
+            except UnknownTransactionError:
+                return self._handle(event)
+            raise RuntimeFailure("recovery_checkpoint_missing", event_id)
+
+    def report_guard(self, transaction_id: str):
+        """Coordinate the short report/finalization phase across processes."""
+        return self._deps.transactions.workflow_guard(transaction_id)
 
     def _handle(self, event: Mapping[str, object]) -> RuntimeResult:
         if not isinstance(event, Mapping):

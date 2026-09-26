@@ -39,7 +39,7 @@ def observe_recovery(deps_factory,tmp_path,selected,operation,check,signer,send,
     for name in ('capability-'+selected.capability,'capability-services','transport-local'):
         content=(repo/'packages/a4diag-builtin-plugins/manifests'/f'{name}.json').read_bytes()
         (directory/f'{name}.json').write_bytes(content)
-        pins.append(PluginPin(name=name,version='1.0.0',api_version='1.0',artifact_path='fixture.whl',
+        pins.append(PluginPin(name=name,version='1.1.0',api_version='1.0',artifact_path='fixture.whl',
             artifact_sha256=hashlib.sha256(b'container-source-staged').hexdigest(),manifest_sha256=hashlib.sha256(content).hexdigest(),enabled=True))
     registry=PluginRegistry.load(tuple(pins),directory,core_api='1.0')
     requests=[]

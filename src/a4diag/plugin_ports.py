@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import re
 import secrets
@@ -25,6 +26,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from a4diag.domain import Operation, Plan, Risk, StepResult, TargetConfig, canonical_json_bytes, plan_digest
+from a4diag.evidence_grounding import assess_diagnosis as assess_grounding
 from a4diag.plugin_api.manifest import PluginType
 from a4diag.plugin_client import PluginClient
 from a4diag.plugin_api.target_protocol import (
@@ -511,6 +513,7 @@ def _target_signer(target: TargetConfig) -> TargetSigner:
 class _RpcCollectorPort:
     registry: PluginRegistry
     client_factory: ClientFactory
+    clock: Callable[[], int] = lambda: int(time.time())
 
     def _client(self, target: TargetConfig) -> PluginClient:
         manifest_name = f"transport-{target.mode.value}"
@@ -597,8 +600,10 @@ class _RpcCollectorPort:
                     if result["data"]["truncated"]:
                         raise ValueError("truncated probe")
                     parse_bound_probe_output(probe, result["stdout"])
-                row.update(content=redact(result["stdout"]), available=True,
-                           truncated=result["data"]["truncated"])
+                content = redact(result["stdout"])
+                row.update(content=content, available=True,
+                           truncated=result["data"]["truncated"], collected_at=self.clock(),
+                           content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest())
             except Exception:
                 row.update(content="", available=False, truncated=False, error="evidence_unavailable")
             evidence.append(row)
@@ -778,6 +783,7 @@ class _RpcCollectorPort:
 class _RpcModelPort:
     client: PluginClient
     registry: PluginRegistry | None = None
+    clock: Callable[[], int] = lambda: int(time.time())
 
     def _evidence(
         self,
@@ -822,7 +828,14 @@ class _RpcModelPort:
             or not isinstance(missing, list) or len(missing) > 8
             or any(not isinstance(item, str) for item in missing)):
             raise RuntimeFailure("model_result_invalid", "diagnose")
-        return result
+        return self.assess_diagnosis(target, evidence, result)
+
+    def assess_diagnosis(
+        self, target: TargetConfig, evidence: list[dict[str, JsonValue]],
+        diagnosis: dict[str, JsonValue], *, now: int | None = None,
+    ) -> dict[str, JsonValue]:
+        return assess_grounding(target, evidence, diagnosis,
+                                now=self.clock() if now is None else now)
 
     def plan(
         self,

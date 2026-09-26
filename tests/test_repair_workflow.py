@@ -25,7 +25,7 @@ def repair_deps(deps_factory, tmp_path, *, standing=True, effect_kind=None):
     content = json.dumps(manifest).encode()
     (root / 'capability-services.json').write_bytes(content)
     (root / 'plugin.whl').write_bytes(b'pinned-fixture')
-    registry = PluginRegistry.load((PluginPin(name='capability-services', version='1.0.0', api_version='1.0',
+    registry = PluginRegistry.load((PluginPin(name='capability-services', version='1.1.0', api_version='1.0',
         artifact_path='plugin.whl', artifact_sha256=hashlib.sha256(b'pinned-fixture').hexdigest(),
         manifest_sha256=hashlib.sha256(content).hexdigest(), enabled=True),), root, core_api='1.0')
     profile = _profile(target_id='target-1', standing_authorization=standing)

@@ -518,6 +518,10 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
             return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "evidence_unavailable_or_unresolved"}
         if missing:
             return {"diagnosis": diagnosis, "missing_evidence": missing, "status": "collecting_evidence"}
+        if callable(getattr(deps.plugins.model, "assess_diagnosis", None)) and diagnosis.get("grounding_status") == "insufficient_evidence":
+            return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "diagnostic_evidence_missing"}
+        if callable(getattr(deps.plugins.model, "assess_diagnosis", None)) and diagnosis.get("grounding_status") == "counterevidence_present":
+            return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "diagnostic_counterevidence_present"}
         confidence = diagnosis.get("confidence")
         if type(confidence) not in {int, float} or not target.minimum_confidence <= confidence <= 1:
             return {"diagnosis": diagnosis, "status": "insufficient_evidence", "error": "diagnostic_confidence_too_low"}
@@ -574,10 +578,21 @@ def build_graph(deps: WorkflowDependencies) -> CompiledStateGraph:
 
     def decision_readiness(state: AgentState) -> StepResult:
         target = target_for(state)
-        confidence = state.get("diagnosis", {}).get("confidence")
+        diagnosis = state.get("diagnosis", {})
+        reassess = getattr(deps.plugins.model, "assess_diagnosis", None)
+        if callable(reassess):
+            try:
+                diagnosis = reassess(target, model_evidence(state), diagnosis, now=now())
+            except Exception:
+                return StepResult(ok=False, status="diagnostic_evidence_missing")
+            if diagnosis.get("grounding_status") == "insufficient_evidence":
+                return StepResult(ok=False, status="diagnostic_evidence_missing")
+            if diagnosis.get("grounding_status") == "counterevidence_present":
+                return StepResult(ok=False, status="diagnostic_counterevidence_present")
+        confidence = diagnosis.get("confidence")
         if type(confidence) not in {int, float} or not target.minimum_confidence <= confidence <= 1:
             return StepResult(ok=False, status="diagnostic_confidence_too_low")
-        if state.get("diagnosis", {}).get("missing_evidence"):
+        if diagnosis.get("missing_evidence"):
             return StepResult(ok=False, status="diagnostic_evidence_missing")
         validate_recovery = getattr(deps.plugins.collector, "validate_recovery", None)
         if plan_for(state).operations and callable(validate_recovery):

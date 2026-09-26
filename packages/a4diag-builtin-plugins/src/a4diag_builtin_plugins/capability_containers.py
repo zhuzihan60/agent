@@ -26,7 +26,7 @@ class ContainerSnapshot(BaseModel):
 
 class ContainersPlugin(BaseCapabilityPlugin):
     def __init__(self):
-        super().__init__(transport=None, name='capability-containers', version='1.0.0', actions=frozenset({'start','restart'}))
+        super().__init__(transport=None, name='capability-containers', version='1.1.0', actions=frozenset({'start','restart'}))
 
     async def prepare(self, *args, **kwargs):
         raise CapabilityError('container_helper_required')

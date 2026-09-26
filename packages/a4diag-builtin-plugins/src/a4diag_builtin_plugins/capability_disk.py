@@ -5,7 +5,7 @@ from a4diag_builtin_plugins.transport_common import CapabilityProbeResult
 
 class DiskPlugin(BaseCapabilityPlugin):
     def __init__(self):
-        super().__init__(transport=None, name='capability-disk', version='1.0.0', actions=frozenset({'cleanup'}))
+        super().__init__(transport=None, name='capability-disk', version='1.1.0', actions=frozenset({'cleanup'}))
 
     async def prepare(self, *args, **kwargs):
         raise CapabilityError('disk_helper_required')

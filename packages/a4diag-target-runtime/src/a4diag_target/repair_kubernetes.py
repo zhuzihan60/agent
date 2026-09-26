@@ -118,6 +118,35 @@ def lineage(deployment, replica_sets, pods):
     return owned,[p for p in pods if any(_owned(p,'ReplicaSet',uid) for uid in ids)]
 
 
+def _deployment_selector(deployment):
+    """Only a selector supplied by the verified Deployment may narrow list reads."""
+    selector=deployment.get('spec',{}).get('selector')
+    if not isinstance(selector,dict):raise KubernetesRefusal('deployment_selector_required')
+    labels=selector.get('matchLabels',{})
+    expressions=selector.get('matchExpressions',[])
+    if not isinstance(labels,dict) or not isinstance(expressions,list):
+        raise KubernetesRefusal('deployment_selector_invalid')
+    key_pattern=r'[A-Za-z0-9][A-Za-z0-9./_-]{0,252}'
+    value_pattern=r'[A-Za-z0-9._-]{0,63}'
+    terms=[]
+    for key,value in sorted(labels.items()):
+        if not isinstance(key,str) or not re.fullmatch(key_pattern,key) or not isinstance(value,str) or not re.fullmatch(value_pattern,value):
+            raise KubernetesRefusal('deployment_selector_invalid')
+        terms.append(f'{key}={value}')
+    for expression in expressions:
+        if not isinstance(expression,dict):raise KubernetesRefusal('deployment_selector_invalid')
+        key=expression.get('key');operator=expression.get('operator');values=expression.get('values',[])
+        if not isinstance(key,str) or not re.fullmatch(key_pattern,key) or not isinstance(values,list) or len(values)>32 or any(not isinstance(v,str) or not re.fullmatch(value_pattern,v) for v in values):
+            raise KubernetesRefusal('deployment_selector_invalid')
+        if operator in ('In','NotIn') and values:
+            terms.append(f'{key} {"in" if operator=="In" else "notin"} ({",".join(values)})')
+        elif operator in ('Exists','DoesNotExist') and not values:
+            terms.append(key if operator=='Exists' else '!'+key)
+        else:raise KubernetesRefusal('deployment_selector_invalid')
+    if not terms:raise KubernetesRefusal('deployment_selector_required')
+    return ','.join(terms)
+
+
 def rollout_snapshot(profile, deployment, replica_sets, pods, *, prior_replica_set_uids=()):
     expected=identity(profile)
     if deployment['metadata']['uid']!=expected.uid:
@@ -223,7 +252,7 @@ class KubernetesAdapter:
         self.context=ssl.create_default_context(cadata=self.credentials.ca_pem)
         self.timeout_seconds=5
 
-    def _request(self,kind,*,patch=None,pod=None):
+    def _request(self,kind,*,patch=None,pod=None,label_selector=None,event_uid=None):
         import http.client
         import json
         import socket
@@ -235,13 +264,23 @@ class KubernetesAdapter:
         paths={'deployment':base+'/deployments/'+self.identity.name,
             'replicasets':base+'/replicasets?limit=200','pods':core+'/pods?limit=200',
             'resourcequotas':core+'/resourcequotas?limit=100',
-            'events':core+'/events?limit=100&fieldSelector='+quote('involvedObject.uid='+self.identity.uid,safe='')}
+            'events':core+'/events?limit=100'}
         if kind=='logs' and isinstance(pod,str) and re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}',pod):
             path=core+'/pods/'+pod+'/log?follow=false&tailLines=100&limitBytes=16384&container='+self.profile.constraints.container_name
         elif kind in paths:
             path=paths[kind]
         else:
             raise ValueError('kubernetes_endpoint_denied')
+        if label_selector is not None:
+            if kind not in ('replicasets','pods') or not isinstance(label_selector,str) or len(label_selector)>4096:
+                raise ValueError('kubernetes_selector_denied')
+            path+='&labelSelector='+quote(label_selector,safe='')
+        if kind=='events':
+            uid=self.identity.uid if event_uid is None else event_uid
+            if not isinstance(uid,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,252}',uid):
+                raise ValueError('kubernetes_event_uid_denied')
+            path+='&fieldSelector='+quote('involvedObject.uid='+uid,safe='')
+        elif event_uid is not None:raise ValueError('kubernetes_event_uid_denied')
         if patch is not None and kind!='deployment':
             raise ValueError('kubernetes_write_denied')
         deadline=time.monotonic()+self.timeout_seconds
@@ -252,23 +291,35 @@ class KubernetesAdapter:
         url=urlsplit(self.credentials.endpoint)
         body=b'' if patch is None else json.dumps(patch,separators=(',',':')).encode()
         method='GET' if patch is None else 'PATCH'
-        wire=(f'{method} {path} HTTP/1.1\r\nHost: {url.netloc}\r\nAuthorization: Bearer {self.credentials.token.get_secret_value()}\r\nContent-Type: application/json-patch+json\r\nAccept: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode()+body
-        with socket.create_connection((url.hostname,url.port),timeout=remaining()) as raw:
-            raw.settimeout(remaining())
-            with self.context.wrap_socket(raw,server_hostname=url.hostname) as channel:
-                channel.settimeout(remaining());channel.sendall(wire)
-                response=http.client.HTTPResponse(_DeadlineReader(channel,deadline));response.begin()
-                limit=16384 if kind=='logs' else 1048576
-                content=response.read(limit+1);remaining()
-                if response.status!=200:
-                    # Server messages and response bodies may contain secrets. Never relay them.
-                    raise KubernetesAPIError(response.status)
-                if len(content)>limit:raise ValueError('kubernetes_response_too_large')
-                if kind=='logs':return content.decode('utf-8','replace')
-                value=json.loads(content)
-                if type(value) is not dict:raise ValueError('invalid_kubernetes_response')
-                if value.get('metadata',{}).get('continue'):raise ValueError('kubernetes_list_too_large')
-                return value
+        list_kind=kind in ('replicasets','pods','resourcequotas','events')
+        items=[];seen=set();total_bytes=0
+        for page in range(8 if list_kind else 1):
+            wire=(f'{method} {path} HTTP/1.1\r\nHost: {url.netloc}\r\nAuthorization: Bearer {self.credentials.token.get_secret_value()}\r\nContent-Type: application/json-patch+json\r\nAccept: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n').encode()+body
+            with socket.create_connection((url.hostname,url.port),timeout=remaining()) as raw:
+                raw.settimeout(remaining())
+                with self.context.wrap_socket(raw,server_hostname=url.hostname) as channel:
+                    channel.settimeout(remaining());channel.sendall(wire)
+                    response=http.client.HTTPResponse(_DeadlineReader(channel,deadline));response.begin()
+                    limit=16384 if kind=='logs' else 1048576
+                    content=response.read(limit+1);remaining()
+                    if response.status!=200:
+                        # Server messages and response bodies may contain secrets. Never relay them.
+                        raise KubernetesAPIError(response.status)
+                    if len(content)>limit:raise ValueError('kubernetes_response_too_large')
+            if kind=='logs':return content.decode('utf-8','replace')
+            value=json.loads(content)
+            if type(value) is not dict:raise ValueError('invalid_kubernetes_response')
+            if not list_kind:return value
+            batch=value.get('items');metadata=value.get('metadata',{})
+            if not isinstance(batch,list) or not isinstance(metadata,dict):raise ValueError('invalid_kubernetes_response')
+            items.extend(batch);total_bytes+=len(content)
+            if len(items)>1600 or total_bytes>4194304:raise ValueError('kubernetes_list_too_large')
+            token=metadata.get('continue','')
+            if not token:return {'items':items}
+            if not isinstance(token,str) or len(token)>4096 or token in seen or page==7:
+                raise ValueError('kubernetes_list_too_large')
+            seen.add(token);path=path.split('&continue=',1)[0]+'&continue='+quote(token,safe='')
+        raise ValueError('kubernetes_list_too_large')
 
     def deployment(self):
         value=self._request('deployment')
@@ -278,19 +329,18 @@ class KubernetesAdapter:
     def inspect(self,*,capacity=False):
         import time
         deadline=time.monotonic()+self.timeout_seconds
-        def read(kind):
+        def read(kind,**kwargs):
             self.timeout_seconds=deadline-time.monotonic()
             if self.timeout_seconds<=0:raise TimeoutError('kubernetes_api_timeout')
-            return self._request(kind)
+            return self._request(kind,**kwargs)
         deployment=read('deployment')
         if deployment.get('metadata',{}).get('uid')!=self.identity.uid:raise KubernetesRefusal('deployment_identity_changed')
-        sets=read('replicasets')['items'];pods=read('pods')['items']
+        selector=_deployment_selector(deployment)
+        sets=read('replicasets',label_selector=selector)['items'];pods=read('pods',label_selector=selector)['items']
         if capacity:
             prepare_deployment(self.profile,deployment)
             _,owned=lineage(deployment,sets,pods)
             check_capacity(self.profile,deployment,owned,read('resourcequotas')['items'])
-            # Events are bounded diagnostic input, never patch or health authority.
-            read('events')
         owned,_=lineage(deployment,sets,pods)
         # A background-deleted old ReplicaSet can leave terminating Pods. Retain
         # only UIDs whose Deployment controller ownership was actually verified.
@@ -320,24 +370,68 @@ class KubernetesAdapter:
         return self._request('deployment',patch=patch)
 
     def evidence(self):
+        import heapq
         import time
+        from datetime import datetime
         from a4diag.redaction import redact
         deadline=time.monotonic()+self.timeout_seconds
         def read(kind,**kwargs):
             self.timeout_seconds=deadline-time.monotonic()
             if self.timeout_seconds<=0:raise TimeoutError('kubernetes_api_timeout')
             return self._request(kind,**kwargs)
-        deployment=read('deployment');sets=read('replicasets')['items'];pods=read('pods')['items']
+        deployment=read('deployment')
         if deployment['metadata']['uid']!=self.identity.uid:raise KubernetesRefusal('deployment_identity_changed')
-        _,owned=lineage(deployment,sets,pods)
-        events=read('events')['items']
-        evidence={'untrusted':True,'events':[{'reason':str(e.get('reason',''))[:128],
-            'message':str(e.get('message',''))[:1024]} for e in events[:20]],'logs':[],'truncated':len(events)>20 or len(owned)>3}
-        for pod in sorted(owned,key=lambda p:p['metadata']['uid'])[:3]:
+        try:selector=_deployment_selector(deployment)
+        except KubernetesRefusal:selector=None
+        sets=read('replicasets',label_selector=selector)['items'];pods=read('pods',label_selector=selector)['items']
+        owned_sets,owned=lineage(deployment,sets,pods)
+        def priority(p):
+            status=p.get('status',{})
+            waiting=any(c.get('state',{}).get('waiting') or c.get('lastState',{}).get('terminated') or c.get('restartCount',0)
+                        for c in status.get('containerStatuses',[]))
+            unscheduled=any(c.get('type')=='PodScheduled' and c.get('status')=='False' for c in status.get('conditions',[]))
+            ready=any(c.get('type')=='Ready' and c.get('status')=='True' for c in status.get('conditions',[]))
+            return (not (waiting or unscheduled or not ready),p['metadata']['uid'])
+        ranked=sorted(owned,key=priority)
+        uids=[p['metadata']['uid'] for p in ranked]
+        uids += [r['metadata']['uid'] for r in sorted(owned_sets,key=lambda r:r['metadata']['uid'])]
+        uids.append(deployment['metadata']['uid'])
+        evidence={'untrusted':True,'events':[],'logs':[],'truncated':len(uids)>16 or len(ranked)>3,
+                  'partial':selector is None or len(uids)>16 or len(ranked)>3}
+        candidates=[]
+        for source_index,uid in enumerate(uids[:16]):
+            try:events=read('events',event_uid=uid)['items']
+            except (KubernetesAPIError,ValueError):
+                evidence['partial']=True;continue
+            per_uid=[];valid_count=0
+            for event_index,event in enumerate(events):
+                if not isinstance(event,dict) or event.get('involvedObject',{}).get('uid')!=uid:
+                    evidence['partial']=True;continue
+                valid_count+=1
+                entry={'source_uid':uid,'reason':str(event.get('reason',''))[:128],
+                       'message':str(event.get('message',''))[:1024]}
+                when=event.get('eventTime') or event.get('lastTimestamp') or event.get('firstTimestamp')
+                if isinstance(when,str):entry['event_time']=when[:64]
+                try:
+                    parsed=datetime.fromisoformat(when.replace('Z','+00:00')) if isinstance(when,str) else None
+                    observed=parsed.timestamp() if parsed is not None and parsed.tzinfo is not None else 0.0
+                except (OverflowError,ValueError):observed=0.0
+                warning=event.get('type')=='Warning' or bool(re.search(
+                    r'failed|backoff|error|unhealthy|oom|evict|unschedul|probe',entry['reason'],re.IGNORECASE))
+                candidate=(int(warning),observed,-source_index,-event_index,entry)
+                if len(per_uid)<20:heapq.heappush(per_uid,candidate)
+                else:heapq.heappushpop(per_uid,candidate)
+            candidates.extend(per_uid)
+            if valid_count>20:evidence['truncated']=evidence['partial']=True
+        if len(candidates)>20:evidence['truncated']=evidence['partial']=True
+        evidence['events']=[item[4] for item in sorted(candidates,reverse=True)[:20]]
+        for pod in ranked[:3]:
             try:content=read('logs',pod=pod['metadata']['name'])
-            except KubernetesAPIError:content='logs_unavailable'
+            except KubernetesAPIError:
+                content='logs_unavailable';evidence['partial']=True
             evidence['logs'].append({'pod_uid':pod['metadata']['uid'],'content':content[:4096]})
             evidence['truncated'] |= len(content)>=4096
+            evidence['partial'] |= len(content)>=4096
         after=read('deployment')
         if (after['metadata']['uid'],after['metadata']['generation'])!=(deployment['metadata']['uid'],deployment['metadata']['generation']):
             raise ValueError('deployment_evidence_changed')

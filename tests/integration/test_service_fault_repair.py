@@ -104,7 +104,7 @@ def test_signed_service_recovery_through_actual_daemon(deps_factory,tmp_path,fau
         for name in ('capability-services','transport-local'):
             content=(repo/'packages/a4diag-builtin-plugins/manifests'/f'{name}.json').read_bytes()
             (registry_dir/f'{name}.json').write_bytes(content)
-            pins.append(PluginPin(name=name,version='1.0.0',api_version='1.0',artifact_path='fixture.whl',artifact_sha256=hashlib.sha256(b'source-staged-test').hexdigest(),manifest_sha256=hashlib.sha256(content).hexdigest(),enabled=True))
+            pins.append(PluginPin(name=name,version='1.1.0',api_version='1.0',artifact_path='fixture.whl',artifact_sha256=hashlib.sha256(b'source-staged-test').hexdigest(),manifest_sha256=hashlib.sha256(content).hexdigest(),enabled=True))
         registry=PluginRegistry.load(tuple(pins),registry_dir,core_api='1.0')
         settings=deps.settings.model_copy(update={'targets':(target,)})
         key=Ed25519PrivateKey.generate();signer=TargetSigner(key)

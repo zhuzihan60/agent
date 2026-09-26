@@ -1,6 +1,6 @@
-# A4Diag 1.0.0
+# A4Diag 1.1.0
 
-v1.0.0 包含[服务与 HTTP 恢复闭环](docs/deployment/service-http-recovery.md)、[七类 Linux 探针与文件恢复验证](docs/linux-fault-recovery.md)，以及可配置的模型输出预算。控制端、内置插件和目标端必须使用同一版本。兼容性变化和升级顺序见 [v1.0.0 发布说明](docs/release/v1.0.0.md)。
+v1.1.0 增加有独立授权边界的磁盘、服务、Docker/Podman 与 Kubernetes Deployment 修复，并加固告警持久化重试、日志脱敏及证据引用校验。控制端、内置插件和目标端必须使用同一版本。默认只读，升级不会自动启用写权限。兼容性变化和升级顺序见 [v1.1.0 发布说明](docs/release/v1.1.0.md)，能力与验收边界见 [支持矩阵](docs/testing/remediation-matrix.md)。
 
 [![CI](https://github.com/zhuzihan60/agent/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/zhuzihan60/agent/actions/workflows/test.yml)
 [![Release](https://img.shields.io/github/v/release/zhuzihan60/agent)](https://github.com/zhuzihan60/agent/releases/latest)
@@ -53,7 +53,7 @@ targets: []
 plugins: []
 ```
 
-当前版本：[v1.0.0](https://github.com/zhuzihan60/agent/releases/tag/v1.0.0)
+当前版本：[v1.1.0](https://github.com/zhuzihan60/agent/releases/tag/v1.1.0)
 
 ## 安全模型
 

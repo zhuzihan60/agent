@@ -12,7 +12,7 @@ import uuid
 import pytest
 
 pytestmark=pytest.mark.skipif(os.environ.get('A4DIAG_TEST_KUBERNETES')!='1',reason='requires disposable Kubernetes lab')
-IMAGE='docker.io/library/a4diag-lab-python@sha256:c80b17d26d171aea81c392ef5e316e5124695c220212b68914e9ce563e4e17c5'
+IMAGE=os.environ.get('A4DIAG_K8S_TEST_IMAGE','docker.io/library/a4diag-lab-python@sha256:c80b17d26d171aea81c392ef5e316e5124695c220212b68914e9ce563e4e17c5')
 
 
 def kubectl(*args,body=None,check=True):

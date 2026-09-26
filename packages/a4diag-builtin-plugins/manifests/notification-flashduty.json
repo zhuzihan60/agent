@@ -1,7 +1,7 @@
 {
   "name": "notification-flashduty",
   "plugin_type": "notification",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "api_min": "1.0",
   "api_max": "1.0",
   "executable": "a4diag_builtin_plugins.notification_flashduty:main",

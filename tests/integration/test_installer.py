@@ -264,7 +264,8 @@ def test_self_check_reports_read_only_defaults(tmp_path: Path, monkeypatch: pyte
     assert code == 0
     payload = json.loads(output)
     assert payload["ok"] is True
-    assert payload["version"] == "1.0.0"
+    from a4diag import __version__
+    assert payload["version"] == __version__
     assert payload["global_mode"] == "read_only"
     assert payload["targets"] == []
     assert payload["offline"] is True

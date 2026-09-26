@@ -73,8 +73,8 @@ class ReleaseBuildContractTests(unittest.TestCase):
     ) -> tuple[Path, Path, Path, Path, Path, Path]:
         project = root / "project"
         dependency_wheelhouse = root / "dependency-wheelhouse"
-        core_wheel = root / "a4diag-1.0.0-py3-none-any.whl"
-        builtin_wheel = root / "a4diag_builtin_plugins-1.0.0-py3-none-any.whl"
+        core_wheel = root / "a4diag-1.1.0-py3-none-any.whl"
+        builtin_wheel = root / "a4diag_builtin_plugins-1.1.0-py3-none-any.whl"
         output = root / "release-v4-br0-final"
         (project / "deploy").mkdir(parents=True)
         (project / "config").mkdir()
@@ -122,8 +122,8 @@ class ReleaseBuildContractTests(unittest.TestCase):
         (dependency_wheelhouse / "SHA256SUMS").write_text(
             f"{dependency_digest}  {dependency_wheel.name}\n", encoding="utf-8"
         )
-        self.write_minimal_wheel(core_wheel, "a4diag", "1.0.0")
-        self.write_minimal_wheel(builtin_wheel, "a4diag-builtin-plugins", "1.0.0")
+        self.write_minimal_wheel(core_wheel, "a4diag", "1.1.0")
+        self.write_minimal_wheel(builtin_wheel, "a4diag-builtin-plugins", "1.1.0")
         return (
             project,
             dependency_wheelhouse,
@@ -196,7 +196,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
                 {"tmpfiles.d", "sysusers.d"},
             )
             self.assertEqual(
-                (output / "VERSION").read_text("utf-8").strip(), "1.0.0"
+                (output / "VERSION").read_text("utf-8").strip(), "1.1.0"
             )
             builtin_index = json.loads(
                 (output / "builtin-plugins" / "builtin-index.json").read_text("utf-8")
@@ -238,7 +238,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
             self.assertEqual(manifested_paths, actual_paths)
 
             manifest = json.loads((output / "MANIFEST.json").read_bytes())
-            self.assertEqual(manifest["version"], "1.0.0")
+            self.assertEqual(manifest["version"], "1.1.0")
             self.assertEqual(set(manifest["artifacts"]), actual_paths - {"MANIFEST.json"})
 
     def test_target_release_is_exact_and_independently_verifiable(self) -> None:
@@ -255,12 +255,12 @@ class ReleaseBuildContractTests(unittest.TestCase):
             )
             wheels = []
             for filename, distribution in (
-                ("a4diag-1.0.0-py3-none-any.whl", "a4diag"),
-                ("a4diag_builtin_plugins-1.0.0-py3-none-any.whl", "a4diag-builtin-plugins"),
-                ("a4diag_target_runtime-1.0.0-py3-none-any.whl", "a4diag-target-runtime"),
+                ("a4diag-1.1.0-py3-none-any.whl", "a4diag"),
+                ("a4diag_builtin_plugins-1.1.0-py3-none-any.whl", "a4diag-builtin-plugins"),
+                ("a4diag_target_runtime-1.1.0-py3-none-any.whl", "a4diag-target-runtime"),
             ):
                 wheel = root / filename
-                self.write_minimal_wheel(wheel, distribution, "1.0.0")
+                self.write_minimal_wheel(wheel, distribution, "1.1.0")
                 wheels.append(wheel)
             output = root / "target-release"
 
@@ -671,7 +671,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
         )
 
         wheels = sorted(wheel_dir.glob("a4diag-*.whl"))
-        self.assertEqual([wheel.name for wheel in wheels], ["a4diag-1.0.0-py3-none-any.whl"])
+        self.assertEqual([wheel.name for wheel in wheels], ["a4diag-1.1.0-py3-none-any.whl"])
         return wheels[0]
 
     def test_built_wheel_declares_v3_and_python311_runtime(self) -> None:
@@ -687,7 +687,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
                 metadata = BytesParser().parsebytes(archive.read(metadata_paths[0]))
 
             self.assertEqual(metadata["Name"], "a4diag")
-            self.assertEqual(metadata["Version"], "1.0.0")
+            self.assertEqual(metadata["Version"], "1.1.0")
             python_clauses = {
                 clause.strip() for clause in metadata["Requires-Python"].split(",")
             }
@@ -826,7 +826,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
             self.assertEqual(imported.returncode, 0, msg=imported.stderr)
             observed = json.loads(imported.stdout)
             self.assertTrue(Path(observed["file"]).is_relative_to(install_dir))
-            self.assertEqual(observed["version"], "1.0.0")
+            self.assertEqual(observed["version"], "1.1.0")
 
 
 if __name__ == "__main__":

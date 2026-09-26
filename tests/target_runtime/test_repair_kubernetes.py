@@ -53,7 +53,7 @@ def test_quota_and_unschedulable_capacity_fail_closed():
 
 def deployment():
     return dict(metadata=dict(uid='u1', resourceVersion='42', generation=1, labels={}),
-        spec=dict(replicas=1, strategy=dict(type='RollingUpdate', rollingUpdate=dict(maxUnavailable=0,maxSurge=1)),
+        spec=dict(replicas=1, selector={'matchLabels':{'app':'web'}}, strategy=dict(type='RollingUpdate', rollingUpdate=dict(maxUnavailable=0,maxSurge=1)),
             template=dict(metadata=dict(annotations={}),spec=dict(containers=[dict(name='web',image='demo:broken')]))),
         status=dict(observedGeneration=1,updatedReplicas=1,availableReplicas=0,replicas=1))
 
@@ -417,9 +417,158 @@ def test_adapter_remembers_verified_replicaset_uids_across_rollout_reads(monkeyp
     pods=[{'metadata':{'uid':name,'ownerReferences':[{'uid':owner,'kind':'ReplicaSet','controller':True}]},'status':{'conditions':[{'type':'Ready','status':'True'}]}} for name,owner in [('new-pod','new-rs'),('old-pod','old-rs')]]
     data={'deployment':d,'replicasets':{'items':[new,old]},'pods':{'items':pods}}
     adapter=object.__new__(KubernetesAdapter);adapter.profile=profile();adapter.identity=identity(profile());adapter.timeout_seconds=5
-    monkeypatch.setattr(adapter,'_request',lambda kind:copy.deepcopy(data[kind]))
+    monkeypatch.setattr(adapter,'_request',lambda kind,**kwargs:copy.deepcopy(data[kind]))
     assert not adapter.inspect()[1].complete
     data['replicasets']['items']=[new]
     assert not adapter.inspect()[1].complete
     data['pods']['items']=pods[:1]
     assert adapter.inspect()[1].complete
+
+
+def test_evidence_collects_owned_replica_and_pod_events_not_unrelated_events(monkeypatch):
+    from a4diag_target.repair_kubernetes import KubernetesAdapter,identity
+    d=deployment();d['spec']['selector']={'matchLabels':{'app':'web'}}
+    rs={'metadata':{'uid':'rs1','ownerReferences':[{'uid':'u1','kind':'Deployment','controller':True}]}}
+    pod={'metadata':{'uid':'p1','name':'web-1','ownerReferences':[{'uid':'rs1','kind':'ReplicaSet','controller':True}]},
+         'status':{'conditions':[{'type':'PodScheduled','status':'False','reason':'Unschedulable'}]}}
+    events={'u1':[{'reason':'ScalingReplicaSet','involvedObject':{'uid':'u1'},'eventTime':'2026-01-01T00:00:00Z'}],
+            'rs1':[{'reason':'FailedCreate','involvedObject':{'uid':'rs1'}}],
+            'p1':[{'reason':'FailedScheduling','message':'Insufficient cpu','involvedObject':{'uid':'p1'}},
+                  {'reason':'Unrelated','involvedObject':{'uid':'other'}}]}
+    adapter=object.__new__(KubernetesAdapter);adapter.profile=profile();adapter.identity=identity(profile());adapter.timeout_seconds=5
+    calls=[]
+    def request(kind,**kwargs):
+        calls.append((kind,kwargs))
+        if kind=='deployment':return copy.deepcopy(d)
+        if kind=='replicasets':return {'items':[copy.deepcopy(rs)]}
+        if kind=='pods':return {'items':[copy.deepcopy(pod)]}
+        if kind=='events':return {'items':copy.deepcopy(events[kwargs['event_uid']])}
+        if kind=='logs':return 'failed to start'
+        raise AssertionError(kind)
+    monkeypatch.setattr(adapter,'_request',request)
+    result=adapter.evidence()
+    assert {e['reason'] for e in result['events']}=={'ScalingReplicaSet','FailedCreate','FailedScheduling'}
+    assert {e['source_uid'] for e in result['events']}=={'u1','rs1','p1'}
+    assert next(e for e in result['events'] if e['source_uid']=='u1')['event_time']=='2026-01-01T00:00:00Z'
+    assert {kwargs['event_uid'] for kind,kwargs in calls if kind=='events'}=={'u1','rs1','p1'}
+    assert all(kwargs['label_selector']=='app=web' for kind,kwargs in calls if kind in ('pods','replicasets'))
+
+
+def test_inspect_uses_selector_and_fails_closed_on_incomplete_list(monkeypatch):
+    from a4diag_target.repair_kubernetes import KubernetesAdapter,identity
+    d=deployment();d['spec']['selector']={'matchLabels':{'app':'web'}}
+    adapter=object.__new__(KubernetesAdapter);adapter.profile=profile();adapter.identity=identity(profile());adapter.timeout_seconds=5
+    calls=[]
+    def request(kind,**kwargs):
+        calls.append((kind,kwargs))
+        if kind=='deployment':return copy.deepcopy(d)
+        if kind=='replicasets':return {'items':[]}
+        if kind=='pods':raise ValueError('kubernetes_list_too_large')
+        raise AssertionError(kind)
+    monkeypatch.setattr(adapter,'_request',request)
+    with pytest.raises(ValueError,match='list_too_large'):adapter.inspect(capacity=True)
+    assert ('replicasets',{'label_selector':'app=web'}) in calls
+    assert ('pods',{'label_selector':'app=web'}) in calls
+
+
+def test_pod_pagination_is_bounded_and_preserves_selector(monkeypatch):
+    import io,json
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs,urlsplit
+    from a4diag_target.repair_kubernetes import KubernetesAdapter,identity
+    adapter=object.__new__(KubernetesAdapter);adapter.profile=profile();adapter.identity=identity(profile());adapter.timeout_seconds=5
+    adapter.credentials=SimpleNamespace(endpoint='https://127.0.0.1:6443',token=SimpleNamespace(get_secret_value=lambda:'fixture-token'))
+    paths=[];endless=False
+    class Channel:
+        def __enter__(self):return self
+        def __exit__(self,*args):pass
+        def settimeout(self,value):pass
+        def sendall(self,wire):
+            path=wire.split(b' ',2)[1].decode();paths.append(path)
+            query=parse_qs(urlsplit(path).query)
+            assert query['labelSelector']==['app=web']
+            page=int(query.get('continue',['0'])[0])
+            payload={'items':[{'metadata':{'uid':f'pod-{page}'}}],
+                     'metadata':{'continue':str(page+1) if endless or page==0 else ''}}
+            body=json.dumps(payload).encode()
+            self.stream=io.BytesIO(b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body)
+        def recv_into(self,target):return self.stream.readinto(target)
+    channel=Channel();adapter.context=SimpleNamespace(wrap_socket=lambda raw,**kwargs:raw)
+    monkeypatch.setattr('socket.create_connection',lambda *args,**kwargs:channel)
+    assert [p['metadata']['uid'] for p in adapter._request('pods',label_selector='app=web')['items']]==['pod-0','pod-1']
+    paths.clear();endless=True
+    with pytest.raises(ValueError,match='list_too_large'):adapter._request('pods',label_selector='app=web')
+    assert len(paths)==8
+
+
+def test_evidence_uid_budget_prioritizes_anomalous_pod(monkeypatch):
+    from a4diag_target.repair_kubernetes import KubernetesAdapter,identity
+    d=deployment()
+    sets=[{'metadata':{'uid':f'rs-{n}','ownerReferences':[{'uid':'u1','kind':'Deployment','controller':True}]}} for n in range(16)]
+    pod={'metadata':{'uid':'bad-pod','name':'web-bad','ownerReferences':[{'uid':'rs-0','kind':'ReplicaSet','controller':True}]},
+         'status':{'containerStatuses':[{'state':{'waiting':{'reason':'ImagePullBackOff'}}}]}}
+    adapter=object.__new__(KubernetesAdapter);adapter.profile=profile();adapter.identity=identity(profile());adapter.timeout_seconds=5
+    queried=[]
+    def request(kind,**kwargs):
+        if kind=='deployment':return copy.deepcopy(d)
+        if kind=='replicasets':return {'items':copy.deepcopy(sets)}
+        if kind=='pods':return {'items':[copy.deepcopy(pod)]}
+        if kind=='events':
+            queried.append(kwargs['event_uid']);return {'items':[]}
+        if kind=='logs':return 'image pull denied'
+        raise AssertionError(kind)
+    monkeypatch.setattr(adapter,'_request',request)
+    evidence=adapter.evidence()
+    assert 'bad-pod' in queried
+    assert evidence['partial'] and evidence['truncated']
+
+
+def test_evidence_benign_event_flood_does_not_hide_owned_pod_failure(monkeypatch):
+    from a4diag_target.repair_kubernetes import KubernetesAdapter,identity
+    d=deployment()
+    rs={'metadata':{'uid':'rs1','ownerReferences':[{'uid':'u1','kind':'Deployment','controller':True}]}}
+    pod={'metadata':{'uid':'p1','name':'web-1','ownerReferences':[{'uid':'rs1','kind':'ReplicaSet','controller':True}]},
+         'status':{'containerStatuses':[{'state':{'waiting':{'reason':'ImagePullBackOff'}}}]}}
+    benign=lambda uid,n:{'type':'Normal','reason':'Scheduled','message':f'normal-{n}',
+                         'involvedObject':{'uid':uid},'eventTime':f'2026-01-01T00:00:{n:02d}Z'}
+    events={'u1':[benign('u1',n) for n in range(20)],
+            'rs1':[{'type':'Warning','reason':'FailedCreate','involvedObject':{'uid':'rs1'},
+                    'eventTime':'2026-01-01T00:01:00Z'}],
+            'p1':[benign('p1',n) for n in range(21)]+[
+                {'type':'Warning','reason':'FailedScheduling','message':'Insufficient cpu',
+                 'involvedObject':{'uid':'p1'},'eventTime':'2026-01-01T00:02:00Z'}]}
+    adapter=object.__new__(KubernetesAdapter);adapter.profile=profile();adapter.identity=identity(profile());adapter.timeout_seconds=5
+    queried=[]
+    def request(kind,**kwargs):
+        if kind=='deployment':return copy.deepcopy(d)
+        if kind=='replicasets':return {'items':[copy.deepcopy(rs)]}
+        if kind=='pods':return {'items':[copy.deepcopy(pod)]}
+        if kind=='events':
+            queried.append(kwargs['event_uid']);return {'items':copy.deepcopy(events[kwargs['event_uid']])}
+        if kind=='logs':return 'image pull denied'
+        raise AssertionError(kind)
+    monkeypatch.setattr(adapter,'_request',request)
+    evidence=adapter.evidence()
+    assert set(queried)=={'u1','rs1','p1'}
+    assert evidence['events'][0]['reason']=='FailedScheduling'
+    assert {'FailedScheduling','FailedCreate'} <= {event['reason'] for event in evidence['events']}
+    assert len(evidence['events'])==20 and evidence['partial'] and evidence['truncated']
+
+
+def test_read_only_evidence_without_deployment_selector_is_partial(monkeypatch):
+    from a4diag_target.repair_kubernetes import KubernetesAdapter,identity
+    d={'metadata':{'uid':'u1','generation':1}}
+    rs={'metadata':{'uid':'rs1','ownerReferences':[{'uid':'u1','kind':'Deployment','controller':True}]}}
+    pod={'metadata':{'uid':'p1','name':'web-1','ownerReferences':[{'uid':'rs1','kind':'ReplicaSet','controller':True}]}}
+    adapter=object.__new__(KubernetesAdapter);adapter.profile=profile();adapter.identity=identity(profile());adapter.timeout_seconds=5
+    def request(kind,**kwargs):
+        if kind=='deployment':return copy.deepcopy(d)
+        if kind=='replicasets':return {'items':[copy.deepcopy(rs)]}
+        if kind=='pods':return {'items':[copy.deepcopy(pod)]}
+        if kind=='events':return {'items':[{'reason':'FailedScheduling','involvedObject':{'uid':'p1'}}] if kwargs['event_uid']=='p1' else []}
+        if kind=='logs':return ''
+        raise AssertionError(kind)
+    monkeypatch.setattr(adapter,'_request',request)
+    evidence=adapter.evidence()
+    assert evidence['partial']
+    assert any(e['reason']=='FailedScheduling' for e in evidence['events'])
