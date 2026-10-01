@@ -23,13 +23,38 @@ MAX_JSON_TEXT_BYTES = 16_384
 MAX_JSON_TEXT_DEPTH = 32
 MAX_JSON_TEXT_LAYERS = 8
 
-_SECRET_KEY_NAME = re.compile(
-    r"(?i)(?:token|password|passwd|secret|api[_-]?key|authorization|credential|access[_-]?key)"
+_SECRET_NAMES = (
+    r"(?:token|pass(?:wd|word|phrase)|secret|api[_-]?key|authorization|credential"
+    r"|access[_-]?key|private[_-]?key|client[_-]?key(?:[_-]?data)?|cookie)"
 )
+_SECRET_KEY_NAME = re.compile(r"(?i)" + _SECRET_NAMES)
+# Usage counters such as ``max_tokens`` are integers, never credentials.
+_TOKEN_COUNT_KEY = re.compile(
+    r"(?i)(?:max|prompt|completion|total|input|output|cached|reasoning)_tokens"
+)
+_AUTH_SCHEMES = r"(?:Bearer|Basic|Digest|Negotiate|NTLM|Token)"
+# The key may be closed by a quote (Python/YAML style ``'password': 'x'``) and
+# a quoted value is replaced as a whole even when it contains spaces.
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)((?:token|password|passwd|secret|api[_-]?key|authorization|credential|access[_-]?key)\s*[=:]\s*)(?!Bearer\b)[^\s,;]+"
+    r"(?i)(" + _SECRET_NAMES + r"(?P<key_quote>['\"])?\s*[=:]\s*)(?!" + _AUTH_SCHEMES + r"\s)"
+    r"(?:(?P<quote>['\"])(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)"
+    r"|(?(key_quote)(?![{\[]))[^\s,;]+)"
+)
+_AUTH_SCHEME_ASSIGNMENT = re.compile(
+    r"(?i)(" + _SECRET_NAMES + r"['\"]?\s*[=:]\s*(?!Bearer\s)" + _AUTH_SCHEMES + r"\s+)"
+    r"(?!\[REDACTED\])[^\s,;'\"]+"
 )
 _BEARER = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]+")
+# ``--password value`` (``--password=value`` is a plain assignment above).
+_SECRET_CLI_FLAG = re.compile(
+    r"(?i)((?<![\w-])--?[A-Za-z0-9-]*" + _SECRET_NAMES + r"[A-Za-z0-9-]*\s+)(?![-\[])\S+"
+)
+# ``curl -u user:pass`` / ``--user user:pass``.
+_CLI_USER_PASSWORD = re.compile(r"((?<![\w-])(?:-u|--user)[\s=]+['\"]?[^\s:'\"]+:)[^\s'\"]+")
+_TOKEN_SHAPED = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b"
+)
 _QUOTED_ASSIGNMENT = re.compile(
     r'(?P<prefix>(?P<quote>\\?")(?P<key>(?:\\.|[^"\\\r\n])*?)(?P=quote)\s*:\s*(?P<value_quote>\\?"))'
     r'(?P<value>(?:\\{3}"|\\.|[^"\\\r\n])*?)(?P=value_quote)'
@@ -40,8 +65,7 @@ _QUOTED_LITERAL_ASSIGNMENT = re.compile(
     r'(?=\s*[,}\]])'
 )
 _URI_PASSWORD = re.compile(
-    r"(?i)(\b(?:postgres(?:ql)?|rediss?|mysql|mariadb|mongodb(?:\+srv)?|amqps?)"
-    r"(?:\+[A-Za-z][A-Za-z0-9_.-]{0,31})?://[A-Za-z0-9._~!$&'()*+,;=%-]+:)"
+    r"(?i)(\b[A-Za-z][A-Za-z0-9+.-]{1,63}://[A-Za-z0-9._~!$&'()*+,;=%-]+:)"
     r"[A-Za-z0-9._~!$&'()*+,;=:%-]+(@)"
 )
 _COMPLETE_PRIVATE_KEY_BLOCK = re.compile(
@@ -99,7 +123,9 @@ def _redact_value(value: JsonValue, secrets: list[str], json_layers: int = 0) ->
     if type(value) is dict:
         redacted: dict[str, JsonValue] = {}
         for key, item in value.items():
-            if _SECRET_KEY_NAME.search(key):
+            if _is_token_count(key, item):
+                redacted[key] = item
+            elif _SECRET_KEY_NAME.search(key):
                 redacted[key] = REDACTED  # type: ignore[assignment]
             else:
                 redacted[key] = _redact_value(item, secrets, json_layers)
@@ -166,10 +192,23 @@ def _redact_text(value: str, secrets: list[str], json_layers: int = 0) -> str:
     result = _URI_PASSWORD.sub(
         lambda match: f"{match.group(1)}{REDACTED}{match.group(2)}", result
     )
-    result = _SECRET_ASSIGNMENT.sub(
-        lambda match: f"{match.group(1)}{REDACTED}", result
-    )
+    result = _SECRET_ASSIGNMENT.sub(_redact_assignment, result)
+    result = _AUTH_SCHEME_ASSIGNMENT.sub(lambda match: f"{match.group(1)}{REDACTED}", result)
+    result = _SECRET_CLI_FLAG.sub(lambda match: f"{match.group(1)}{REDACTED}", result)
+    result = _CLI_USER_PASSWORD.sub(lambda match: f"{match.group(1)}{REDACTED}", result)
+    result = _TOKEN_SHAPED.sub(REDACTED, result)
     return _BEARER.sub(lambda match: f"{match.group(1)}{REDACTED}", result)
+
+
+def _is_token_count(key: str, value: JsonValue) -> bool:
+    return (
+        type(value) is int and _TOKEN_COUNT_KEY.fullmatch(key) is not None
+    )
+
+
+def _redact_assignment(match: re.Match[str]) -> str:
+    quote = match.group("quote") or ""
+    return f"{match.group(1)}{quote}{REDACTED}{quote}"
 
 
 def _redact_quoted_assignment(match: re.Match[str]) -> str:
@@ -189,7 +228,7 @@ def _redact_quoted_literal(match: re.Match[str]) -> str:
         key = json.loads(f'"{key}"')
     except json.JSONDecodeError:
         pass
-    if not _SECRET_KEY_NAME.search(key):
+    if not _SECRET_KEY_NAME.search(key) or _TOKEN_COUNT_KEY.fullmatch(key):
         return match.group(0)
     return f'{match.group("prefix")}{match.group("quote")}{REDACTED}{match.group("quote")}'
 

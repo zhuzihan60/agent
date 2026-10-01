@@ -496,6 +496,48 @@ def test_new_redaction_patterns_are_idempotent_and_leave_nonsecrets_unchanged() 
     assert redact(first) == first
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [REDACTED]"),
+        ('password = "hunter2 with spaces" next', 'password = "[REDACTED]" next'),
+        ("{'password': 'a b c', 'user': 'x'}", "{'password': '[REDACTED]', 'user': 'x'}"),
+        ("curl -u admin:S3cretPass https://x", "curl -u admin:[REDACTED] https://x"),
+        ("run --password S3cret --verbose", "run --password [REDACTED] --verbose"),
+        ("https://user:S3cretPass@example.com/path", "https://user:[REDACTED]@example.com/path"),
+        ("Cookie: session=abcdef0123", "Cookie: [REDACTED]"),
+        ("key sk-proj-abcdefABCDEF0123456789abcdef end", "key [REDACTED] end"),
+        ("id AKIAABCDEFGHIJKLMNOP end", "id [REDACTED] end"),
+        (
+            "    client-key-data: LS0tLS1CRUdJTiBSU0E=\n    client-certificate-data: abc",
+            "    client-key-data: [REDACTED]\n    client-certificate-data: abc",
+        ),
+    ],
+)
+def test_common_credential_shapes_in_text_are_redacted(value: str, expected: str) -> None:
+    assert redact(value) == expected
+    assert redact(expected) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["Basic auth enabled", "https://example.com:8443/a@b", "--verbose --dry-run", "tokens used: 42"],
+)
+def test_credential_patterns_leave_ordinary_text_unchanged(value: str) -> None:
+    assert redact(value) == value
+
+
+def test_integer_token_usage_counters_are_not_redacted() -> None:
+    value = {"max_tokens": 100, "prompt_tokens": 5, "tokens": ["x"], "max_tokens_hint": "x"}
+    assert redact(value) == {
+        "max_tokens": 100,
+        "prompt_tokens": 5,
+        "tokens": "[REDACTED]",
+        "max_tokens_hint": "[REDACTED]",
+    }
+    assert redact('{"max_tokens":512,"api_key":"k"}') == '{"max_tokens":512,"api_key":"[REDACTED]"}'
+
+
 # ---------------------------------------------------------------------------
 # Audit
 # ---------------------------------------------------------------------------

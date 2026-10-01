@@ -419,3 +419,50 @@ def test_socket_server_diagnostic_read_uses_current_policy(
     )
 
     assert json.loads(raw) == {"ok": False, "reason": "unit_not_granted"}
+
+
+class _EchoServer:
+    async def handle(self, payload: bytes) -> bytes:
+        return payload
+
+
+def _socket_call(path: str, payload: bytes) -> bytes:
+    import socket
+    import struct
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(5)
+        client.connect(path)
+        client.sendall(struct.pack("!I", len(payload)) + payload)
+        length = struct.unpack("!I", client.recv(4))[0]
+        return client.recv(length)
+
+
+def test_socket_server_survives_stalled_and_disconnected_peers(tmp_path: Path, monkeypatch) -> None:
+    import socket
+    import struct
+    import threading
+
+    from a4diag_target import server as server_module
+
+    monkeypatch.setattr(server_module, "CONNECTION_IO_TIMEOUT_SECONDS", 0.2)
+    path = str(tmp_path / "executor.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(4)
+    threading.Thread(
+        target=server_module.serve_socket, args=(listener, _EchoServer()), daemon=True
+    ).start()
+    try:
+        # A peer that sends half a header and then stalls must time out.
+        stalled = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stalled.connect(path)
+        stalled.sendall(b"\x00\x00")
+        # A peer that disconnects before reading its response must not stop the loop.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as gone:
+            gone.connect(path)
+            gone.sendall(struct.pack("!I", 2) + b"{}")
+        assert _socket_call(path, b'{"x":1}') == b'{"x":1}'
+        stalled.close()
+    finally:
+        listener.close()

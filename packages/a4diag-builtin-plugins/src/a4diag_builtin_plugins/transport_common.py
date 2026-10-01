@@ -497,6 +497,15 @@ def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+async def _cancel_process(
+    proc: asyncio.subprocess.Process, *readers: asyncio.Task[tuple[str, bool]]
+) -> None:
+    _kill_process_group(proc)
+    for task in readers:
+        task.cancel()
+    await proc.wait()
+
+
 class SubprocessRunner:
     """Real process runner: new session, bounded output, group kill on cancel.
 
@@ -550,6 +559,11 @@ class SubprocessRunner:
                 stdout_truncated=stdout_truncated,
                 stderr_truncated=stderr_truncated,
             )
+        except asyncio.CancelledError:
+            # The deadline can expire while drain() waits on a child that is
+            # not reading stdin; the process group must not be orphaned.
+            await _cancel_process(proc, stdout_task, stderr_task)
+            raise
         try:
             await proc.wait()
             stdout, stdout_truncated = await stdout_task
@@ -564,10 +578,7 @@ class SubprocessRunner:
                 stderr_truncated=stderr_truncated,
             )
         except asyncio.CancelledError:
-            _kill_process_group(proc)
-            for task in (stdout_task, stderr_task):
-                task.cancel()
-            await proc.wait()
+            await _cancel_process(proc, stdout_task, stderr_task)
             raise
 
 

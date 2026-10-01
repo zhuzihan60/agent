@@ -107,6 +107,28 @@ def test_fast_child_stdin_close_only_makes_nonempty_dispatch_uncertain(monkeypat
     assert bool(killed) is bool(payload)
 
 
+def test_deadline_during_stdin_drain_kills_process_group(monkeypatch):
+    from a4diag_builtin_plugins import transport_common as transport
+    killed=[]
+    class Input:
+        def write(self,data):pass
+        async def drain(self):await asyncio.Event().wait()
+        def close(self):pass
+    async def run():
+        class Process:
+            stdin=Input();returncode=None
+            stdout=asyncio.StreamReader();stderr=asyncio.StreamReader()
+            async def wait(self):return -9
+        async def spawn(*args,**kwargs):return Process()
+        monkeypatch.setattr(asyncio,'create_subprocess_exec',spawn)
+        monkeypatch.setattr(transport,'_kill_process_group',lambda p:killed.append(p))
+        await asyncio.wait_for(transport.SubprocessRunner().run(
+            ['/usr/bin/ssh'],payload=b'signed request',output_limit_bytes=1024),timeout=0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(run())
+    assert len(killed)==1
+
+
 def test_reset_does_not_claim_verified_zero_counters_or_restored_history():
     from a4diag_builtin_plugins.capability_services import ServicesPlugin,ServiceMarker
     from a4diag_builtin_plugins.capability_common import CommandOutcome
