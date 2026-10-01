@@ -1,7 +1,8 @@
 """SSH transport plugin: identity-pinned remote execution through /usr/bin/ssh.
 
 The argv is built from a validated target endpoint plus a fixed remote helper
-executable only. Every connection uses ``BatchMode=yes``, ``IdentitiesOnly=yes``,
+executable only. Every connection ignores ssh_config files (``-F /dev/null``)
+and uses ``BatchMode=yes``, ``IdentitiesOnly=yes``,
 ``StrictHostKeyChecking=yes``, a pinned user-known-hosts file, a pinned
 identity file, a pinned port, and ``ConnectTimeout=10``. Typed canonical JSON
 is written to stdin; user or model operation text is never appended as a
@@ -92,6 +93,9 @@ def build_ssh_argv(config: SshTargetConfig) -> list[str]:
         destination = f"{config.user}@[{config.host}]"
     return [
         SSH_EXECUTABLE,
+        # User and system ssh_config could inject ProxyCommand, ControlMaster
+        # or Host-wide overrides that bypass the pinned options below.
+        "-F", "/dev/null",
         "-o", "BatchMode=yes",
         "-o", "IdentitiesOnly=yes",
         "-o", "StrictHostKeyChecking=yes",

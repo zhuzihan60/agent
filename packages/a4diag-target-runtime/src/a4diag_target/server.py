@@ -29,6 +29,7 @@ from a4diag_target.repair_jobs import JobStore, SystemdJobLauncher
 from a4diag.repair_store import RepairStore
 
 MAX_FRAME_BYTES = 1_048_576
+CONNECTION_IO_TIMEOUT_SECONDS = 5
 SYSTEMCTL_EXECUTABLE = "/usr/bin/systemctl"
 
 
@@ -228,6 +229,9 @@ def serve_socket(listener: socket.socket, server: TargetSocketServer) -> None:
     while True:
         connection, _address = listener.accept()
         with connection:
+            # Connections are served one at a time, so a stalled peer must not
+            # block every later request. Handling itself is not time-limited.
+            connection.settimeout(CONNECTION_IO_TIMEOUT_SECONDS)
             try:
                 length = struct.unpack("!I", _recv_exact(connection, 4))[0]
                 if length > MAX_FRAME_BYTES:
@@ -237,7 +241,11 @@ def serve_socket(listener: socket.socket, server: TargetSocketServer) -> None:
                 response = canonical_json_bytes(
                     {"ok": False, "reason": str(error) or type(error).__name__}
                 )
-            connection.sendall(struct.pack("!I", len(response)) + response)
+            try:
+                connection.sendall(struct.pack("!I", len(response)) + response)
+            except OSError:
+                # A peer that disconnected must not stop the executor.
+                pass
 
 
 def _recv_exact(connection: socket.socket, size: int) -> bytes:

@@ -381,6 +381,7 @@ def test_parse_os_release_extracts_id_and_version() -> None:
 def test_ssh_argv_pins_host_key_and_has_no_remote_shell() -> None:
     argv = build_ssh_argv(ssh_config())
     assert argv[0] == SSH_EXECUTABLE
+    assert argv[argv.index("-F") + 1] == "/dev/null"
     assert "BatchMode=yes" in argv
     assert "IdentitiesOnly=yes" in argv
     assert "StrictHostKeyChecking=yes" in argv
