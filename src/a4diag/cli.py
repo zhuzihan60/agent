@@ -92,6 +92,35 @@ def _parser() -> argparse.ArgumentParser:
     )
     resume_parser.add_argument("transaction")
     resume_parser.add_argument("--json", action="store_true")
+    diagnose_parser = subcommands.add_parser(
+        "diagnose", help="diagnose a registered target now (read-only unless writes were enabled)"
+    )
+    diagnose_parser.add_argument("description", help="what is wrong, in plain words")
+    diagnose_parser.add_argument(
+        "--target", metavar="ID", help="registered target id (optional when only one exists)"
+    )
+    diagnose_parser.add_argument("--json", action="store_true")
+    setup_parser = subcommands.add_parser(
+        "setup", help="one-command single-host setup: model, watched services, local target"
+    )
+    setup_parser.add_argument(
+        "--target-release", metavar="DIRECTORY", type=Path,
+        help="extracted target release to install instead of downloading the matching version",
+    )
+    setup_parser.add_argument(
+        "--dashboard-lan", action="store_true",
+        help="let other machines open the status page (creates an access token)",
+    )
+    dashboard_parser = subcommands.add_parser(
+        "dashboard", help="serve the read-only status page (systemd a4diag-dashboard.service)"
+    )
+    dashboard_parser.add_argument(
+        "--listen", default=os.environ.get("A4DIAG_DASHBOARD_LISTEN", "127.0.0.1"),
+        help="address to bind; anything but loopback requires the dashboard-token secret",
+    )
+    dashboard_parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("A4DIAG_DASHBOARD_PORT", "8765"))
+    )
     target_parser = subcommands.add_parser(
         "target", help="offline target bootstrap administration"
     )
@@ -329,6 +358,173 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             sort_keys=True,
         )
     )
+    return 0
+
+
+MAX_DESCRIPTION_CHARS = 2000
+
+
+def _drop_to_service_account() -> None:
+    """Run as a4diag, like a4diag-core, so state and reports keep its ownership."""
+    import pwd
+
+    account = pwd.getpwnam("a4diag")
+    if os.geteuid() == account.pw_uid:
+        return
+    if os.geteuid() != 0:
+        raise PermissionError("run with sudo")
+    os.setgroups([])
+    os.setgid(account.pw_gid)
+    os.setuid(account.pw_uid)
+
+
+def _choose_target(requested: str | None, registered: list[str]) -> str:
+    if requested is not None:
+        if requested not in registered:
+            raise ValueError(f"target is not registered: {requested}")
+        return requested
+    if not registered:
+        raise ValueError("no target is registered; run: sudo a4diag setup")
+    if len(registered) > 1:
+        raise ValueError("several targets are registered; choose one with --target "
+                         + "/".join(registered))
+    return registered[0]
+
+
+def _format_diagnosis(status: str, report: dict, report_path: Path) -> str:
+    from .status_labels import status_label
+
+    diagnosis = report.get("diagnosis") if isinstance(report.get("diagnosis"), dict) else {}
+    lines = [f"状态: {status_label(status)} ({status})"]
+    if report.get("error"):
+        lines.append(f"说明: {report['error']}")
+    if diagnosis.get("cause"):
+        lines += ["", "原因:", f"  {diagnosis['cause']}"]
+    if diagnosis.get("confidence") is not None:
+        lines.append(f"置信度: {diagnosis['confidence']}")
+    actions = diagnosis.get("recommended_actions") or []
+    if actions:
+        lines += ["", "建议:"] + [f"  {index}. {action}" for index, action in enumerate(actions, 1)]
+    missing = diagnosis.get("missing_evidence") or []
+    if missing:
+        lines += ["", "缺少的证据:"] + [f"  - {item}" for item in missing]
+    lines += ["", f"完整报告: {report_path}"]
+    return "\n".join(lines)
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    import secrets
+    from datetime import datetime, timezone
+
+    from .report import ReportWriter
+    from .runtime import RuntimeFailure
+    from .settings import load_settings
+
+    description = args.description.strip()
+    if not description or len(description) > MAX_DESCRIPTION_CHARS:
+        print(f"a4diag diagnose: description must be 1-{MAX_DESCRIPTION_CHARS} characters",
+              file=sys.stderr)
+        return 64
+    try:
+        settings = load_settings(_config_path())
+        target_id = _choose_target(args.target, [target.id for target in settings.targets])
+    except ValueError as error:
+        print(f"a4diag diagnose: {error}", file=sys.stderr)
+        return 64
+    except OSError as error:
+        print(f"a4diag diagnose: configuration unreadable: {error}", file=sys.stderr)
+        return 65
+    try:
+        _drop_to_service_account()
+    except (KeyError, PermissionError) as error:
+        print(f"a4diag diagnose: {error}", file=sys.stderr)
+        return 77
+    event_id = f"cli-{datetime.now(timezone.utc):%Y%m%d%H%M%S}-{secrets.token_hex(3)}"
+    event = {
+        "event_id": event_id,
+        "target_id": target_id,
+        "request": {"fault": description, "source": "a4diag diagnose"},
+    }
+    try:
+        runtime = _production_runtime()
+        try:
+            result = runtime.handle(event)
+        finally:
+            runtime.close()
+    except (RuntimeFailure, RuntimeError) as error:
+        print(f"a4diag diagnose: {error}", file=sys.stderr)
+        return 65
+    report = dict(result.report)
+    report.setdefault("task_id", event_id)
+    report.setdefault("finished_at", datetime.now(timezone.utc).isoformat())
+    report_path = ReportWriter(REPORT_ROOT).write(report)
+    if args.json:
+        print(json.dumps({"transaction_id": result.transaction_id, "status": result.status,
+                          "report_path": str(report_path), "report": report},
+                         ensure_ascii=False, sort_keys=True, default=str))
+    else:
+        print(_format_diagnosis(result.status, report, report_path))
+    return 0
+
+
+def _cmd_setup(args: argparse.Namespace) -> int:
+    import pwd
+
+    from .init_config import InitError
+    from .init_transaction import InitTransactionError
+    from .setup_wizard import SetupEnvironment, SetupError, run_setup
+
+    if os.geteuid() != 0:
+        print("a4diag setup: run with sudo", file=sys.stderr)
+        return 77
+    try:
+        account = pwd.getpwnam("a4diag")
+    except KeyError:
+        print("a4diag setup: the controller is not installed (missing a4diag account)",
+              file=sys.stderr)
+        return 69
+    environment = SetupEnvironment(
+        init=lambda request: _build_init_service().write_atomic(  # type: ignore[attr-defined]
+            request, _config_path()),
+        service_owner=(account.pw_uid, account.pw_gid),
+    )
+    try:
+        return run_setup(environment, target_release=args.target_release,
+                         dashboard_lan=args.dashboard_lan)
+    except (SetupError, InitError, InitTransactionError) as error:
+        print(f"\na4diag setup 失败：{error}", file=sys.stderr)
+        return 65
+    except (KeyboardInterrupt, EOFError):
+        print("\na4diag setup 已取消", file=sys.stderr)
+        return 130
+
+
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    from .dashboard import StatusCollector, is_loopback, serve
+    from .secrets import SecretError, SecretResolver
+
+    token = None
+    if not is_loopback(args.listen):
+        try:
+            token = SecretResolver(trusted_owner_uid=_service_secret_owner()).resolve(
+                "file:dashboard-token").value
+        except SecretError as error:
+            print(f"a4diag dashboard: listening on {args.listen} requires the dashboard-token "
+                  f"secret ({error}); run: sudo a4diag setup --dashboard-lan", file=sys.stderr)
+            return 65
+    collector = StatusCollector(
+        config_path=_config_path(),
+        report_root=REPORT_ROOT,
+        approvals_path=Path("/var/lib/a4diag/approvals/approvals.sqlite3"),
+    )
+    try:
+        serve(collector, listen=args.listen, port=args.port, token=token)
+    except OSError as error:
+        print(f"a4diag dashboard: cannot listen on {args.listen}:{args.port}: {error}",
+              file=sys.stderr)
+        return 69
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -642,6 +838,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_approvals(args)
     if args.command == "resume":
         return _cmd_resume(args)
+    if args.command == "diagnose":
+        return _cmd_diagnose(args)
+    if args.command == "dashboard":
+        return _cmd_dashboard(args)
+    if args.command == "setup":
+        return _cmd_setup(args)
     if args.command == "target":
         return _cmd_target(args)
     if args.command == "cleanup":

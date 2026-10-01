@@ -1,0 +1,40 @@
+# A4Diag read-only status dashboard.
+#
+# Serves http://127.0.0.1:8765 by default. It only reads configuration,
+# reports, unit states and target identity; it has no write action. To reach it
+# from another machine, run `sudo a4diag setup --dashboard-lan`, which creates
+# the access token and sets A4DIAG_DASHBOARD_LISTEN in dashboard.env.
+
+[Unit]
+Description=A4Diag read-only status dashboard
+After=network-online.target a4diag-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=a4diag
+Group=a4diag
+EnvironmentFile=-/etc/a4diag/dashboard.env
+ExecStart=/opt/a4diag/current/venv/bin/a4diag dashboard
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/a4diag /var/lib/a4diag /opt/a4diag/current
+
+[Install]
+WantedBy=multi-user.target

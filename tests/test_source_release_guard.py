@@ -65,6 +65,7 @@ def test_release_requires_exact_core_and_plugin_wheels(tmp_path: Path) -> None:
     (project / "requirements.lock").write_text("x==1.0 --hash=sha256:" + "1" * 64 + "\n")
     (project / "requirements-build.lock").write_text("y==1.0 --hash=sha256:" + "2" * 64 + "\n")
     (project / "install.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
+    (project / "install-a4diag-target.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
     (project / "tools").mkdir()
     (project / "tools" / "install_lib.sh").write_text("#!/usr/bin/env bash\n")
     wheelhouse = tmp_path / "wheelhouse"

@@ -11,6 +11,9 @@
 set -euo pipefail
 
 RELEASE_DIR="${RELEASE_DIR:-/release}"
+# Installers run with only the distribution's own PATH, so a host without
+# python3.11 exercises the Python runtime bundled in the release.
+SYSTEM_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 [ -d "$RELEASE_DIR" ] || {
   echo "distro-smoke: release directory missing: $RELEASE_DIR" >&2
   exit 1
@@ -39,7 +42,7 @@ case "$SYSTEMD_VERSION" in ''|*[!0-9]*) exit 1 ;; esac
 if [ "$SYSTEMD_VERSION" -lt 247 ]; then
   PREFLIGHT_LOG="$(mktemp)"
   trap 'rm -f "$PREFLIGHT_LOG"' EXIT
-  if A4DIAG_SKIP_SYSTEMD=0 A4DIAG_SKIP_DISK=1 bash "$RELEASE_DIR/install.sh" --offline "$RELEASE_DIR" >"$PREFLIGHT_LOG" 2>&1; then
+  if PATH="$SYSTEM_PATH" A4DIAG_SKIP_SYSTEMD=0 A4DIAG_SKIP_DISK=1 bash "$RELEASE_DIR/install.sh" --offline "$RELEASE_DIR" >"$PREFLIGHT_LOG" 2>&1; then
     echo "distro-smoke: FAIL unsupported controller unexpectedly installed" >&2
     exit 1
   fi
@@ -50,7 +53,12 @@ if [ "$SYSTEMD_VERSION" -lt 247 ]; then
 fi
 
 echo "distro-smoke: offline install"
-A4DIAG_SKIP_SYSTEMD=1 A4DIAG_SKIP_DISK=1 bash "$RELEASE_DIR/install.sh" --offline "$RELEASE_DIR"
+PATH="$SYSTEM_PATH" A4DIAG_SKIP_SYSTEMD=1 A4DIAG_SKIP_DISK=1 bash "$RELEASE_DIR/install.sh" --offline "$RELEASE_DIR"
+if ! PATH="$SYSTEM_PATH" command -v python3.11 >/dev/null 2>&1; then
+  echo "distro-smoke: no system python3.11; the bundled runtime must be in use"
+  [ -f "$RELEASE_DIR/runtime/python.tar.gz" ]
+  ls /opt/a4diag/runtime/*/python/bin/python3.11 >/dev/null
+fi
 
 echo "distro-smoke: offline self-check reports read-only defaults"
 OUTPUT="$(A4DIAG_CONFIG=/etc/a4diag/config.yaml /opt/a4diag/current/venv/bin/a4diag self-check --offline)"

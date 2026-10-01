@@ -19,6 +19,8 @@
 #   A4DIAG_PIP_LOG       path where the pip argv is recorded (tests only)
 #   A4DIAG_SERVICE_START_ATTEMPTS  bounded readiness checks (tests only)
 #   A4DIAG_SERVICE_START_INTERVAL  seconds between checks (tests only)
+#   A4DIAG_PYTHON        Python 3.11 interpreter to use; by default the system
+#                        python3.11, else the runtime bundled in the release
 
 set -euo pipefail
 
@@ -34,6 +36,8 @@ PLUGIN_ROOT="${A4DIAG_ROOT}opt/a4diag/plugins"
 CLI_LINK="${A4DIAG_ROOT}usr/local/bin/a4diag"
 RUN_ROOT="${A4DIAG_ROOT}run/a4diag"
 STATE_ROOT="${A4DIAG_ROOT}var/lib/a4diag"
+RUNTIME_BASE="${A4DIAG_ROOT}opt/a4diag/runtime"
+installer_python=""
 
 die() {
   echo "a4diag installer: $*" >&2
@@ -70,7 +74,7 @@ a4diag_check_distro() {
 }
 
 a4diag_require_commands() {
-  for command in python3.11 sha256sum grep cut head; do
+  for command in sha256sum grep cut head tar; do
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
   done
   if [ "${A4DIAG_SKIP_SYSTEMD:-0}" != "1" ]; then
@@ -109,7 +113,21 @@ a4diag_verify_release() {
     die "release SHA256 verification failed"
   }
 
-  python3.11 - "$release_dir" <<'PY' || die "release manifests are inconsistent"
+  # Authenticate the manifest before anything from the release is executed.
+  if [ -f "$release_dir/MANIFEST.sig" ]; then
+    [ -n "${A4DIAG_TRUSTED_KEY:-}" ] || die "release is signed but no A4DIAG_TRUSTED_KEY was provided"
+    [ -f "$A4DIAG_TRUSTED_KEY" ] || die "trusted release public key is missing: $A4DIAG_TRUSTED_KEY"
+    command -v openssl >/dev/null 2>&1 || die "required command missing: openssl"
+    openssl dgst -sha256 -verify "$A4DIAG_TRUSTED_KEY" \
+      -signature "$release_dir/MANIFEST.sig" \
+      "$release_dir/MANIFEST.json" >/dev/null 2>&1 \
+      || die "release manifest signature mismatch"
+  elif [ "${A4DIAG_ALLOW_UNSIGNED:-0}" != "1" ]; then
+    die "release is unsigned; set A4DIAG_ALLOW_UNSIGNED=1 to accept"
+  fi
+  a4diag_select_python "$release_dir"
+
+  "$installer_python" - "$release_dir" <<'PY' || die "release manifests are inconsistent"
 import json
 import pathlib
 import sys
@@ -142,19 +160,63 @@ if set(artifacts) != set(declared) - {"MANIFEST.json"}:
 if any(declared.get(name) != digest for name, digest in artifacts.items()):
     raise ValueError("manifest digest mismatch")
 PY
-
-  if [ -f "$release_dir/MANIFEST.sig" ]; then
-    [ -n "${A4DIAG_TRUSTED_KEY:-}" ] || die "release is signed but no A4DIAG_TRUSTED_KEY was provided"
-    [ -f "$A4DIAG_TRUSTED_KEY" ] || die "trusted release public key is missing: $A4DIAG_TRUSTED_KEY"
-    command -v openssl >/dev/null 2>&1 || die "required command missing: openssl"
-    openssl dgst -sha256 -verify "$A4DIAG_TRUSTED_KEY" \
-      -signature "$release_dir/MANIFEST.sig" \
-      "$release_dir/MANIFEST.json" >/dev/null 2>&1 \
-      || die "release manifest signature mismatch"
-  elif [ "${A4DIAG_ALLOW_UNSIGNED:-0}" != "1" ]; then
-    die "release is unsigned; set A4DIAG_ALLOW_UNSIGNED=1 to accept"
-  fi
   log "release verified: $version"
+}
+
+# Reject anything but plain files, directories and symlinks beneath python/.
+a4diag_check_runtime_archive() {
+  local archive="$1" names types name
+  names="$(tar -tzf "$archive")" || die "bundled Python runtime is unreadable"
+  types="$(tar -tvzf "$archive" | cut -c1 | sort -u | tr -d '\n')" \
+    || die "bundled Python runtime is unreadable"
+  case "$types" in
+    *[!-dl]*) die "bundled Python runtime contains special files" ;;
+  esac
+  while IFS= read -r name; do
+    case "$name" in
+      python|python/*) ;;
+      *) die "bundled Python runtime has an unexpected path: $name" ;;
+    esac
+    case "/$name/" in
+      */../*) die "bundled Python runtime has an unsafe path: $name" ;;
+    esac
+  done <<< "$names"
+}
+
+# Choose the interpreter for venvs and installer helpers. Must be called after
+# the release manifest is authenticated: the bundled runtime is executed.
+a4diag_select_python() {
+  local release_dir="${1:-}" bundle digest runtime
+  [ -z "$installer_python" ] || return 0
+  if [ -n "${A4DIAG_PYTHON:-}" ]; then
+    [ -x "$A4DIAG_PYTHON" ] || die "A4DIAG_PYTHON is not executable: $A4DIAG_PYTHON"
+    installer_python="$A4DIAG_PYTHON"
+    return 0
+  fi
+  if command -v python3.11 >/dev/null 2>&1; then
+    installer_python="$(command -v python3.11)"
+    return 0
+  fi
+  bundle="$release_dir/runtime/python.tar.gz"
+  [ -n "$release_dir" ] && [ -f "$bundle" ] \
+    || die "python3.11 is not installed and the release bundles no Python runtime"
+  digest="$(sha256sum "$bundle" | cut -d' ' -f1)"
+  grep -q "\"runtime/python.tar.gz\":\"$digest\"" "$release_dir/MANIFEST.json" \
+    || die "bundled Python runtime is not bound to the release manifest"
+  runtime="$RUNTIME_BASE/${digest:0:16}"
+  if [ ! -x "$runtime/python/bin/python3.11" ]; then
+    a4diag_check_runtime_archive "$bundle"
+    log "unpacking bundled Python runtime"
+    install -d -m 0755 "$RUNTIME_BASE"
+    rm -rf "$runtime.tmp.$$"
+    install -d -m 0755 "$runtime.tmp.$$"
+    tar -xzf "$bundle" -C "$runtime.tmp.$$" --no-same-owner
+    rm -rf "$runtime"
+    mv -T "$runtime.tmp.$$" "$runtime"
+  fi
+  "$runtime/python/bin/python3.11" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 11))' \
+    || die "bundled Python runtime is unusable"
+  installer_python="$runtime/python/bin/python3.11"
 }
 
 a4diag_install_release() {
@@ -171,11 +233,12 @@ a4diag_install_release() {
   chmod 0755 "$target"
 
   log "creating virtual environment for $version"
-  python3.11 -m venv "$target/venv"
+  a4diag_select_python "$release_dir"
+  "$installer_python" -m venv "$target/venv"
   local pip
   pip="$target/venv/bin/python"
   if [ ! -x "$pip" ]; then
-    pip="python3.11"
+    pip="$installer_python"
   fi
   "$pip" -m pip install \
     --no-index \
@@ -251,7 +314,8 @@ a4diag_initialize_runtime() {
 
   for secret in core-ticket.key core-policy.key; do
     if [ ! -f "$secrets_dir/$secret" ]; then
-      python3.11 - "$secrets_dir/$secret" <<'PY'
+      a4diag_select_python "$CURRENT_LINK"
+      "$installer_python" - "$secrets_dir/$secret" <<'PY'
 import os
 import secrets
 import sys
@@ -321,7 +385,8 @@ a4diag_install_plugin_runtime() {
   [ -f "$plugin_release/builtin-index.json" ] || die "built-in plugin catalog is not installed"
 
   log "creating isolated built-in plugin environment for $version"
-  python3.11 -m venv "$plugin_release/venv"
+  a4diag_select_python "$core_release"
+  "$installer_python" -m venv "$plugin_release/venv"
   local pip="$plugin_release/venv/bin/python"
   [ -x "$pip" ] || die "plugin virtual environment is missing python"
   "$pip" -m pip install \
@@ -352,6 +417,7 @@ a4diag_install_units() {
     a4diag-cleanup.service \
     a4diag-cleanup.timer \
     a4diag-core.service \
+    a4diag-dashboard.service \
     a4diag-plugin@.service \
     a4diag-plugin@.socket; do
     install -m 0644 \
@@ -414,6 +480,12 @@ a4diag_restart_services() {
     state="$(systemctl is-active a4diag-core.service 2>/dev/null || true)"
     if [ "$state" = "active" ]; then
       log "started a4diag-core.service"
+      # The read-only status page is optional; never roll back the core for it.
+      if systemctl enable a4diag-dashboard.service && systemctl restart a4diag-dashboard.service; then
+        log "status page: http://127.0.0.1:8765"
+      else
+        log "warning: a4diag-dashboard.service did not start"
+      fi
       return 0
     fi
     sleep "$interval"

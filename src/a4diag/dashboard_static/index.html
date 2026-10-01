@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A4Diag 状态</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="bar">
+    <div>
+      <h1>A4Diag 状态</h1>
+      <p class="muted" id="subtitle">正在读取…</p>
+    </div>
+    <p class="muted" id="updated" aria-live="polite"></p>
+  </header>
+  <main>
+    <section id="setup-hint" class="notice" hidden>
+      还没有完成配置。在控制端运行 <code>sudo a4diag setup</code>，按提示填写模型和要监控的服务。
+    </section>
+    <section id="error" class="notice bad" hidden></section>
+    <div class="grid">
+      <section class="card" aria-labelledby="controller-title">
+        <h2 id="controller-title">控制端</h2>
+        <dl class="facts" id="controller-facts"></dl>
+        <h3>服务</h3>
+        <ul class="units" id="controller-units"></ul>
+      </section>
+      <section class="card wide" aria-labelledby="targets-title">
+        <h2 id="targets-title">被控端</h2>
+        <div id="targets" class="targets"></div>
+      </section>
+    </div>
+    <section class="card" aria-labelledby="reports-title">
+      <h2 id="reports-title">最近的诊断</h2>
+      <p class="muted" id="reports-empty" hidden>还没有诊断记录。试试：<code>sudo a4diag diagnose "网站打不开"</code></p>
+      <div class="table-wrap">
+        <table id="reports" hidden>
+          <thead><tr><th>时间</th><th>被控端</th><th>结果</th><th>原因</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card" id="detail" hidden aria-labelledby="detail-title">
+      <div class="detail-head">
+        <h2 id="detail-title">诊断详情</h2>
+        <button type="button" id="detail-close">关闭</button>
+      </div>
+      <div id="detail-body"></div>
+    </section>
+  </main>
+</body>
+</html>

@@ -29,6 +29,7 @@ EXPECTED_SYSTEMD_UNITS = {
     "a4diag-cleanup.service",
     "a4diag-cleanup.timer",
     "a4diag-core.service",
+    "a4diag-dashboard.service",
     "a4diag-plugin@.service",
     "a4diag-plugin@.socket",
 }
@@ -205,6 +206,7 @@ def test_release_assembly_includes_the_installer(tmp_path: Path) -> None:
         "y==1.0 --hash=sha256:" + "2" * 64 + "\n"
     )
     (project / "install.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
+    (project / "install-a4diag-target.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n")
     (project / "tools" / "install_lib.sh").write_text("#!/usr/bin/env bash\n")
     manifest_source = ROOT / "packages" / "a4diag-builtin-plugins" / "manifests"
     manifest_target = project / "packages" / "a4diag-builtin-plugins" / "manifests"
@@ -809,4 +811,6 @@ def test_installer_restarts_core_when_service_is_already_active(tmp_path: Path) 
     result = subprocess.run(["bash", str(INSTALL_SH), "--offline", str(release)],
                             env=environment, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-    assert log.read_text(encoding="utf-8").splitlines() == ["a4diag-core.service"]
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "a4diag-core.service", "a4diag-dashboard.service",
+    ]

@@ -23,6 +23,9 @@ a4diag = "a4diag.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+a4diag = ["dashboard_static/*"]
+
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
 markers = [

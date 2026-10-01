@@ -9,9 +9,70 @@ TARGET_ETC="${TARGET_ROOT}etc/a4diag-target"
 TARGET_STATE="${TARGET_ROOT}var/lib/a4diag-target"
 TARGET_LIBEXEC="${TARGET_ROOT}usr/libexec/a4diag"
 TARGET_SYSTEMD="${TARGET_ROOT}etc/systemd/system"
+TARGET_RUNTIME_BASE="$TARGET_BASE/runtime"
+installer_python=""
 
 die() { echo "a4diag target installer: $*" >&2; exit 1; }
 log() { echo "a4diag target installer: $*"; }
+
+# Python 3.11 for installer helpers: $A4DIAG_PYTHON, else the system python3.11,
+# else a runtime already unpacked by an earlier install, else the runtime
+# bundled in the (already authenticated) release.
+select_python() {
+  local release="${1:-}" bundle digest runtime existing
+  [ -z "$installer_python" ] || return 0
+  if [ -n "${A4DIAG_PYTHON:-}" ]; then
+    [ -x "$A4DIAG_PYTHON" ] || die "A4DIAG_PYTHON is not executable: $A4DIAG_PYTHON"
+    installer_python="$A4DIAG_PYTHON"; return 0
+  fi
+  if command -v python3.11 >/dev/null 2>&1; then
+    installer_python="$(command -v python3.11)"; return 0
+  fi
+  bundle="$release/runtime/python.tar.gz"
+  if [ -z "$release" ] || [ ! -f "$bundle" ]; then
+    for existing in "$TARGET_RUNTIME_BASE"/*/python/bin/python3.11; do
+      [ -x "$existing" ] && { installer_python="$existing"; return 0; }
+    done
+    die "python3.11 is not installed and no bundled Python runtime is available"
+  fi
+  digest="$(sha256sum "$bundle" | cut -d' ' -f1)"
+  grep -q "\"runtime/python.tar.gz\":\"$digest\"" "$release/MANIFEST.json" \
+    || die "bundled Python runtime is not bound to the release manifest"
+  runtime="$TARGET_RUNTIME_BASE/${digest:0:16}"
+  if [ ! -x "$runtime/python/bin/python3.11" ]; then
+    check_runtime_archive "$bundle"
+    log "unpacking bundled Python runtime"
+    install -d -m 0755 "$TARGET_BASE" "$TARGET_RUNTIME_BASE"
+    rm -rf "$runtime.tmp.$$"
+    install -d -m 0755 "$runtime.tmp.$$"
+    tar -xzf "$bundle" -C "$runtime.tmp.$$" --no-same-owner
+    rm -rf "$runtime"
+    mv -T "$runtime.tmp.$$" "$runtime"
+  fi
+  "$runtime/python/bin/python3.11" -c 'import sys; raise SystemExit(sys.version_info[:2] != (3, 11))' \
+    || die "bundled Python runtime is unusable"
+  installer_python="$runtime/python/bin/python3.11"
+}
+
+# Reject anything but plain files, directories and symlinks beneath python/.
+check_runtime_archive() {
+  local archive="$1" names types name
+  names="$(tar -tzf "$archive")" || die "bundled Python runtime is unreadable"
+  types="$(tar -tvzf "$archive" | cut -c1 | sort -u | tr -d '\n')" \
+    || die "bundled Python runtime is unreadable"
+  case "$types" in
+    *[!-dl]*) die "bundled Python runtime contains special files" ;;
+  esac
+  while IFS= read -r name; do
+    case "$name" in
+      python|python/*) ;;
+      *) die "bundled Python runtime has an unexpected path: $name" ;;
+    esac
+    case "/$name/" in
+      */../*) die "bundled Python runtime has an unsafe path: $name" ;;
+    esac
+  done <<< "$names"
+}
 
 require_root() {
   [ "${A4DIAG_TARGET_SKIP_ROOT:-0}" = "1" ] || [ "$(id -u)" -eq 0 ] || die "must run as root"
@@ -40,7 +101,8 @@ validate_config() {
   local config="$1"
   [ -f "$config" ] || die "target-install.json is missing"
   [ ! -L "$config" ] || die "target-install.json must not be a symlink"
-  python3.11 - "$config" <<'PY' || exit 65
+  select_python ""
+  "$installer_python" - "$config" <<'PY' || exit 65
 import ipaddress, json, pathlib, re, sys
 
 SAFE_MANAGED_ROOT = re.compile(r"/(?:[A-Za-z0-9._+@:-]+)(?:/[A-Za-z0-9._+@:-]+)*")
@@ -171,7 +233,8 @@ PY
 
 validate_managed_root_directories() {
   local config="$1"
-  python3.11 - "$config" "$TARGET_ROOT" <<'PY' || exit 65
+  select_python ""
+  "$installer_python" - "$config" "$TARGET_ROOT" <<'PY' || exit 65
 import json, pathlib, sys
 
 def fail(message):
@@ -201,7 +264,14 @@ verify_release() {
   local release="$1"
   [ -f "$release/VERSION" ] || die "release is missing VERSION"
   (cd "$release" && sha256sum -c SHA256SUMS >/dev/null) || die "release SHA256 verification failed"
-  python3.11 - "$release" <<'PY' || die "release inventory is inconsistent"
+  if [ -f "$release/MANIFEST.sig" ]; then
+    [ -f "${A4DIAG_TARGET_TRUSTED_KEY:-}" ] || die "signed release requires A4DIAG_TARGET_TRUSTED_KEY"
+    openssl dgst -sha256 -verify "$A4DIAG_TARGET_TRUSTED_KEY" -signature "$release/MANIFEST.sig" "$release/MANIFEST.json" >/dev/null 2>&1 || die "release manifest signature mismatch"
+  elif [ "${A4DIAG_TARGET_ALLOW_UNSIGNED:-0}" != "1" ]; then
+    die "release is unsigned"
+  fi
+  select_python "$release"
+  "$installer_python" - "$release" <<'PY' || die "release inventory is inconsistent"
 import hashlib, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 if any(path.is_symlink() for path in root.rglob("*")):
@@ -218,12 +288,6 @@ manifest = json.loads((root / "MANIFEST.json").read_bytes())
 if set(manifest.get("artifacts", {})) != set(declared) - {"MANIFEST.json"}: raise ValueError("manifest mismatch")
 if any(declared.get(k) != v for k, v in manifest["artifacts"].items()): raise ValueError("digest mismatch")
 PY
-  if [ -f "$release/MANIFEST.sig" ]; then
-    [ -f "${A4DIAG_TARGET_TRUSTED_KEY:-}" ] || die "signed release requires A4DIAG_TARGET_TRUSTED_KEY"
-    openssl dgst -sha256 -verify "$A4DIAG_TARGET_TRUSTED_KEY" -signature "$release/MANIFEST.sig" "$release/MANIFEST.json" >/dev/null 2>&1 || die "release manifest signature mismatch"
-  elif [ "${A4DIAG_TARGET_ALLOW_UNSIGNED:-0}" != "1" ]; then
-    die "release is unsigned"
-  fi
 }
 
 write_configuration() {
@@ -283,7 +347,7 @@ PY
   rm -f "$TARGET_ETC/policy.json.tmp"
   install -m 0644 "$drop_in_dir/managed-roots.conf.tmp" "$drop_in_dir/managed-roots.conf"
   rm -f "$drop_in_dir/managed-roots.conf.tmp"
-  python3.11 - "$config" "$TARGET_ETC/operation-public.pem" "$TARGET_STATE/.ssh/authorized_keys" <<'PY'
+  "$installer_python" - "$config" "$TARGET_ETC/operation-public.pem" "$TARGET_STATE/.ssh/authorized_keys" <<'PY'
 import json, pathlib, sys
 value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 pathlib.Path(sys.argv[2]).write_text(value["operation_public_key"], encoding="ascii")
@@ -302,9 +366,9 @@ install_target() {
     [ ! -L "$protected" ] || die "protected install path must not be a symlink: $protected"
   done
   check_distro
+  verify_release "$release"
   validate_config "$config"
   validate_managed_root_directories "$config"
-  verify_release "$release"
   version="$(cat "$release/VERSION")"
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "invalid release version"
   destination="$TARGET_BASE/releases/$version"
@@ -320,7 +384,7 @@ install_target() {
   # version path; only publish current after pip succeeds. Retry partial builds,
   # including installs made by the old relocating installer.
   if [ ! -f "$destination/.runtime-ready" ]; then
-    python3.11 -m venv "$destination/venv"
+    "$installer_python" -m venv "$destination/venv"
     "$destination/venv/bin/python" -m pip install --force-reinstall --no-index --find-links "$destination/wheelhouse" "a4diag-target-runtime==$version"
     touch "$destination/.runtime-ready"
   fi
@@ -409,7 +473,8 @@ uninstall_target() {
     "$TARGET_CURRENT/venv/bin/python" -m a4diag_target.repair_install drain "$TARGET_ROOT"
   fi
   if [ -f "$TARGET_STATE/executor/replay.sqlite3" ]; then
-    python3.11 - "$TARGET_STATE/executor/replay.sqlite3" <<'PY' || die "incomplete target transactions prevent uninstall"
+    select_python ""
+    "$installer_python" - "$TARGET_STATE/executor/replay.sqlite3" <<'PY' || die "incomplete target transactions prevent uninstall"
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 count = db.execute("SELECT count(*) FROM replay WHERE completed_at IS NULL").fetchone()[0]

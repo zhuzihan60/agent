@@ -15,10 +15,18 @@ if [ -n "${A4DIAG_TARGET_TRUSTED_KEY:-}" ]; then
 fi
 python3.11 tools/build_release.py "${verify_args[@]}"
 
+# Install with only the distribution PATH so hosts without python3.11 use the
+# Python runtime bundled in the release.
+SYSTEM_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 echo "target-distro-smoke: offline install with no managed resources"
-A4DIAG_TARGET_SKIP_SYSTEMD=1 \
+PATH="$SYSTEM_PATH" A4DIAG_TARGET_SKIP_SYSTEMD=1 \
   A4DIAG_TARGET_MACHINE_ID=0123456789abcdef0123456789abcdef \
   bash "$release/tools/install_target_lib.sh" install "$release" "$config"
+if ! PATH="$SYSTEM_PATH" command -v python3.11 >/dev/null 2>&1; then
+  echo "target-distro-smoke: no system python3.11; the bundled runtime must be in use"
+  ls /opt/a4diag-target/runtime/*/python/bin/python3.11 >/dev/null
+fi
 
 test -x /usr/libexec/a4diag/a4diag-transport-helper
 test "$(stat -c %a /usr/libexec/a4diag/a4diag-transport-helper)" = 755
@@ -28,7 +36,7 @@ grep -Fq 'restrict,command="/usr/libexec/a4diag/a4diag-transport-helper"' /var/l
 ! find /opt/a4diag-target /etc/a4diag-target /var/lib/a4diag-target -name '*private.pem' -print -quit | grep -q .
 
 echo "target-distro-smoke: idempotent reinstall"
-A4DIAG_TARGET_SKIP_SYSTEMD=1 \
+PATH="$SYSTEM_PATH" A4DIAG_TARGET_SKIP_SYSTEMD=1 \
   A4DIAG_TARGET_MACHINE_ID=0123456789abcdef0123456789abcdef \
   bash "$release/tools/install_target_lib.sh" install "$release" "$config"
 echo "target-distro-smoke: PASS"

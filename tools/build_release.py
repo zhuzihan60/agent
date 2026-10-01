@@ -58,6 +58,7 @@ EXPECTED_SYSTEMD_UNITS = frozenset(
         "a4diag-cleanup.service",
         "a4diag-cleanup.timer",
         "a4diag-core.service",
+        "a4diag-dashboard.service",
         "a4diag-plugin@.service",
         "a4diag-plugin@.socket",
     }
@@ -66,6 +67,14 @@ EXPECTED_TARGET_SYSTEMD_UNITS = frozenset(
     {"a4diag-target-executor.service", "a4diag-target-executor.socket",
      "a4diag-repair-helper@.service", "a4diag-repair-helper@.socket"}
 )
+
+# Bundled interpreter for hosts without python3.11 (python-build-standalone,
+# stripped install_only build). The digest is pinned; any other file is refused.
+PYTHON_RUNTIME_NAME = (
+    "cpython-3.11.16+20260929-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+)
+PYTHON_RUNTIME_SHA256 = "f05084f3fbd7a0c7ed762ea6fd2455976a463952bb5c3253fc6cdc777f84728d"
+PYTHON_RUNTIME_PATH = "runtime/python.tar.gz"
 
 FORBIDDEN_RUNTIME_LITERALS = (
     "t_11",
@@ -509,6 +518,31 @@ def sign_manifest(release_root: Path, signing_key: Path) -> None:
     )
 
 
+def stage_python_runtime(python_runtime: Path | None, release_root: Path) -> None:
+    """Copy the pinned standalone interpreter archive into the release."""
+    if python_runtime is None:
+        return
+    digest = hashlib.sha256(Path(python_runtime).read_bytes()).hexdigest()
+    if digest != PYTHON_RUNTIME_SHA256:
+        raise ValueError(f"python runtime digest mismatch: expected {PYTHON_RUNTIME_SHA256}")
+    destination = release_root / PYTHON_RUNTIME_PATH
+    destination.parent.mkdir()
+    shutil.copy2(python_runtime, destination)
+
+
+def verify_python_runtime(release_root: Path) -> None:
+    """A bundled runtime is optional, but if present it must be the pinned one."""
+    runtime_dir = release_root / "runtime"
+    present = ({path.relative_to(release_root).as_posix()
+                for path in runtime_dir.rglob("*") if path.is_file()}
+               if runtime_dir.is_dir() else set())
+    if present - {PYTHON_RUNTIME_PATH}:
+        raise ValueError(f"unexpected runtime files: {sorted(present - {PYTHON_RUNTIME_PATH})}")
+    runtime = release_root / PYTHON_RUNTIME_PATH
+    if runtime.is_file() and hashlib.sha256(runtime.read_bytes()).hexdigest() != PYTHON_RUNTIME_SHA256:
+        raise ValueError("bundled python runtime is not the pinned build")
+
+
 def assemble_release(
     project_root: Path,
     dependency_wheelhouse: Path,
@@ -516,6 +550,7 @@ def assemble_release(
     output: Path,
     *,
     signing_key: Path | None = None,
+    python_runtime: Path | None = None,
 ) -> None:
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
@@ -541,9 +576,14 @@ def assemble_release(
             project_root / "requirements-build.lock", staging / "requirements-build.lock"
         )
         shutil.copy2(project_root / "install.sh", staging / "install.sh")
+        # `a4diag setup` installs the matching target package on this host.
+        shutil.copy2(
+            project_root / "install-a4diag-target.sh", staging / "install-a4diag-target.sh"
+        )
         tools_dir = staging / "tools"
         tools_dir.mkdir()
         shutil.copy2(project_root / "tools" / "install_lib.sh", tools_dir / "install_lib.sh")
+        stage_python_runtime(python_runtime, staging)
         config_dir = staging / "config"
         config_dir.mkdir()
         shutil.copy2(
@@ -580,6 +620,7 @@ def assemble_target_release(
     output: Path,
     *,
     signing_key: Path | None = None,
+    python_runtime: Path | None = None,
 ) -> None:
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
@@ -606,6 +647,7 @@ def assemble_target_release(
             tools_dir / "install_target_lib.sh",
         )
         copy_target_systemd(project_root, staging / "systemd")
+        stage_python_runtime(python_runtime, staging)
         write_manifest(staging)
         if signing_key is not None:
             sign_manifest(staging, signing_key)
@@ -733,6 +775,9 @@ def verify_release(
         raise ValueError("release is missing install.sh")
     if not (release_root / "tools" / "install_lib.sh").is_file():
         raise ValueError("release is missing tools/install_lib.sh")
+    if not (release_root / "install-a4diag-target.sh").is_file():
+        raise ValueError("release is missing install-a4diag-target.sh")
+    verify_python_runtime(release_root)
 
 
 def verify_target_release(
@@ -788,6 +833,7 @@ def verify_target_release(
     for relative in ("install-a4diag-target.sh", "tools/install_target_lib.sh"):
         if not (release_root / relative).is_file():
             raise ValueError(f"target release is missing {relative}")
+    verify_python_runtime(release_root)
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +854,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     assemble_parser.add_argument("--builtin-wheel", type=Path, required=True)
     assemble_parser.add_argument("--output", type=Path, required=True)
     assemble_parser.add_argument("--signing-key", type=Path)
+    assemble_parser.add_argument("--python-runtime", type=Path)
     assemble_target_parser = subparsers.add_parser("assemble-target")
     assemble_target_parser.add_argument("--project-root", type=Path, required=True)
     assemble_target_parser.add_argument("--dependency-wheelhouse", type=Path, required=True)
@@ -816,6 +863,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     assemble_target_parser.add_argument("--target-wheel", type=Path, required=True)
     assemble_target_parser.add_argument("--output", type=Path, required=True)
     assemble_target_parser.add_argument("--signing-key", type=Path)
+    assemble_target_parser.add_argument("--python-runtime", type=Path)
     verify_source_parser = subparsers.add_parser("verify-source")
     verify_source_parser.add_argument("--project-root", type=Path, required=True)
     verify_release_parser = subparsers.add_parser("verify-release")
@@ -840,6 +888,7 @@ def main(argv: list[str] | None = None) -> int:
                 (args.core_wheel.resolve(), args.builtin_wheel.resolve()),
                 args.output.resolve(),
                 signing_key=args.signing_key.resolve() if args.signing_key else None,
+                python_runtime=args.python_runtime.resolve() if args.python_runtime else None,
             )
             return 0
         if args.command == "assemble-target":
@@ -849,6 +898,7 @@ def main(argv: list[str] | None = None) -> int:
                 (args.core_wheel.resolve(), args.builtin_wheel.resolve(), args.target_wheel.resolve()),
                 args.output.resolve(),
                 signing_key=args.signing_key.resolve() if args.signing_key else None,
+                python_runtime=args.python_runtime.resolve() if args.python_runtime else None,
             )
             return 0
         if args.command == "verify-source":

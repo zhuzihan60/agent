@@ -77,6 +77,8 @@ jobs:
           umask 077
           test -n "$RELEASE_SIGNING_MATERIAL"
           printf '%s' "$RELEASE_SIGNING_MATERIAL" > /tmp/a4diag-release-private.pem
+      - name: Fetch the pinned standalone Python runtime
+        run: bash tools/fetch_python_runtime.sh /tmp/a4diag-python-runtime.tar.gz
       - name: Assemble and sign the release
         run: |
           release_version="$(python -c 'from tools.build_release import RELEASE_VERSION; print(RELEASE_VERSION)')"
@@ -85,6 +87,7 @@ jobs:
             --dependency-wheelhouse /tmp/a4diag-wheelhouse \
             --core-wheel "dist/a4diag-${release_version}-py3-none-any.whl" \
             --builtin-wheel "packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-${release_version}-py3-none-any.whl" \
+            --python-runtime /tmp/a4diag-python-runtime.tar.gz \
             --output /tmp/a4diag-release \
             --signing-key /tmp/a4diag-release-private.pem
           python tools/build_release.py verify-release \
@@ -96,6 +99,7 @@ jobs:
             --core-wheel "dist/a4diag-${release_version}-py3-none-any.whl" \
             --builtin-wheel "packages/a4diag-builtin-plugins/dist/a4diag_builtin_plugins-${release_version}-py3-none-any.whl" \
             --target-wheel "packages/a4diag-target-runtime/dist/a4diag_target_runtime-${release_version}-py3-none-any.whl" \
+            --python-runtime /tmp/a4diag-python-runtime.tar.gz \
             --output /tmp/a4diag-target-release \
             --signing-key /tmp/a4diag-release-private.pem
           python tools/build_release.py verify-target-release \

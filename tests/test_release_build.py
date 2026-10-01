@@ -19,6 +19,7 @@ EXPECTED_SYSTEMD_UNITS = {
     "a4diag-cleanup.service",
     "a4diag-cleanup.timer",
     "a4diag-core.service",
+    "a4diag-dashboard.service",
     "a4diag-plugin@.service",
     "a4diag-plugin@.socket",
 }
@@ -107,6 +108,9 @@ class ReleaseBuildContractTests(unittest.TestCase):
         (project / "install.sh").write_text(
             "#!/usr/bin/env bash\nset -euo pipefail\n", encoding="utf-8"
         )
+        (project / "install-a4diag-target.sh").write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n", encoding="utf-8"
+        )
         (project / "tools").mkdir()
         (project / "tools" / "install_lib.sh").write_text(
             "#!/usr/bin/env bash\n", encoding="utf-8"
@@ -175,6 +179,7 @@ class ReleaseBuildContractTests(unittest.TestCase):
                     "VERSION",
                     "builtin-plugins",
                     "config",
+                    "install-a4diag-target.sh",
                     "install.sh",
                     "requirements-build.lock",
                     "requirements.lock",
@@ -739,7 +744,8 @@ class ReleaseBuildContractTests(unittest.TestCase):
             self.assertTrue(systemd_dir.is_dir())
             staged_units = {path.name for path in systemd_dir.iterdir() if path.is_file()}
             self.assertEqual(staged_units, EXPECTED_SYSTEMD_UNITS)
-            self.assertEqual(len(list(systemd_dir.iterdir())), 7)
+            # Every unit plus the tmpfiles.d and sysusers.d directories.
+            self.assertEqual(len(list(systemd_dir.iterdir())), len(EXPECTED_SYSTEMD_UNITS) + 2)
             self.assertTrue((systemd_dir / "tmpfiles.d" / "a4diag.conf").is_file())
             self.assertTrue((systemd_dir / "sysusers.d" / "a4diag.conf").is_file())
 
