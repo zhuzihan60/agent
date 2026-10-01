@@ -11,12 +11,58 @@ A4Diag 是一个基于 LangGraph 的通用 Linux 故障诊断与受控修复 Age
 项目默认 **只读**。Agent 只能访问管理员显式注册并授权的目标，不会根据 IP、告警中的
 `instance` 字段或“第一个目标”进行回退匹配。
 
-## 快速安装
+## 三步上手（单机）
+
+在一台 Linux 服务器上同时装好控制端和被控端，诊断这台机器自己：
+
+```bash
+# 1. 安装控制端（自带 Python，不需要事先安装任何运行环境）
+curl -fsSL https://github.com/zhuzihan60/agent/releases/latest/download/install-a4diag.sh | sudo bash
+
+# 2. 设置：选择大模型、输入 API key、选择要监控的服务（例如 nginx）
+sudo a4diag setup
+
+# 3. 出问题时，用一句话描述现象
+sudo a4diag diagnose "网站打不开"
+```
+
+`a4diag setup` 会自动下载并安装同版本的被控端组件，把本机登记为只读目标 `local`。
+支持 DeepSeek、通义千问（阿里云百炼）、OpenAI、本机 Ollama 和其他 OpenAI 兼容服务；
+API key 以 0600 权限保存在 `/etc/a4diag/secrets/`，不会写进配置文件。之后想更换模型或
+监控的服务，再运行一次 `sudo a4diag setup` 即可。
+
+`a4diag diagnose` 会收集已登记服务的状态和日志，交给模型分析，在终端输出原因和建议，
+完整报告保存在 `/var/lib/a4diag/reports/`。默认 **只诊断不修改**。
+
+### 状态网页
+
+安装后自动启动只读状态网页 `http://127.0.0.1:8765`，显示控制端服务、模型、被控端在线与
+身份状态，以及最近的诊断结果。网页没有任何修改操作。
+
+| 控制端在哪里 | 在 Windows 上怎么打开 |
+| --- | --- |
+| WSL | 直接在浏览器打开 `http://localhost:8765` |
+| 远程 Linux 服务器 | `ssh -L 8765:127.0.0.1:8765 用户@服务器`，再打开 `http://localhost:8765` |
+| 局域网内直接访问 | `sudo a4diag setup --dashboard-lan`，按提示用带令牌的地址打开 |
+
+默认只监听本机回环地址；开放到局域网时必须使用 setup 生成的访问令牌。
+
+## 两个安装包
+
+| 安装包 | 装在哪里 | 安装命令 |
+| --- | --- | --- |
+| 控制端 `a4diag.tar.gz` | 运行 Agent 的机器 | `install-a4diag.sh` |
+| 被控端 `a4diag-target.tar.gz` | 每台要诊断的机器 | `install-a4diag-target.sh` |
+
+两个包都经过签名，并各自附带 Python 3.11 运行环境：系统已有 `python3.11` 时使用系统的，
+没有时自动使用包内的。单机使用时，被控端由 `a4diag setup` 自动安装，无需手动下载。
+管理远程服务器见下文 [添加远程被控端](#添加远程被控端)。
+
+## 安装说明
 
 ### 系统要求
 
 - x86_64 Linux；控制端要求 systemd 247+
-- Python 3.11
 - `curl`、`openssl`、`sha256sum`、`tar`
 - root 权限
 
@@ -31,12 +77,7 @@ A4Diag 是一个基于 LangGraph 的通用 Linux 故障诊断与受控修复 Age
 
 Alibaba Cloud Linux 3、Rocky/AlmaLinux 8 的旧版 systemd 不满足控制端要求，CI 验证安装器明确拒绝。目标端单独验证 Alibaba Cloud Linux 3、Rocky Linux 9、Ubuntu 24.04 和 Debian 12。
 
-### 一键安装
-
-```bash
-curl -fsSL https://github.com/zhuzihan60/agent/releases/latest/download/install-a4diag.sh | sudo bash
-sudo a4diag self-check --offline
-```
+### 安装过程
 
 安装脚本会下载最新的 GitHub Release，先使用脚本内置的 RSA 公钥验证
 `a4diag.tar.gz` 的 SHA-256 签名，再解压归档。归档内部的 `MANIFEST.json`、
@@ -70,42 +111,71 @@ plugins: []
   不会盲目重复 apply。
 - **审计失败即只读**：审计哈希链损坏或插件 pin 校验失败会强制锁定为只读模式。
 
-## 注册目标
+## 添加远程被控端
 
-使用严格 JSON 输入注册本机或 SSH 目标。下面的地址属于 RFC 5737 文档保留网段，
-仅用于示例：
+下面以被控端 `web-1`（地址 `192.0.2.10`，RFC 5737 文档示例地址）为例。被控端只接受
+来自控制端地址的、受限于固定命令的 SSH 连接。
+
+**1. 在控制端生成被控端安装材料**（私钥只留在控制端）：
+
+```bash
+sudo a4diag target bootstrap web-1 --output /root/a4diag-web-1 --source-cidr <控制端IP>/32
+```
+
+**2. 在 `/root/a4diag-web-1/target-install.json` 中登记要诊断的服务**，并把
+`confirm_managed_resources` 改为 `ENABLE`：
+
+```json
+"managed_resources": [{"capability": "services", "resource": "nginx.service"}],
+"confirm_managed_resources": "ENABLE"
+```
+
+**3. 把 `target-install.json` 复制到被控端，在被控端安装被控端包：**
+
+```bash
+curl -fsSLO https://github.com/zhuzihan60/agent/releases/latest/download/install-a4diag-target.sh
+sudo A4DIAG_TARGET_INSTALL_CONFIG="$PWD/target-install.json" bash install-a4diag-target.sh
+```
+
+**4. 回到控制端，固定被控端的 SSH 主机密钥：**
+
+```bash
+ssh-keyscan -t ed25519 192.0.2.10 | sudo tee /etc/a4diag/secrets/targets/web-1/known_hosts
+sudo chown a4diag:a4diag /etc/a4diag/secrets/targets/web-1/known_hosts
+sudo chmod 0600 /etc/a4diag/secrets/targets/web-1/known_hosts
+```
+
+请通过可信渠道核对指纹（例如在被控端运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）。
+
+**5. 在控制端登记。** `a4diag init` 写入完整配置，请同时保留已有的模型和目标：
 
 ```json
 {
-  "targets": [
-    {
-      "id": "target-1",
-      "mode": "ssh",
-      "host": "192.0.2.10",
-      "port": 22,
-      "user": "a4diag",
-      "capabilities": [
-        {
-          "name": "files",
-          "actions": ["replace"],
-          "resources": ["/etc/example/**"]
-        }
-      ]
-    }
-  ]
+  "global_mode": "read_only",
+  "model": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat",
+            "api_key_ref": "file:model-api-key"},
+  "targets": [{
+    "id": "web-1", "mode": "ssh", "host": "192.0.2.10", "port": 22, "user": "a4diag-target",
+    "transport": "transport-ssh-web-1",
+    "identity_file_ref": "file:targets/web-1/ssh-ed25519",
+    "known_hosts_ref": "file:targets/web-1/known_hosts",
+    "operation_signing_key_ref": "file:targets/web-1/operation-ed25519.pem",
+    "evidence_sources": [
+      {"id": "nginx-state", "kind": "service_state", "resource": "nginx.service"},
+      {"id": "nginx-logs", "kind": "service_logs", "resource": "nginx.service"}
+    ],
+    "recovery_checks": [{"id": "nginx-active", "kind": "service_active", "resource": "nginx.service"}]
+  }]
 }
 ```
 
 ```bash
-sudo a4diag init --input target-request.json --output /etc/a4diag/config.yaml
-sudo a4diag self-check --offline
+sudo a4diag init --input web-1.json
+sudo a4diag diagnose --target web-1 "网站打不开"
 ```
 
-`identity_ref` 由初始化流程根据目标 ID 生成，不能由输入文件指定。首次注册后仍保持只读；
-写能力必须由管理员按照部署策略另行显式开启。
-
-详细迁移步骤见
-[v0.3 → v0.4 迁移指南](docs/migration/v0.3-to-v0.4.md)。
+登记时会实时核对被控端的 machine-id、系统版本、systemd 和 SSH 主机密钥，之后任何一项变化
+都会在执行前被拒绝。登记后仍保持只读；写能力必须由管理员按照部署策略另行显式开启。
 
 ## HIGH 风险人工审批
 
@@ -163,6 +233,7 @@ sudo A4DIAG_TRUSTED_KEY=/path/to/a4diag-release-public.pem \
 
 ```bash
 sudo a4diag self-check --offline
+sudo systemctl status a4diag-dashboard.service
 sudo systemctl status a4diag-core.service
 sudo a4diag plugin list --json
 sudo a4diag approvals list --json
@@ -192,8 +263,14 @@ python tools/build_release.py verify-source --project-root .
 ## 卸载
 
 ```bash
-sudo systemctl disable --now a4diag-core.service
-sudo rm -rf /opt/a4diag/releases /opt/a4diag/current
+sudo systemctl disable --now a4diag-core.service a4diag-dashboard.service
+sudo rm -rf /opt/a4diag/releases /opt/a4diag/current /opt/a4diag/runtime
+```
+
+单机设置还安装了被控端组件，可用其安装脚本卸载（保留审计状态）：
+
+```bash
+sudo A4DIAG_TARGET_CONFIRM_UNINSTALL=REMOVE bash /opt/a4diag-target/current/tools/install_target_lib.sh uninstall
 ```
 
 `/etc/a4diag` 和 `/var/lib/a4diag` 包含配置、审批、事务与审计数据，默认不会删除。

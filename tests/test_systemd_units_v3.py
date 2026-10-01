@@ -19,6 +19,7 @@ EXPECTED_UNITS = frozenset(
         "a4diag-cleanup.service",
         "a4diag-cleanup.timer",
         "a4diag-core.service",
+        "a4diag-dashboard.service",
         "a4diag-plugin@.service",
         "a4diag-plugin@.socket",
         "a4diag-target-executor.service",
@@ -112,6 +113,17 @@ def test_core_cannot_write_configuration() -> None:
     # the plugin socket directory.
     assert "/var/lib/a4diag" in read_write
     assert "/run/a4diag" in read_write
+
+
+def test_dashboard_is_unprivileged_and_cannot_write_anything() -> None:
+    service = read_deploy_units()["a4diag-dashboard.service"]["Service"]
+    assert service["User"] == "a4diag" and service["Group"] == "a4diag"
+    assert service["ExecStart"] == "/opt/a4diag/current/venv/bin/a4diag dashboard"
+    assert service["ProtectSystem"] == "strict"
+    assert "ReadWritePaths" not in service
+    assert service["CapabilityBoundingSet"] == ""
+    assert service["NoNewPrivileges"] == "yes"
+    assert service["ProtectHome"] == "yes"
 
 
 def test_core_restricts_capabilities_and_services() -> None:
