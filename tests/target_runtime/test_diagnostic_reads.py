@@ -178,15 +178,27 @@ def test_service_logs_fixed_tail_and_byte_limit(tmp_path: Path, monkeypatch) -> 
 
     class LogRunner:
         async def run(self, argv, *, payload, output_limit_bytes):
-            assert argv == ["/usr/bin/journalctl", "--no-pager", "--quiet", "--output=short-iso", "--lines=200", "--unit=demo.service"]
+            assert argv == ["/usr/bin/journalctl", "--no-pager", "--quiet", "--output=short-iso",
+                            "--reverse", "--lines=200", "--unit=demo.service"]
             assert output_limit_bytes == 100
+            # Newest first, bounded at 100 bytes: the oldest entry is cut mid-line.
+            newest_first = "t3 stopped\nt2 multi-line\n  continued\nt1 started\n" + "t0 " + "x" * 100
             return RunOutcome(started=True, timed_out=False, returncode=0,
-                              stdout="x" * 100, stdout_truncated=True)
+                              stdout=newest_first[:100], stdout_truncated=True)
 
     monkeypatch.setattr(diagnostics, "SubprocessRunner", LogRunner)
     assert read(tmp_path, kind="service_logs", unit="demo.service") == {
-        "content": "x" * 100, "truncated": True,
+        "content": "t1 started\nt2 multi-line\n  continued\nt3 stopped\n", "truncated": True,
     }
+
+
+def test_service_logs_untruncated_output_is_restored_to_chronological_order() -> None:
+    from a4diag_target.diagnostics import _chronological_log_tail
+
+    assert _chronological_log_tail("b\na\n", 100, truncated=False) == {
+        "content": "a\nb\n", "truncated": False,
+    }
+    assert _chronological_log_tail("", 100, truncated=False) == {"content": "", "truncated": False}
 
 
 def test_service_read_deadline_cancels_command(tmp_path: Path, monkeypatch) -> None:

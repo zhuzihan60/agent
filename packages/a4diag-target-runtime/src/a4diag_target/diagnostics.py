@@ -22,6 +22,29 @@ def _bounded_response(raw: bytes, limit: int, *, truncated: bool = False) -> dic
             "truncated": truncated or len(raw) > limit}
 
 
+def _chronological_log_tail(newest_first: str, limit: int, *, truncated: bool) -> dict[str, object]:
+    """Restore oldest-first order for ``journalctl --reverse`` output.
+
+    Indented continuation lines stay with their entry. When the output was
+    bounded, the last (oldest) entry may be cut, so it is dropped.
+    """
+    entries: list[list[str]] = []
+    for line in newest_first.splitlines():
+        if entries and line[:1] in (" ", "\t"):
+            entries[-1].append(line)
+        else:
+            entries.append([line])
+    if truncated and entries:
+        entries.pop()
+    content = "".join(line + "\n" for entry in reversed(entries) for line in entry)
+    while len(content.encode("utf-8")) > limit and entries:
+        # Decoding replacement characters can grow the text; shed oldest entries.
+        truncated = True
+        entries.pop()
+        content = "".join(line + "\n" for entry in reversed(entries) for line in entry)
+    return {"content": content, "truncated": truncated}
+
+
 def _read_regular_file(root: Path, path: str, limit: int) -> bytes:
     # Open each ancestor relative to a pinned directory fd. O_NONBLOCK avoids
     # blocking on a malicious FIFO before fstat rejects non-regular files.
@@ -90,7 +113,9 @@ async def read_diagnostic(root: Path, request: dict[str, object], policy: Target
                 "--property=" + ",".join(_STATE_PROPERTIES), "--", params.unit]
         command_limit = 65_536
     else:
-        argv = ["/usr/bin/journalctl", "--no-pager", "--quiet", "--output=short-iso", "--lines=200", "--unit=" + params.unit]
+        # Newest first, so the byte bound keeps the most recent entries.
+        argv = ["/usr/bin/journalctl", "--no-pager", "--quiet", "--output=short-iso", "--reverse",
+                "--lines=200", "--unit=" + params.unit]
         command_limit = limit
     try:
         outcome = await asyncio.wait_for(SubprocessRunner().run(
@@ -101,7 +126,7 @@ async def read_diagnostic(root: Path, request: dict[str, object], policy: Target
     if not outcome.started or outcome.timed_out or outcome.returncode != 0:
         return {"ok": False, "reason": "read_failed"}
     if params.kind is ReadKind.SERVICE_LOGS:
-        return _bounded_response(outcome.stdout.encode("utf-8"), limit, truncated=outcome.stdout_truncated)
+        return _chronological_log_tail(outcome.stdout, limit, truncated=outcome.stdout_truncated)
     if outcome.stdout_truncated:
         return {"ok": False, "reason": "read_failed"}
     values = {}
